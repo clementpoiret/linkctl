@@ -18,6 +18,8 @@ pub enum ProfileState {
 pub enum Operation {
     /// A non-mutating operation.
     ReadOnly,
+    /// A range-checked standard V4L2 control write.
+    StandardControlWrite,
     /// A raw Extension Unit write.
     RawXuWrite,
     /// A write to a selector with unknown semantics.
@@ -52,7 +54,7 @@ impl SafetyPolicy {
     /// Authorize an operation or return a stable denial.
     pub fn authorize(&self, operation: Operation) -> Result<(), LinkError> {
         match operation {
-            Operation::ReadOnly => Ok(()),
+            Operation::ReadOnly | Operation::StandardControlWrite => Ok(()),
             Operation::VendorProfileWrite(profile) => Err(LinkError::new(
                 ErrorKind::ProtocolProfileMismatch,
                 match profile {
@@ -96,6 +98,7 @@ mod tests {
     fn read_only_operations_are_allowed() {
         let policy = SafetyPolicy::new(SafetyConfig::default());
         assert!(policy.authorize(Operation::ReadOnly).is_ok());
+        assert!(policy.authorize(Operation::StandardControlWrite).is_ok());
     }
 
     #[test]

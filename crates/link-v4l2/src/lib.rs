@@ -1,4 +1,6 @@
-//! Read-only V4L2 formats, controls, and capability inventory.
+//! V4L2 inventory and validated standard-control access.
+
+pub mod production;
 
 use std::fs::File;
 

@@ -5,12 +5,15 @@ use std::{
     ffi::OsStr,
     fs, io,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use link_core::{
     ErrorKind, LinkError,
+    device::DeviceState,
     probe::{DeviceListEntry, DeviceMode, NodeAssociation, ProbeIssue, UsbIdentity, VolumeReport},
 };
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use sha2::{Digest, Sha256};
 
 /// A udev node associated with one physical USB device.
@@ -143,6 +146,53 @@ impl DiscoveredDevice {
                 || node.association.by_id.iter().any(|path| path == selector)
                 || node.association.by_path.iter().any(|path| path == selector)
         })
+    }
+
+    /// Return the exact video node named by a path or stable alias selector.
+    #[must_use]
+    pub fn selected_video_node(&self, selector: &str) -> Option<&DiscoveredNode> {
+        self.video_nodes.iter().find(|node| {
+            node.association.path == selector
+                || node.association.by_id.iter().any(|path| path == selector)
+                || node.association.by_path.iter().any(|path| path == selector)
+        })
+    }
+}
+
+/// Nonblocking udev monitor used by production hotplug commands.
+pub struct HotplugMonitor {
+    socket: udev::MonitorSocket,
+}
+
+impl HotplugMonitor {
+    /// Monitor USB device events. Higher layers rescan and diff normalized snapshots.
+    pub fn new() -> Result<Self, LinkError> {
+        let socket = udev::MonitorBuilder::new()
+            .and_then(|builder| builder.match_subsystem("usb"))
+            .and_then(udev::MonitorBuilder::listen)
+            .map_err(udev_error)?;
+        Ok(Self { socket })
+    }
+
+    /// Wait for at least one USB event, draining a burst before returning.
+    pub fn wait(&self, timeout: Duration) -> Result<bool, LinkError> {
+        let timeout = Timespec {
+            tv_sec: i64::try_from(timeout.as_secs()).unwrap_or(i64::MAX),
+            tv_nsec: i64::from(timeout.subsec_nanos()),
+        };
+        let mut fds = [PollFd::new(&self.socket, PollFlags::IN)];
+        let ready = poll(&mut fds, Some(&timeout)).map_err(|error| {
+            LinkError::new(ErrorKind::IoFailure, "failed while waiting for udev events")
+                .with_detail("reason", error.to_string())
+        })?;
+        if ready == 0 {
+            return Ok(false);
+        }
+        let mut observed = false;
+        for _event in self.socket.iter() {
+            observed = true;
+        }
+        Ok(observed)
     }
 }
 
@@ -439,6 +489,29 @@ pub fn kernel_release() -> String {
         .unwrap_or_else(|_| "unknown".into())
 }
 
+/// Inspect whether the current process can open an associated video node for controls.
+#[must_use]
+pub fn availability_state(device: &DiscoveredDevice) -> DeviceState {
+    if device.mode() == DeviceMode::UDisk {
+        return DeviceState::Maintenance;
+    }
+    let Some(node) = device.video_nodes.first() else {
+        return DeviceState::Unavailable;
+    };
+    match fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&node.association.path)
+    {
+        Ok(_) => DeviceState::Ready,
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            DeviceState::PermissionDenied
+        }
+        Err(error) if error.raw_os_error() == Some(16) => DeviceState::Busy,
+        Err(_) => DeviceState::Unavailable,
+    }
+}
+
 /// Return true for UVC devices and the camera's known USB personalities.
 #[must_use]
 pub fn is_listable(device: &DiscoveredDevice) -> bool {
@@ -505,6 +578,28 @@ mod tests {
         assert!(device.matches_selector("secret"));
         assert!(device.matches_selector("usb:1-2.1"));
         assert!(!device.matches_selector("1-2.1"));
+    }
+
+    #[test]
+    fn exact_video_selectors_retain_the_selected_node() {
+        let mut device = device();
+        device.video_nodes.push(super::DiscoveredNode {
+            association: link_core::probe::NodeAssociation {
+                path: "/dev/video8".into(),
+                by_id: vec!["/dev/v4l/by-id/example".into()],
+                by_path: Vec::new(),
+            },
+            syspath: "/sys/example/video8".into(),
+            sysname: "video8".into(),
+        });
+        assert_eq!(
+            device
+                .selected_video_node("/dev/v4l/by-id/example")
+                .unwrap()
+                .association
+                .path,
+            "/dev/video8"
+        );
     }
 
     #[test]

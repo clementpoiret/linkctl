@@ -12,3 +12,5 @@
   documentation.
 - If you need the camera to be plugged in, and it is not, ask the user to plug the camera, and pause until it's done.
 - Always keep the doc and README.md up-to-date.
+- Always describe the jujutsu revision you are working in for your current task (e.g.,
+  `jj describe -m "feat: some conventional commit message"`).

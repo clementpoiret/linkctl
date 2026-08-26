@@ -4,11 +4,13 @@
 
 ```sh
 linkctl device list
-linkctl --format json --device /dev/video2 device probe
+linkctl --format json --device all device probe
 linkctl --device usb:1-1 device probe
 ```
 
-The probe reads USB descriptors, classifies every associated video node, enumerates current/advertised V4L2 formats and standard controls, parses UVC Extension Units, asks advertised selectors only for `GET_LEN` and `GET_INFO`, and correlates ALSA/PipeWire audio sources. The backend does not set controls, negotiate formats, start streams, detach drivers, reset USB devices, or read XU payloads.
+Read-only `device info`, `caps controls`, and `device probe` accept `--device all`. A reusable bundle contains one physical device, so `device probe --bundle` requires an exact selector.
+
+The probe reads USB descriptors, classifies every associated video node, enumerates current/advertised V4L2 formats and standard controls, parses UVC Extension Units, asks advertised selectors only for `GET_LEN` and `GET_INFO`, and correlates ALSA/PipeWire audio sources. The probe does not set controls, negotiate formats, start streams, detach drivers, reset USB devices, or read XU payloads.
 
 ## Reusable bundles
 

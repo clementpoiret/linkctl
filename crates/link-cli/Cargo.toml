@@ -20,6 +20,8 @@ sdk = ["dep:link-sdk-bridge", "link-sdk-bridge/sdk"]
 
 [dependencies]
 clap.workspace = true
+clap_complete.workspace = true
+humantime.workspace = true
 link-audio.workspace = true
 link-core.workspace = true
 link-effects = { workspace = true, optional = true }

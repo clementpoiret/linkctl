@@ -29,7 +29,10 @@ fn help_and_version_advertise_only_implemented_commands() {
     assert!(stdout.contains("--unsafe-xu"));
     assert!(stdout.contains("Commands:"));
     assert!(stdout.contains("device"));
-    assert!(!stdout.contains("control set"));
+    assert!(stdout.contains("control"));
+    assert!(stdout.contains("image"));
+    assert!(stdout.contains("doctor"));
+    assert!(stdout.contains("completion"));
 
     let version = run(&["--version"]);
     assert!(version.status.success());
@@ -44,6 +47,8 @@ fn device_help_describes_read_only_inventory_commands() {
     assert!(help.status.success());
     let stdout = String::from_utf8(help.stdout).expect("UTF-8 help");
     assert!(stdout.contains("list"));
+    assert!(stdout.contains("info"));
+    assert!(stdout.contains("watch"));
     assert!(stdout.contains("probe"));
 
     let probe_help = run(&["device", "probe", "--help"]);
@@ -51,6 +56,55 @@ fn device_help_describes_read_only_inventory_commands() {
     let stdout = String::from_utf8(probe_help.stdout).expect("UTF-8 help");
     assert!(stdout.contains("--bundle"));
     assert!(stdout.contains("--include-serial"));
+}
+
+#[test]
+fn control_and_image_help_expose_only_non_mechanical_commands() {
+    let control = run(&["control", "--help"]);
+    assert!(control.status.success());
+    let stdout = String::from_utf8(control.stdout).expect("UTF-8 help");
+    for command in ["list", "get", "set", "reset", "watch"] {
+        assert!(stdout.contains(command));
+    }
+
+    let image = run(&["image", "--help"]);
+    assert!(image.status.success());
+    let stdout = String::from_utf8(image.stdout).expect("UTF-8 help");
+    assert!(stdout.contains("white-balance"));
+    assert!(stdout.contains("anti-flicker"));
+    assert!(!stdout.contains("pan"));
+    assert!(!stdout.contains("tilt"));
+    assert!(!stdout.contains("gimbal"));
+}
+
+#[test]
+fn completion_generates_raw_shell_source() {
+    let output = run(&["completion", "bash"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 completion");
+    assert!(stdout.contains("linkctl"));
+
+    let output = run(&["--format", "json", "completion", "bash"]);
+    assert_eq!(output.status.code(), Some(2));
+    let value: Value = serde_json::from_slice(&output.stdout).expect("JSON error");
+    assert_eq!(value["command"], "completion");
+}
+
+#[test]
+fn watch_rejects_single_json_output_before_opening_hardware() {
+    let output = run(&["--format", "json", "device", "watch"]);
+    assert_eq!(output.status.code(), Some(2));
+    let value: Value = serde_json::from_slice(&output.stdout).expect("JSON error");
+    assert_eq!(value["command"], "device.watch");
+}
+
+#[test]
+fn forced_nonstandard_control_backend_is_reported_as_unsupported() {
+    let output = run(&["--format", "json", "--backend", "vendor", "control", "list"]);
+    assert_eq!(output.status.code(), Some(4));
+    let value: Value = serde_json::from_slice(&output.stdout).expect("JSON error");
+    assert_eq!(value["command"], "control.list");
+    assert_eq!(value["error"]["details"]["requested_backend"], "vendor");
 }
 
 #[test]

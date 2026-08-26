@@ -1,6 +1,8 @@
 //! Shared contracts for the `linkctl` command-line tools and services.
 
 pub mod config;
+pub mod control;
+pub mod device;
 pub mod error;
 pub mod logging;
 pub mod output;

@@ -34,4 +34,6 @@ Local files under `specs/` are product inputs, not repository content. They are 
 
 ## Unsafe Rust and native boundaries
 
-Unsafe Rust is forbidden across the workspace. A future low-level ioctl implementation must confine every unsafe block to its dedicated backend crate, document the kernel ABI invariant, and add structure-layout and malformed-input tests before relaxing that crate's lint.
+Unsafe Rust is forbidden by default across the workspace. Low-level ioctl implementations must confine each exception to a dedicated backend module, document the kernel ABI invariant, and add structure-layout and malformed-input tests before relaxing that module's lint.
+
+Hardware control tests must capture the current value immediately before a write and restore that exact value afterward, including automatic/manual parent controls. Start with `--dry-run`; never exercise pan, tilt, reset, firmware, calibration, or unknown XU writes. A test that cannot prove restoration is a manual experiment requiring an explicit review.

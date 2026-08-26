@@ -25,9 +25,10 @@ publish = false
 [workspace.dependencies]
 alsa = "0.12.1"
 clap = { version = "4.6.6", features = ["derive", "env"] }
+clap_complete = "4.6.6"
 humantime = "2.3.0"
 pipewire = "0.10.1"
-rustix = "1.1.4"
+rustix = { version = "1.1.4", features = ["event"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
