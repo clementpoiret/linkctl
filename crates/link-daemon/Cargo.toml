@@ -1,0 +1,26 @@
+[package]
+name = "link-daemon"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+daemon = ["dep:link-ipc"]
+gstreamer = ["dep:link-media", "link-media/gstreamer"]
+pipewire = ["dep:link-audio", "link-audio/pipewire"]
+host-ai = ["dep:link-effects", "link-effects/host-ai"]
+network = ["dep:link-ipc", "dep:link-media", "link-ipc/network", "link-media/network"]
+sdk = ["dep:link-sdk-bridge", "link-sdk-bridge/sdk"]
+
+[dependencies]
+link-audio = { workspace = true, optional = true }
+link-core.workspace = true
+link-effects = { workspace = true, optional = true }
+link-ipc = { workspace = true, optional = true }
+link-media = { workspace = true, optional = true }
+link-sdk-bridge = { workspace = true, optional = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v17
+        with:
+          name: devenv
+      - name: Install devenv
+        run: nix profile add nixpkgs#devenv
+      - name: Formatting
+        run: devenv shell -- cargo fmt --all -- --check
+      - name: Clippy
+        run: devenv shell -- cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Tests
+        run: devenv shell -- cargo test --workspace --all-features --locked
+      - name: Minimal feature set
+        run: devenv shell -- cargo check --workspace --all-targets --no-default-features --locked
+      - name: Complete feature set
+        run: devenv shell -- cargo check --workspace --all-targets --all-features --locked
+      - name: Dependency policy
+        run: devenv shell -- cargo deny --all-features check

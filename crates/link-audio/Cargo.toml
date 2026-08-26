@@ -1,0 +1,16 @@
+[package]
+name = "link-audio"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+pipewire = []
+
+[dependencies]
+link-core.workspace = true
+
+[lints]
+workspace = true
