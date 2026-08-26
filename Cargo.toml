@@ -23,15 +23,21 @@ repository = "https://github.com/clementpoiret/linkctl"
 publish = false
 
 [workspace.dependencies]
+alsa = "0.12.1"
 clap = { version = "4.6.6", features = ["derive", "env"] }
 humantime = "2.3.0"
+pipewire = "0.10.1"
+rustix = "1.1.4"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+sha2 = "0.11.0"
 tempfile = "3.27.0"
 thiserror = "2.0.20"
 toml = "0.9.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+udev = "0.9.3"
+v4l2r = "0.0.8"
 
 link-audio = { path = "crates/link-audio", version = "=0.1.0" }
 link-core = { path = "crates/link-core", version = "=0.1.0" }
@@ -40,6 +46,8 @@ link-ipc = { path = "crates/link-ipc", version = "=0.1.0" }
 link-media = { path = "crates/link-media", version = "=0.1.0" }
 link-profiles = { path = "crates/link-profiles", version = "=0.1.0" }
 link-sdk-bridge = { path = "crates/link-sdk-bridge", version = "=0.1.0" }
+link-uvc-xu = { path = "crates/link-uvc-xu", version = "=0.1.0" }
+link-v4l2 = { path = "crates/link-v4l2", version = "=0.1.0" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

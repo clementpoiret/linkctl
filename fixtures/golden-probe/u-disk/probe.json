@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "output_schema_version": 1,
+  "captured_unix_ms": 1787766121159,
+  "application_version": "0.1.0",
+  "host": {
+    "kernel_release": "7.2.0-cachyos-lto",
+    "architecture": "x86_64"
+  },
+  "device": {
+    "stable_id": "usb-00fc3a91216f70b1",
+    "model": "A9 Platform",
+    "mode": "u-disk",
+    "usb": {
+      "vendor_id": 1802,
+      "product_id": 16422,
+      "device_revision": 1,
+      "manufacturer": "AmbarellaInc",
+      "product": "A9 Platform",
+      "serial": null,
+      "topology": "1-1",
+      "descriptor_sha256": "8c9226df8b126f700d738b42f38c0163549a37a19753832527ce27742d3d7f2e"
+    },
+    "video_nodes": [],
+    "media_nodes": [],
+    "audio_nodes": [],
+    "volumes": [
+      {
+        "path": "/dev/sda",
+        "label": null,
+        "filesystem": null,
+        "mounted": false
+      },
+      {
+        "path": "/dev/sda1",
+        "label": "LINK_2C_PRO",
+        "filesystem": "vfat",
+        "mounted": false
+      }
+    ],
+    "profile_id": "insta360-link-2c-pro"
+  },
+  "video": [],
+  "extension_units": [],
+  "audio": {
+    "alsa": [],
+    "pipewire": [],
+    "pipewire_compiled": false,
+    "pipewire_available": false,
+    "issues": []
+  },
+  "firmware": {
+    "version": null,
+    "attempted_sources": [
+      "usb-descriptors",
+      "read-only-profile"
+    ],
+    "note": "no verified firmware-version source is available"
+  },
+  "profile": {
+    "profile_id": "insta360-link-2c-pro",
+    "reasons": [
+      "exact USB revision and descriptor fingerprint match"
+    ],
+    "writable": false
+  },
+  "redaction": {
+    "serial_included": false,
+    "omitted": [
+      "usernames",
+      "home-paths",
+      "mount-paths",
+      "credentials",
+      "media"
+    ]
+  },
+  "issues": []
+}

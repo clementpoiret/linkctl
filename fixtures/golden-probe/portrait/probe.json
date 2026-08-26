@@ -1,0 +1,2011 @@
+{
+  "schema_version": 1,
+  "output_schema_version": 1,
+  "captured_unix_ms": 1787765473129,
+  "application_version": "0.1.0",
+  "host": {
+    "kernel_release": "7.2.0-cachyos-lto",
+    "architecture": "x86_64"
+  },
+  "device": {
+    "stable_id": "link2cpro-70db1f352a55350b",
+    "model": "Insta360 Link 2C Pro",
+    "mode": "camera",
+    "usb": {
+      "vendor_id": 11802,
+      "product_id": 19461,
+      "device_revision": 512,
+      "manufacturer": "Insta360",
+      "product": "Insta360 Link 2C Pro",
+      "serial": null,
+      "topology": "1-1",
+      "descriptor_sha256": "7a60c8dd0f5e3d83e6c1c1fb245d96e02cc4ea6fdea8c10cc5a2e3b1094a2cc8"
+    },
+    "video_nodes": [
+      {
+        "path": "/dev/video2",
+        "by_id": [
+          "/dev/v4l/by-id/usb-Insta360_Insta360_Link_2C_Pro-video-index0"
+        ],
+        "by_path": [
+          "/dev/v4l/by-path/pci-0000:c5:00.3-usb-0:1:1.0-video-index0",
+          "/dev/v4l/by-path/pci-0000:c5:00.3-usbv2-0:1:1.0-video-index0"
+        ]
+      },
+      {
+        "path": "/dev/video3",
+        "by_id": [
+          "/dev/v4l/by-id/usb-Insta360_Insta360_Link_2C_Pro-video-index1"
+        ],
+        "by_path": [
+          "/dev/v4l/by-path/pci-0000:c5:00.3-usb-0:1:1.0-video-index1",
+          "/dev/v4l/by-path/pci-0000:c5:00.3-usbv2-0:1:1.0-video-index1"
+        ]
+      }
+    ],
+    "media_nodes": [
+      {
+        "path": "/dev/media1",
+        "by_id": [],
+        "by_path": []
+      }
+    ],
+    "audio_nodes": [
+      {
+        "path": "/dev/snd/controlC3",
+        "by_id": [
+          "/dev/snd/by-id/usb-Insta360_Insta360_Link_2C_Pro-02"
+        ],
+        "by_path": [
+          "/dev/snd/by-path/pci-0000:c5:00.3-usb-0:1:1.2",
+          "/dev/snd/by-path/pci-0000:c5:00.3-usbv2-0:1:1.2"
+        ]
+      }
+    ],
+    "volumes": [],
+    "profile_id": "insta360-link-2c-pro"
+  },
+  "video": [
+    {
+      "node": {
+        "path": "/dev/video2",
+        "by_id": [
+          "/dev/v4l/by-id/usb-Insta360_Insta360_Link_2C_Pro-video-index0"
+        ],
+        "by_path": [
+          "/dev/v4l/by-path/pci-0000:c5:00.3-usb-0:1:1.0-video-index0",
+          "/dev/v4l/by-path/pci-0000:c5:00.3-usbv2-0:1:1.0-video-index0"
+        ]
+      },
+      "kind": "capture",
+      "capabilities": {
+        "driver": "uvcvideo",
+        "card": "Insta360 Link 2C Pro: Insta360 ",
+        "bus_info": "usb-0000:c5:00.3-1",
+        "version": 459264,
+        "capabilities": 2225078273,
+        "device_capabilities": 69206017,
+        "capability_names": [
+          "video-capture",
+          "ext-pix-format",
+          "streaming"
+        ]
+      },
+      "current_format": {
+        "width": 1920,
+        "height": 1080,
+        "fourcc": "MJPG"
+      },
+      "formats": [
+        {
+          "fourcc": "MJPG",
+          "description": "Motion-JPEG",
+          "flags": 1,
+          "sizes": [
+            {
+              "kind": "discrete",
+              "width": 1920,
+              "height": 1080,
+              "intervals": [
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 60
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 50
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 30
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 25
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 24
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "discrete",
+              "width": 1920,
+              "height": 1440,
+              "intervals": [
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 60
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 50
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 30
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 25
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 24
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "discrete",
+              "width": 1280,
+              "height": 720,
+              "intervals": [
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 60
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 50
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 30
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 25
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 24
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "discrete",
+              "width": 1280,
+              "height": 960,
+              "intervals": [
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 60
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 50
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 30
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 25
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 24
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "discrete",
+              "width": 1088,
+              "height": 1920,
+              "intervals": [
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 60
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 50
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 30
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 25
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 24
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "discrete",
+              "width": 736,
+              "height": 1280,
+              "intervals": [
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 60
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 50
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 30
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 25
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 24
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "discrete",
+              "width": 3840,
+              "height": 2160,
+              "intervals": [
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 30
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 25
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 24
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "discrete",
+              "width": 2176,
+              "height": 3840,
+              "intervals": [
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 30
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 25
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 24
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "discrete",
+              "width": 1080,
+              "height": 1920,
+              "intervals": [
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 60
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 50
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 30
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 25
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 24
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "fourcc": "H264",
+          "description": "H.264",
+          "flags": 1,
+          "sizes": [
+            {
+              "kind": "discrete",
+              "width": 3840,
+              "height": 2160,
+              "intervals": [
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 30
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 25
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 24
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "discrete",
+              "width": 1920,
+              "height": 1080,
+              "intervals": [
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 60
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 50
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 30
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 25
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 24
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "discrete",
+              "width": 1920,
+              "height": 1440,
+              "intervals": [
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 60
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 50
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 30
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 25
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 24
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "discrete",
+              "width": 1280,
+              "height": 720,
+              "intervals": [
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 60
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 50
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 30
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 25
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 24
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "discrete",
+              "width": 1280,
+              "height": 960,
+              "intervals": [
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 60
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 50
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 30
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 25
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 24
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "discrete",
+              "width": 1088,
+              "height": 1920,
+              "intervals": [
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 30
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 25
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 24
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "discrete",
+              "width": 736,
+              "height": 1280,
+              "intervals": [
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 60
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 50
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 30
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 25
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 24
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "discrete",
+              "width": 1080,
+              "height": 1920,
+              "intervals": [
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 30
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 25
+                  }
+                },
+                {
+                  "kind": "discrete",
+                  "value": {
+                    "numerator": 1,
+                    "denominator": 24
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "controls": [
+        {
+          "id": 9961473,
+          "name": "User Controls",
+          "control_type": 6,
+          "flags": 68,
+          "flag_names": [
+            "read-only",
+            "write-only"
+          ],
+          "minimum": 0,
+          "maximum": 0,
+          "step": 0,
+          "default": 0,
+          "element_size": 0,
+          "elements": 0,
+          "dimensions": [],
+          "current": null,
+          "current_in_range": null,
+          "menu": [],
+          "issue": null
+        },
+        {
+          "id": 9963776,
+          "name": "Brightness",
+          "control_type": 1,
+          "flags": 4096,
+          "flag_names": [
+            "has-which-min-max"
+          ],
+          "minimum": 0,
+          "maximum": 100,
+          "step": 1,
+          "default": 50,
+          "element_size": 4,
+          "elements": 1,
+          "dimensions": [],
+          "current": 50,
+          "current_in_range": true,
+          "menu": [],
+          "issue": null
+        },
+        {
+          "id": 9963777,
+          "name": "Contrast",
+          "control_type": 1,
+          "flags": 4096,
+          "flag_names": [
+            "has-which-min-max"
+          ],
+          "minimum": 0,
+          "maximum": 100,
+          "step": 1,
+          "default": 50,
+          "element_size": 4,
+          "elements": 1,
+          "dimensions": [],
+          "current": 50,
+          "current_in_range": true,
+          "menu": [],
+          "issue": null
+        },
+        {
+          "id": 9963778,
+          "name": "Saturation",
+          "control_type": 1,
+          "flags": 4096,
+          "flag_names": [
+            "has-which-min-max"
+          ],
+          "minimum": 0,
+          "maximum": 100,
+          "step": 1,
+          "default": 50,
+          "element_size": 4,
+          "elements": 1,
+          "dimensions": [],
+          "current": 50,
+          "current_in_range": true,
+          "menu": [],
+          "issue": null
+        },
+        {
+          "id": 9963779,
+          "name": "Hue",
+          "control_type": 1,
+          "flags": 4096,
+          "flag_names": [
+            "has-which-min-max"
+          ],
+          "minimum": -15,
+          "maximum": 15,
+          "step": 1,
+          "default": 0,
+          "element_size": 4,
+          "elements": 1,
+          "dimensions": [],
+          "current": 0,
+          "current_in_range": true,
+          "menu": [],
+          "issue": null
+        },
+        {
+          "id": 9963788,
+          "name": "White Balance, Automatic",
+          "control_type": 2,
+          "flags": 0,
+          "flag_names": [],
+          "minimum": 0,
+          "maximum": 1,
+          "step": 1,
+          "default": 1,
+          "element_size": 4,
+          "elements": 1,
+          "dimensions": [],
+          "current": 1,
+          "current_in_range": true,
+          "menu": [],
+          "issue": null
+        },
+        {
+          "id": 9963800,
+          "name": "Power Line Frequency",
+          "control_type": 3,
+          "flags": 0,
+          "flag_names": [],
+          "minimum": 0,
+          "maximum": 2,
+          "step": 1,
+          "default": 3,
+          "element_size": 4,
+          "elements": 1,
+          "dimensions": [],
+          "current": 1,
+          "current_in_range": true,
+          "menu": [
+            {
+              "index": 0,
+              "value": "Disabled"
+            },
+            {
+              "index": 1,
+              "value": "50 Hz"
+            },
+            {
+              "index": 2,
+              "value": "60 Hz"
+            }
+          ],
+          "issue": null
+        },
+        {
+          "id": 9963802,
+          "name": "White Balance Temperature",
+          "control_type": 1,
+          "flags": 4112,
+          "flag_names": [
+            "inactive",
+            "has-which-min-max"
+          ],
+          "minimum": 2000,
+          "maximum": 10000,
+          "step": 1,
+          "default": 6400,
+          "element_size": 4,
+          "elements": 1,
+          "dimensions": [],
+          "current": 4270,
+          "current_in_range": true,
+          "menu": [],
+          "issue": null
+        },
+        {
+          "id": 9963803,
+          "name": "Sharpness",
+          "control_type": 1,
+          "flags": 4096,
+          "flag_names": [
+            "has-which-min-max"
+          ],
+          "minimum": 0,
+          "maximum": 100,
+          "step": 1,
+          "default": 50,
+          "element_size": 4,
+          "elements": 1,
+          "dimensions": [],
+          "current": 50,
+          "current_in_range": true,
+          "menu": [],
+          "issue": null
+        },
+        {
+          "id": 10092545,
+          "name": "Camera Controls",
+          "control_type": 6,
+          "flags": 68,
+          "flag_names": [
+            "read-only",
+            "write-only"
+          ],
+          "minimum": 0,
+          "maximum": 0,
+          "step": 0,
+          "default": 0,
+          "element_size": 0,
+          "elements": 0,
+          "dimensions": [],
+          "current": null,
+          "current_in_range": null,
+          "menu": [],
+          "issue": null
+        },
+        {
+          "id": 10094856,
+          "name": "Pan, Absolute",
+          "control_type": 1,
+          "flags": 4096,
+          "flag_names": [
+            "has-which-min-max"
+          ],
+          "minimum": -522000,
+          "maximum": 522000,
+          "step": 3600,
+          "default": 0,
+          "element_size": 4,
+          "elements": 1,
+          "dimensions": [],
+          "current": -806934752,
+          "current_in_range": false,
+          "menu": [],
+          "issue": null
+        },
+        {
+          "id": 10094857,
+          "name": "Tilt, Absolute",
+          "control_type": 1,
+          "flags": 4096,
+          "flag_names": [
+            "has-which-min-max"
+          ],
+          "minimum": -324000,
+          "maximum": 360000,
+          "step": 3600,
+          "default": 0,
+          "element_size": 4,
+          "elements": 1,
+          "dimensions": [],
+          "current": 720,
+          "current_in_range": true,
+          "menu": [],
+          "issue": null
+        },
+        {
+          "id": 10094858,
+          "name": "Focus, Absolute",
+          "control_type": 1,
+          "flags": 4112,
+          "flag_names": [
+            "inactive",
+            "has-which-min-max"
+          ],
+          "minimum": 0,
+          "maximum": 100,
+          "step": 1,
+          "default": 50,
+          "element_size": 4,
+          "elements": 1,
+          "dimensions": [],
+          "current": 94,
+          "current_in_range": true,
+          "menu": [],
+          "issue": null
+        },
+        {
+          "id": 10094860,
+          "name": "Focus, Automatic Continuous",
+          "control_type": 2,
+          "flags": 0,
+          "flag_names": [],
+          "minimum": 0,
+          "maximum": 1,
+          "step": 1,
+          "default": 0,
+          "element_size": 4,
+          "elements": 1,
+          "dimensions": [],
+          "current": 1,
+          "current_in_range": true,
+          "menu": [],
+          "issue": null
+        },
+        {
+          "id": 10094861,
+          "name": "Zoom, Absolute",
+          "control_type": 1,
+          "flags": 4096,
+          "flag_names": [
+            "has-which-min-max"
+          ],
+          "minimum": 100,
+          "maximum": 400,
+          "step": 1,
+          "default": 100,
+          "element_size": 4,
+          "elements": 1,
+          "dimensions": [],
+          "current": 100,
+          "current_in_range": true,
+          "menu": [],
+          "issue": null
+        },
+        {
+          "id": 10094880,
+          "name": "Pan, Speed",
+          "control_type": 1,
+          "flags": 4097,
+          "flag_names": [
+            "disabled",
+            "has-which-min-max"
+          ],
+          "minimum": 0,
+          "maximum": 0,
+          "step": 0,
+          "default": 0,
+          "element_size": 4,
+          "elements": 1,
+          "dimensions": [],
+          "current": null,
+          "current_in_range": null,
+          "menu": [],
+          "issue": null
+        },
+        {
+          "id": 10094881,
+          "name": "Tilt, Speed",
+          "control_type": 1,
+          "flags": 4097,
+          "flag_names": [
+            "disabled",
+            "has-which-min-max"
+          ],
+          "minimum": 0,
+          "maximum": 0,
+          "step": 0,
+          "default": 0,
+          "element_size": 4,
+          "elements": 1,
+          "dimensions": [],
+          "current": null,
+          "current_in_range": null,
+          "menu": [],
+          "issue": null
+        }
+      ],
+      "issues": []
+    },
+    {
+      "node": {
+        "path": "/dev/video3",
+        "by_id": [
+          "/dev/v4l/by-id/usb-Insta360_Insta360_Link_2C_Pro-video-index1"
+        ],
+        "by_path": [
+          "/dev/v4l/by-path/pci-0000:c5:00.3-usb-0:1:1.0-video-index1",
+          "/dev/v4l/by-path/pci-0000:c5:00.3-usbv2-0:1:1.0-video-index1"
+        ]
+      },
+      "kind": "metadata",
+      "capabilities": {
+        "driver": "uvcvideo",
+        "card": "Insta360 Link 2C Pro: Insta360 ",
+        "bus_info": "usb-0000:c5:00.3-1",
+        "version": 459264,
+        "capabilities": 2225078273,
+        "device_capabilities": 77594624,
+        "capability_names": [
+          "ext-pix-format",
+          "meta-capture",
+          "streaming"
+        ]
+      },
+      "current_format": null,
+      "formats": [
+        {
+          "fourcc": "UVCH",
+          "description": "UVC Payload Header Metadata",
+          "flags": 0,
+          "sizes": []
+        }
+      ],
+      "controls": [],
+      "issues": []
+    }
+  ],
+  "extension_units": [
+    {
+      "unit_id": 9,
+      "guid": "faf1672d-b71b-4793-8c91-7b1c9b7f95f8",
+      "num_controls": 11,
+      "source_ids": [
+        5
+      ],
+      "control_bitmap": "ffffffff",
+      "selectors": [
+        {
+          "selector": 1,
+          "length": 4,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 2,
+          "length": 61,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 3,
+          "length": 234,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 4,
+          "length": 262,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 5,
+          "length": 1,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 6,
+          "length": 5,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 7,
+          "length": 1,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 8,
+          "length": 102,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 9,
+          "length": 2,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 10,
+          "length": 129,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 11,
+          "length": 5,
+          "info": 1,
+          "get_supported": true,
+          "set_supported": false,
+          "issues": []
+        },
+        {
+          "selector": 12,
+          "length": 32,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 13,
+          "length": 129,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 14,
+          "length": 1,
+          "info": 2,
+          "get_supported": false,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 15,
+          "length": 12,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 16,
+          "length": 255,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 17,
+          "length": 1,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 18,
+          "length": 1,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 19,
+          "length": 1,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 20,
+          "length": 97,
+          "info": 1,
+          "get_supported": true,
+          "set_supported": false,
+          "issues": []
+        },
+        {
+          "selector": 21,
+          "length": 16,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 22,
+          "length": 4,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 23,
+          "length": 129,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 24,
+          "length": 4,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 25,
+          "length": 2,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 26,
+          "length": 8,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 27,
+          "length": 2,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 28,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 29,
+          "length": 2,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 30,
+          "length": 1,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 31,
+          "length": 32,
+          "info": 2,
+          "get_supported": false,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 32,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        }
+      ],
+      "descriptor_offset": 66
+    },
+    {
+      "unit_id": 10,
+      "guid": "e307e649-4618-a3ff-82fc-2d8b5f216773",
+      "num_controls": 11,
+      "source_ids": [
+        5
+      ],
+      "control_bitmap": "ffffffff",
+      "selectors": [
+        {
+          "selector": 1,
+          "length": 8,
+          "info": 1,
+          "get_supported": true,
+          "set_supported": false,
+          "issues": []
+        },
+        {
+          "selector": 2,
+          "length": 32,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 3,
+          "length": 9,
+          "info": 2,
+          "get_supported": false,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 4,
+          "length": 11,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 5,
+          "length": 129,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 6,
+          "length": 1,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 7,
+          "length": 8,
+          "info": 2,
+          "get_supported": false,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 8,
+          "length": 8,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 9,
+          "length": 1,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 10,
+          "length": 1,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 11,
+          "length": 2,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 12,
+          "length": 2,
+          "info": 2,
+          "get_supported": false,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 13,
+          "length": 2,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 14,
+          "length": 255,
+          "info": 1,
+          "get_supported": true,
+          "set_supported": false,
+          "issues": []
+        },
+        {
+          "selector": 15,
+          "length": 2,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 16,
+          "length": 1,
+          "info": 1,
+          "get_supported": true,
+          "set_supported": false,
+          "issues": []
+        },
+        {
+          "selector": 17,
+          "length": 1,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 18,
+          "length": 1,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 19,
+          "length": 8,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 20,
+          "length": 1,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 21,
+          "length": 90,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 22,
+          "length": 1,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 23,
+          "length": 1,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 24,
+          "length": 49,
+          "info": 1,
+          "get_supported": true,
+          "set_supported": false,
+          "issues": []
+        },
+        {
+          "selector": 25,
+          "length": 2,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 26,
+          "length": 1,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 27,
+          "length": 1,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 28,
+          "length": 25,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 29,
+          "length": 4,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 30,
+          "length": 2,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 31,
+          "length": 1,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 32,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        }
+      ],
+      "descriptor_offset": 95
+    },
+    {
+      "unit_id": 11,
+      "guid": "a8bd5df2-1a98-474e-8dd0-d92672d194fa",
+      "num_controls": 11,
+      "source_ids": [
+        5
+      ],
+      "control_bitmap": "ffffffff",
+      "selectors": [
+        {
+          "selector": 1,
+          "length": 1,
+          "info": 1,
+          "get_supported": true,
+          "set_supported": false,
+          "issues": []
+        },
+        {
+          "selector": 2,
+          "length": 1,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 3,
+          "length": 1,
+          "info": 1,
+          "get_supported": true,
+          "set_supported": false,
+          "issues": []
+        },
+        {
+          "selector": 4,
+          "length": 1,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 5,
+          "length": 1,
+          "info": 2,
+          "get_supported": false,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 6,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 7,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 8,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 9,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 10,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 11,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 12,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 13,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 14,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 15,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 16,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 17,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 18,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 19,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 20,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 21,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 22,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 23,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 24,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 25,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 26,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 27,
+          "length": 1,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 28,
+          "length": 127,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 29,
+          "length": 66,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 30,
+          "length": 62,
+          "info": 2,
+          "get_supported": false,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 31,
+          "length": 19,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        },
+        {
+          "selector": 32,
+          "length": 10,
+          "info": 3,
+          "get_supported": true,
+          "set_supported": true,
+          "issues": []
+        }
+      ],
+      "descriptor_offset": 124
+    }
+  ],
+  "audio": {
+    "alsa": [
+      {
+        "card": 3,
+        "device": 0,
+        "name": "hw:3,0",
+        "description": "USB Audio",
+        "channels_min": 1,
+        "channels_max": 1,
+        "rate_min": 48000,
+        "rate_max": 48000,
+        "formats": [
+          "S16_LE"
+        ],
+        "access_modes": [
+          "mmap-interleaved",
+          "rw-interleaved"
+        ]
+      }
+    ],
+    "pipewire": [],
+    "pipewire_compiled": false,
+    "pipewire_available": false,
+    "issues": []
+  },
+  "firmware": {
+    "version": null,
+    "attempted_sources": [
+      "usb-descriptors",
+      "read-only-profile"
+    ],
+    "note": "no verified firmware-version source is available"
+  },
+  "profile": {
+    "profile_id": "insta360-link-2c-pro",
+    "reasons": [
+      "exact USB revision and descriptor fingerprint match"
+    ],
+    "writable": false
+  },
+  "redaction": {
+    "serial_included": false,
+    "omitted": [
+      "usernames",
+      "home-paths",
+      "mount-paths",
+      "credentials",
+      "media"
+    ]
+  },
+  "issues": []
+}

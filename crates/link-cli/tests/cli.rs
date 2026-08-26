@@ -22,18 +22,35 @@ fn run_with_environment(arguments: &[&str], name: &str, value: &str) -> Output {
 }
 
 #[test]
-fn help_and_version_succeed_without_advertising_commands() {
+fn help_and_version_advertise_only_implemented_commands() {
     let help = run(&["--help"]);
     assert!(help.status.success());
     let stdout = String::from_utf8(help.stdout).expect("UTF-8 help");
     assert!(stdout.contains("--unsafe-xu"));
-    assert!(!stdout.contains("Commands:"));
+    assert!(stdout.contains("Commands:"));
+    assert!(stdout.contains("device"));
+    assert!(!stdout.contains("control set"));
 
     let version = run(&["--version"]);
     assert!(version.status.success());
 
     let unsafe_help = run(&["--unsafe-xu", "--help"]);
     assert!(unsafe_help.status.success());
+}
+
+#[test]
+fn device_help_describes_read_only_inventory_commands() {
+    let help = run(&["device", "--help"]);
+    assert!(help.status.success());
+    let stdout = String::from_utf8(help.stdout).expect("UTF-8 help");
+    assert!(stdout.contains("list"));
+    assert!(stdout.contains("probe"));
+
+    let probe_help = run(&["device", "probe", "--help"]);
+    assert!(probe_help.status.success());
+    let stdout = String::from_utf8(probe_help.stdout).expect("UTF-8 help");
+    assert!(stdout.contains("--bundle"));
+    assert!(stdout.contains("--include-serial"));
 }
 
 #[test]

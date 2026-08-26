@@ -8,6 +8,18 @@ allow = [
   "MIT",
   "Unicode-3.0",
 ]
+exceptions = [
+  { allow = ["BSD-3-Clause"], crate = "bindgen" },
+  { allow = ["ISC"], crate = "libloading" },
+  { allow = ["Apache-2.0 WITH LLVM-exception"], crate = "target-lexicon" },
+]
+
+[[licenses.clarify]]
+crate = "v4l2r@0.0.8"
+expression = "MIT"
+license-files = [
+  { path = "LICENSE", hash = 0x386ca1bc },
+]
 
 [licenses.private]
 ignore = true

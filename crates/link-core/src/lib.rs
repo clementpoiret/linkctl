@@ -4,6 +4,7 @@ pub mod config;
 pub mod error;
 pub mod logging;
 pub mod output;
+pub mod probe;
 pub mod safety;
 
 pub use error::{ErrorKind, LinkError, ProcessExit};

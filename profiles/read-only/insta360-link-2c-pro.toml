@@ -1,0 +1,25 @@
+schema_version = 1
+profile_id = "insta360-link-2c-pro"
+model = "Insta360 Link 2C Pro"
+access = "read-only"
+
+[[match]]
+mode = "camera"
+usb_vid = 0x2e1a
+usb_pid = 0x4c05
+bcd_device = 0x0200
+descriptor_sha256 = "1d0fa40a5787adc39223e26a5262f3d5e1ba0421e17442487157905cbd2a066c"
+
+[[match]]
+mode = "camera"
+usb_vid = 0x2e1a
+usb_pid = 0x4c05
+bcd_device = 0x0200
+descriptor_sha256 = "7a60c8dd0f5e3d83e6c1c1fb245d96e02cc4ea6fdea8c10cc5a2e3b1094a2cc8"
+
+[[match]]
+mode = "u-disk"
+usb_vid = 0x070a
+usb_pid = 0x4026
+bcd_device = 0x0001
+descriptor_sha256 = "8c9226df8b126f700d738b42f38c0163549a37a19753832527ce27742d3d7f2e"

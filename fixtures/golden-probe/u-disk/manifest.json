@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "files": {
+    "probe.json": "493b96dddeb78ab9386da8fe2dec94715f8437a1dc52877145056ffea9c1aabd",
+    "usb-descriptors.bin": "8c9226df8b126f700d738b42f38c0163549a37a19753832527ce27742d3d7f2e"
+  },
+  "redaction": {
+    "serial_included": false,
+    "raw_descriptors_contain_string_values": false,
+    "omitted": [
+      "usernames",
+      "home-paths",
+      "mount-paths",
+      "credentials",
+      "media"
+    ]
+  }
+}

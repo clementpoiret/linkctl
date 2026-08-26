@@ -13,20 +13,27 @@ path = "src/main.rs"
 default = []
 daemon = ["dep:link-ipc"]
 gstreamer = ["dep:link-media", "link-media/gstreamer"]
-pipewire = ["dep:link-audio", "link-audio/pipewire"]
+pipewire = ["link-audio/pipewire"]
 host-ai = ["dep:link-effects", "link-effects/host-ai"]
 network = ["dep:link-ipc", "dep:link-media", "link-ipc/network", "link-media/network"]
 sdk = ["dep:link-sdk-bridge", "link-sdk-bridge/sdk"]
 
 [dependencies]
 clap.workspace = true
-link-audio = { workspace = true, optional = true }
+link-audio.workspace = true
 link-core.workspace = true
 link-effects = { workspace = true, optional = true }
 link-ipc = { workspace = true, optional = true }
+link-linux = { path = "../link-linux", version = "=0.1.0" }
 link-media = { workspace = true, optional = true }
+link-profiles.workspace = true
 link-sdk-bridge = { workspace = true, optional = true }
+link-uvc-xu.workspace = true
+link-v4l2.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
