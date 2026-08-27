@@ -30,11 +30,11 @@ The physical camera, USB bus, kernel driver, local configuration, third-party pr
 | A non-gimbal device receives mechanical commands | Omit semantic movement commands, deny raw pan/tilt writes even during dry-run, and continuously test both policies |
 | A malformed or stale standard-control request changes an unintended value | Resolve against fresh extended-control metadata, validate type/range/step/menu and writability, read before writing, verify readback, and attempt bounded rollback |
 | A multi-device mutation changes cameras unintentionally | Require an explicit `--device all --yes` combination and report each device independently |
-| Machine output or logs leak serials, paths, credentials, or media | Redact by default, keep logs on stderr, never log secrets or frames, and test diagnostic redaction |
+| Machine output or logs leak serials, paths, credentials, microphone levels, or media | Redact identifiers by default, keep logs on stderr, never log secrets or media buffers, and emit only explicitly requested aggregate audio levels |
 | A local process impersonates or controls the daemon | User-owned socket permissions, peer-credential checks, and protocol-version negotiation before requests |
 | Untrusted pipeline text or automation executes commands | Build pipelines and automation from typed structures; arbitrary strings and external processes require explicit local trust |
 | A native media library, model runtime, or SDK crashes or corrupts memory | Feature gating, minimal bindings, version checks, and process isolation for the vendor SDK |
-| A recording or firmware destination follows a malicious symlink | Canonicalization, regular-file checks, bounded destinations, atomic creation where possible, and explicit sync semantics |
+| A recording or audio-capture destination follows a malicious symlink | Canonicalization, regular-file checks, bounded destinations, same-directory temporary output, atomic finalization where possible, and explicit sync semantics |
 | A network facade exposes camera control | No listener by default; loopback-only defaults, authentication, origin/CSRF controls, and explicit opt-in |
 | A dependency or CI action is compromised | Locked Rust dependencies, `cargo deny`, read-only CI permissions, pinned action major versions, and reviewed upgrades |
 
@@ -44,7 +44,9 @@ The compiled safety policy admits read-only operations and validated standard V4
 
 Linux discovery and control backends perform bounded device I/O through kernel UVC/V4L2 interfaces. The locally isolated ABI code uses kernel-sized structures and turns typed `errno` failures into stable errors. Mutations read previous values, prefer related-control transactions, verify readback, and report rollback outcomes. Discovery, watches, probes, and `doctor` remain read-only.
 
-There is no daemon listener, media pipeline, network listener, native SDK loading, raw XU write path, or profile write loader. Those boundaries require focused threat-model updates before implementation.
+Typed GStreamer pipelines now accept video and audio buffers from selected kernel/PipeWire endpoints and write only explicit recording, snapshot, audio-capture, standard-output, playback, or RTP destinations. Pipeline text is never accepted from configuration or the command line. Binary standard output contains only media bytes; diagnostics use stderr. Single-file recordings and audio captures use same-directory temporary files and are renamed only after clean finalization. Monitoring selects an existing playback route and does not create a network listener.
+
+There is no daemon listener, general network listener, native SDK loading, raw XU write path, or profile write loader. Those boundaries require focused threat-model updates before implementation.
 
 ## Review triggers
 

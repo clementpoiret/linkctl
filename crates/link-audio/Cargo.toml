@@ -13,6 +13,8 @@ pipewire = ["dep:pipewire"]
 alsa.workspace = true
 link-core.workspace = true
 pipewire = { workspace = true, optional = true }
+sha2.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

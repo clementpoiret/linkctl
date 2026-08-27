@@ -12,15 +12,18 @@ linkctl --device link2cpro-… control list
 linkctl --device link2cpro-… control set brightness 55%
 linkctl --device link2cpro-… image white-balance 5000K
 linkctl --device link2cpro-… video formats --fourcc H264
+linkctl audio devices
+linkctl --device link2cpro-… audio status
+linkctl --device link2cpro-… audio meter --format jsonl
 linkctl --device link2cpro-… snapshot frame.png
-linkctl --device link2cpro-… record start meeting.mkv --video-copy
+linkctl --device link2cpro-… record start meeting.mkv --video-copy --audio camera
 ```
 
 Every mutation supports `--dry-run`, validates values, reads the previous value, verifies readback, and attempts rollback after a partial failure. Automatic/manual prerequisites are applied by default; `control set --raw` bypasses only that semantic gating. Pan and tilt remain read-only raw inventory even if a driver advertises them.
 
-Use `device watch --format jsonl` for hotplug events and `control watch --format jsonl` for control changes. `linkctl doctor` performs read-only configuration, permission, profile, and control checks. See [video capture and recording](docs/media.md), [standard controls](docs/controls.md), [permissions and udev setup](docs/permissions.md), and the [hardware probe guide](docs/hardware-probe.md).
+Use `device watch --format jsonl` for hotplug events and `control watch --format jsonl` for control changes. `linkctl doctor` performs read-only configuration, permission, profile, and control checks. See [audio](docs/audio.md), [video capture and recording](docs/media.md), [standard controls](docs/controls.md), [permissions and udev setup](docs/permissions.md), and the [hardware probe guide](docs/hardware-probe.md).
 
-GStreamer media support is enabled in normal builds. H.264 and MJPEG recording paths preserve the camera encoding without decoding; RTP/UDP output is available when the `network` feature is enabled. Audio is deliberately not muxed yet.
+GStreamer and PipeWire support are enabled in normal builds, with direct ALSA capture as a fallback. H.264 and MJPEG recording paths preserve the camera encoding without decoding; recording audio is opt-in and muxes FLAC into Matroska or AAC into MP4. RTP/UDP output is available when the `network` feature is enabled.
 
 Generate shell completion source with `linkctl completion bash`, `zsh`, `fish`, or `elvish` and load or install the result using the conventions of that shell.
 
@@ -34,7 +37,7 @@ cargo test --workspace --all-features --locked
 cargo run -p link-cli --bin linkctl -- --help
 ```
 
-The devenv includes GStreamer core, base, good, bad, and libav plugins required for camera capture, snapshot decoding, container muxing, and optional RTP output.
+The devenv includes PipeWire and the GStreamer core, base, good, bad, and libav plugins required for camera/audio capture, monitoring, snapshot decoding, container muxing, and optional RTP output.
 
 Before submitting a change, run:
 

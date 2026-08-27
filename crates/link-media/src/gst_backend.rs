@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     fs::{self, File, OpenOptions},
     io::{self, Write},
     os::unix::fs::PermissionsExt,
@@ -17,6 +18,10 @@ use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use link_core::{
     ErrorKind, LinkError,
+    audio::{
+        AudioBackendKind, AudioLevelEvent, AudioProcessing, AudioRunReport, AudioStats,
+        AudioStopReason, AvSyncStats,
+    },
     media::{MediaRunReport, MediaStats, MediaStopReason, VideoTuple},
 };
 use serde::{Deserialize, Serialize};
@@ -60,6 +65,60 @@ pub struct ForegroundRequest {
     pub shutdown_timeout: Duration,
 }
 
+/// One resolved ALSA or PipeWire capture source.
+#[derive(Clone, Debug)]
+pub struct AudioSourceRequest {
+    pub id: String,
+    pub backend: AudioBackendKind,
+    pub selector: String,
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub duration: Option<Duration>,
+    pub shutdown_timeout: Duration,
+    pub processing: AudioProcessing,
+    pub delay_ns: i64,
+}
+
+/// Standalone audio output encoding.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioEncoding {
+    Wav,
+    Flac,
+    Raw,
+}
+
+/// Standalone audio capture settings.
+#[derive(Clone, Debug)]
+pub struct AudioCaptureRequest {
+    pub source: AudioSourceRequest,
+    pub output: Option<PathBuf>,
+    pub encoding: AudioEncoding,
+    pub overwrite: bool,
+}
+
+/// Audio metering settings.
+#[derive(Clone, Debug)]
+pub struct AudioMeterRequest {
+    pub source: AudioSourceRequest,
+    pub interval: Duration,
+}
+
+/// One resolved monitor sink. `None` selects the session default.
+#[derive(Clone, Debug)]
+pub struct AudioSinkRequest {
+    pub backend: AudioBackendKind,
+    pub selector: String,
+}
+
+/// Live microphone monitoring settings.
+#[derive(Clone, Debug)]
+pub struct AudioMonitorRequest {
+    pub source: AudioSourceRequest,
+    pub sink: Option<AudioSinkRequest>,
+    pub latency: Duration,
+}
+
 /// Supported recording containers.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -81,6 +140,7 @@ pub struct RecordRequest {
     pub rolling_files: Option<u32>,
     pub disk_reserve_bytes: u64,
     pub overwrite: bool,
+    pub audio: Option<AudioSourceRequest>,
 }
 
 /// Raw stdout capture settings.
@@ -252,7 +312,14 @@ pub fn stats(request: &ForegroundRequest) -> Result<MediaRunReport, LinkError> {
     pipeline_add(&pipeline, &[&source, &filter, &sink])?;
     gst::Element::link_many([&source, &filter, &sink]).map_err(link_error)?;
     let stats = attach_stats(&filter)?;
-    run_pipeline(pipeline, request, stats, false, None, None)
+    run_pipeline(
+        pipeline,
+        request,
+        MediaTelemetry::video_only(stats),
+        false,
+        None,
+        None,
+    )
 }
 
 /// Copy a compressed camera stream to stdout.
@@ -272,7 +339,185 @@ pub fn capture_stdout(request: &CaptureRequest) -> Result<MediaRunReport, LinkEr
     pipeline_add(&pipeline, &[&source, &filter, &parser, &sink])?;
     gst::Element::link_many([&source, &filter, &parser, &sink]).map_err(link_error)?;
     let stats = attach_stats(&filter)?;
-    run_pipeline(pipeline, &request.source, stats, true, None, None)
+    run_pipeline(
+        pipeline,
+        &request.source,
+        MediaTelemetry::video_only(stats),
+        true,
+        None,
+        None,
+    )
+}
+
+/// Capture one audio source to WAV, FLAC, raw PCM, or standard output.
+pub fn audio_capture(request: &AudioCaptureRequest) -> Result<AudioRunReport, LinkError> {
+    let mut required = audio_source_elements_required(&request.source);
+    required.extend(["audioconvert", "audioresample", "audiorate", "capsfilter"]);
+    match request.encoding {
+        AudioEncoding::Wav => required.push("wavenc"),
+        AudioEncoding::Flac => required.push("flacenc"),
+        AudioEncoding::Raw => {}
+    }
+    required.push(if request.output.is_some() {
+        "filesink"
+    } else {
+        "fdsink"
+    });
+    required.extend(audio_processing_elements(request.source.processing));
+    initialize(&required)?;
+    let (pipeline, tail, rate) = build_audio_front(&request.source)?;
+    let telemetry = attach_audio_stats(
+        &tail,
+        request.source.sample_rate,
+        request.source.channels,
+        Duration::from_millis(100),
+    )?;
+    let mut last = tail;
+    let encoder = match request.encoding {
+        AudioEncoding::Wav => Some(
+            gst::ElementFactory::make("wavenc")
+                .build()
+                .map_err(build_error)?,
+        ),
+        AudioEncoding::Flac => Some(
+            gst::ElementFactory::make("flacenc")
+                .build()
+                .map_err(build_error)?,
+        ),
+        AudioEncoding::Raw => None,
+    };
+    if let Some(encoder) = &encoder {
+        pipeline.add(encoder).map_err(pipeline_error)?;
+        last.link(encoder).map_err(link_error)?;
+        last = encoder.clone();
+    }
+    let output = request
+        .output
+        .as_ref()
+        .map(|path| AudioOutputPlan::new(path, request.overwrite))
+        .transpose()?;
+    let sink = if let Some(output) = &output {
+        gst::ElementFactory::make("filesink")
+            .property("location", output.temporary.display().to_string())
+            .property("sync", false)
+            .build()
+            .map_err(build_error)?
+    } else {
+        gst::ElementFactory::make("fdsink")
+            .property("fd", 1_i32)
+            .property("sync", false)
+            .build()
+            .map_err(build_error)?
+    };
+    pipeline.add(&sink).map_err(pipeline_error)?;
+    last.link(&sink).map_err(link_error)?;
+    let mut report = run_audio_pipeline(
+        pipeline,
+        &request.source,
+        telemetry,
+        &rate,
+        Some(audio_encoding_name(request.encoding).into()),
+        None,
+    )?;
+    if let Some(output) = output {
+        report.outputs = output.finish(report.finalized)?;
+    }
+    Ok(report)
+}
+
+/// Emit periodic peak/RMS observations while measuring an audio source.
+pub fn audio_meter<F>(request: &AudioMeterRequest, mut emit: F) -> Result<AudioRunReport, LinkError>
+where
+    F: FnMut(&AudioLevelEvent) -> Result<(), LinkError>,
+{
+    let mut required = audio_source_elements_required(&request.source);
+    required.extend([
+        "audioconvert",
+        "audioresample",
+        "audiorate",
+        "capsfilter",
+        "fakesink",
+    ]);
+    required.extend(audio_processing_elements(request.source.processing));
+    initialize(&required)?;
+    let (pipeline, tail, rate) = build_audio_front(&request.source)?;
+    let telemetry = attach_audio_stats(
+        &tail,
+        request.source.sample_rate,
+        request.source.channels,
+        request.interval,
+    )?;
+    let sink = gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .build()
+        .map_err(build_error)?;
+    pipeline.add(&sink).map_err(pipeline_error)?;
+    tail.link(&sink).map_err(link_error)?;
+    run_audio_pipeline(
+        pipeline,
+        &request.source,
+        telemetry,
+        &rate,
+        None,
+        Some(&mut emit),
+    )
+}
+
+/// Monitor one source through a selected or session-default playback sink.
+pub fn audio_monitor(request: &AudioMonitorRequest) -> Result<AudioRunReport, LinkError> {
+    let mut required = audio_source_elements_required(&request.source);
+    required.extend([
+        "audioconvert",
+        "audioresample",
+        "audiorate",
+        "capsfilter",
+        "queue",
+    ]);
+    required.push(match request.sink.as_ref().map(|sink| sink.backend) {
+        Some(AudioBackendKind::Alsa) => "alsasink",
+        Some(AudioBackendKind::Pipewire) => "pipewiresink",
+        None => "autoaudiosink",
+    });
+    required.extend(audio_processing_elements(request.source.processing));
+    initialize(&required)?;
+    let (pipeline, tail, rate) = build_audio_front(&request.source)?;
+    let telemetry = attach_audio_stats(
+        &tail,
+        request.source.sample_rate,
+        request.source.channels,
+        Duration::from_millis(100),
+    )?;
+    let queue = gst::ElementFactory::make("queue")
+        .property("min-threshold-time", duration_ns(request.latency))
+        .property(
+            "max-size-time",
+            duration_ns(request.latency).saturating_mul(2),
+        )
+        .property("max-size-buffers", 0_u32)
+        .property("max-size-bytes", 0_u32)
+        .build()
+        .map_err(build_error)?;
+    let sink = match &request.sink {
+        Some(sink) if sink.backend == AudioBackendKind::Alsa => {
+            gst::ElementFactory::make("alsasink")
+                .property("device", &sink.selector)
+                .property("sync", true)
+                .build()
+                .map_err(build_error)?
+        }
+        Some(sink) => gst::ElementFactory::make("pipewiresink")
+            .property("target-object", &sink.selector)
+            .property("sync", true)
+            .build()
+            .map_err(build_error)?,
+        None => gst::ElementFactory::make("autoaudiosink")
+            .property("sync", true)
+            .build()
+            .map_err(build_error)?,
+    };
+    pipeline_add(&pipeline, &[&queue, &sink])?;
+    gst::Element::link_many([&tail, &queue, &sink]).map_err(link_error)?;
+    run_audio_pipeline(pipeline, &request.source, telemetry, &rate, None, None)
 }
 
 /// Record a compressed camera stream to Matroska or fragmented MP4.
@@ -282,7 +527,17 @@ pub fn record(request: &RecordRequest) -> Result<MediaRunReport, LinkError> {
         RecordContainer::Matroska => "matroskamux",
         RecordContainer::Mp4 => "mp4mux",
     };
-    initialize(&["v4l2src", "capsfilter", parser_name, "splitmuxsink", muxer])?;
+    let mut required = vec!["v4l2src", "capsfilter", parser_name, "splitmuxsink", muxer];
+    if let Some(audio) = &request.audio {
+        required.extend(audio_source_elements_required(audio));
+        required.extend(["audioconvert", "audioresample", "audiorate", "identity"]);
+        required.push(match request.container {
+            RecordContainer::Matroska => "flacenc",
+            RecordContainer::Mp4 => "avenc_aac",
+        });
+        required.extend(audio_processing_elements(audio.processing));
+    }
+    initialize(&required)?;
     if request.require_video_copy && !is_pass_through(&request.source.tuple) {
         return Err(LinkError::new(
             ErrorKind::CapabilityUnsupported,
@@ -320,11 +575,79 @@ pub fn record(request: &RecordRequest) -> Result<MediaRunReport, LinkError> {
     pipeline_add(&pipeline, &[&source, &filter, &parser, &sink])?;
     gst::Element::link_many([&source, &filter, &parser, &sink]).map_err(link_error)?;
     let stats = attach_stats(&filter)?;
+    let (audio_runtime, av_sync) = if let Some(audio) = &request.audio {
+        let (audio_tail, audio_rate) = add_audio_front(&pipeline, audio)?;
+        let audio_stats = attach_audio_stats(
+            &audio_tail,
+            audio.sample_rate,
+            audio.channels,
+            Duration::from_millis(100),
+        )?;
+        let encoder_name = match request.container {
+            RecordContainer::Matroska => "flacenc",
+            RecordContainer::Mp4 => "avenc_aac",
+        };
+        let encoder = gst::ElementFactory::make(encoder_name)
+            .build()
+            .map_err(build_error)?;
+        pipeline.add(&encoder).map_err(pipeline_error)?;
+        if request.container == RecordContainer::Mp4 {
+            let convert = gst::ElementFactory::make("audioconvert")
+                .build()
+                .map_err(build_error)?;
+            let caps = gst::Caps::builder("audio/x-raw")
+                .field("format", "F32LE")
+                .field("rate", i32::try_from(audio.sample_rate).unwrap_or(i32::MAX))
+                .field(
+                    "channels",
+                    i32::try_from(audio.channels).unwrap_or(i32::MAX),
+                )
+                .field("layout", "interleaved")
+                .build();
+            let filter = gst::ElementFactory::make("capsfilter")
+                .property("caps", caps)
+                .build()
+                .map_err(build_error)?;
+            pipeline_add(&pipeline, &[&convert, &filter])?;
+            gst::Element::link_many([&audio_tail, &convert, &filter, &encoder])
+                .map_err(link_error)?;
+        } else {
+            audio_tail.link(&encoder).map_err(link_error)?;
+        }
+        let encoder_pad = encoder
+            .static_pad("src")
+            .ok_or_else(|| media_error("audio encoder has no source pad"))?;
+        let sink_pad = sink
+            .request_pad_simple("audio_%u")
+            .ok_or_else(|| media_error("split muxer did not provide an audio pad"))?;
+        encoder_pad.link(&sink_pad).map_err(|error| {
+            media_error("failed to link audio into the split muxer")
+                .with_detail("reason", error.to_string())
+        })?;
+        let sync = attach_av_sync(&filter, &audio_tail)?;
+        (
+            Some(AudioRuntime {
+                telemetry: audio_stats,
+                rate: audio_rate,
+                sample_rate: audio.sample_rate,
+                channels: audio.channels,
+                codec: encoder_name.into(),
+                processing: audio.processing,
+            }),
+            Some(sync),
+        )
+    } else {
+        (None, None)
+    };
 
     let mut report = run_pipeline(
         pipeline,
         &request.source,
-        stats,
+        MediaTelemetry {
+            video: stats,
+            audio: audio_runtime,
+            av_sync,
+        },
         true,
         Some((&request.output, request.disk_reserve_bytes)),
         request.max_total_bytes.map(|limit| (&output, limit)),
@@ -379,7 +702,634 @@ pub fn rtp(request: &RtpRequest) -> Result<MediaRunReport, LinkError> {
     pipeline_add(&pipeline, &[&source, &filter, &parser, &payloader, &sink])?;
     gst::Element::link_many([&source, &filter, &parser, &payloader, &sink]).map_err(link_error)?;
     let stats = attach_stats(&filter)?;
-    run_pipeline(pipeline, &request.source, stats, true, None, None)
+    run_pipeline(
+        pipeline,
+        &request.source,
+        MediaTelemetry::video_only(stats),
+        true,
+        None,
+        None,
+    )
+}
+
+struct AudioRuntime {
+    telemetry: Arc<Mutex<AudioStatsState>>,
+    rate: gst::Element,
+    sample_rate: u32,
+    channels: u32,
+    codec: String,
+    processing: AudioProcessing,
+}
+
+struct MediaTelemetry {
+    video: Arc<Mutex<StatsState>>,
+    audio: Option<AudioRuntime>,
+    av_sync: Option<Arc<Mutex<AvSyncState>>>,
+}
+
+impl MediaTelemetry {
+    fn video_only(video: Arc<Mutex<StatsState>>) -> Self {
+        Self {
+            video,
+            audio: None,
+            av_sync: None,
+        }
+    }
+}
+
+type AudioEventSink<'a> = Option<&'a mut dyn FnMut(&AudioLevelEvent) -> Result<(), LinkError>>;
+
+#[derive(Default)]
+struct AudioStatsState {
+    buffers: u64,
+    bytes: u64,
+    clipping_events: u64,
+    timestamp_discontinuities: u64,
+    total_samples: u64,
+    total_sum_squares: f64,
+    peak: f64,
+    last_pts: Option<gst::ClockTime>,
+    event_samples: u64,
+    event_sum_squares: f64,
+    event_peak: f64,
+    sequence: u64,
+    events: VecDeque<AudioLevelEvent>,
+}
+
+#[derive(Default)]
+struct AvSyncState {
+    video_clock_bias_ns: Option<i128>,
+    audio_clock_bias_ns: Option<i128>,
+    first_pair_time_ns: Option<u64>,
+    measurement_first_time_ns: Option<u64>,
+    last_pair_time_ns: Option<u64>,
+    raw_initial_offset_ns: Option<i128>,
+    raw_final_offset_ns: Option<i128>,
+    initial_offset_sum_ns: i128,
+    initial_offset_samples: u32,
+    recent_offsets_ns: VecDeque<i128>,
+    raw_max_abs_offset_ns: u128,
+    max_abs_offset_ns: u128,
+}
+
+const AV_SYNC_WARMUP_NS: u64 = 500_000_000;
+const AV_SYNC_WINDOW_SAMPLES: usize = 32;
+
+fn audio_source_elements_required(request: &AudioSourceRequest) -> Vec<&'static str> {
+    vec![match request.backend {
+        AudioBackendKind::Alsa => "alsasrc",
+        AudioBackendKind::Pipewire => "pipewiresrc",
+    }]
+}
+
+fn audio_processing_elements(processing: AudioProcessing) -> Vec<&'static str> {
+    let mut elements = Vec::new();
+    if processing.gate || processing.compressor || processing.limiter {
+        elements.push("audiodynamic");
+    }
+    if processing.limiter {
+        elements.push("audioamplify");
+    }
+    elements
+}
+
+fn build_audio_front(
+    request: &AudioSourceRequest,
+) -> Result<(gst::Pipeline, gst::Element, gst::Element), LinkError> {
+    let pipeline = gst::Pipeline::new();
+    let (tail, rate) = add_audio_front(&pipeline, request)?;
+    Ok((pipeline, tail, rate))
+}
+
+fn add_audio_front(
+    pipeline: &gst::Pipeline,
+    request: &AudioSourceRequest,
+) -> Result<(gst::Element, gst::Element), LinkError> {
+    if request.sample_rate == 0 || request.channels == 0 {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "audio sample rate and channel count must be greater than zero",
+        ));
+    }
+    let source = match request.backend {
+        AudioBackendKind::Alsa => gst::ElementFactory::make("alsasrc")
+            .property("device", &request.selector)
+            .property("do-timestamp", true)
+            .build()
+            .map_err(build_error)?,
+        AudioBackendKind::Pipewire => gst::ElementFactory::make("pipewiresrc")
+            .property("target-object", &request.selector)
+            .property("provide-clock", false)
+            .property("do-timestamp", true)
+            .build()
+            .map_err(build_error)?,
+    };
+    let convert = gst::ElementFactory::make("audioconvert")
+        .build()
+        .map_err(build_error)?;
+    let resample = gst::ElementFactory::make("audioresample")
+        .build()
+        .map_err(build_error)?;
+    let rate = gst::ElementFactory::make("audiorate")
+        .property("skip-to-first", true)
+        .property("tolerance", 10_000_000_u64)
+        .build()
+        .map_err(build_error)?;
+    let caps = gst::Caps::builder("audio/x-raw")
+        .field("format", "S16LE")
+        .field(
+            "rate",
+            i32::try_from(request.sample_rate).unwrap_or(i32::MAX),
+        )
+        .field(
+            "channels",
+            i32::try_from(request.channels).unwrap_or(i32::MAX),
+        )
+        .field("layout", "interleaved")
+        .build();
+    let filter = gst::ElementFactory::make("capsfilter")
+        .property("caps", caps)
+        .build()
+        .map_err(build_error)?;
+    let delay = gst::ElementFactory::make("identity")
+        .property("ts-offset", request.delay_ns)
+        .build()
+        .map_err(build_error)?;
+    pipeline_add(
+        pipeline,
+        &[&source, &convert, &resample, &rate, &filter, &delay],
+    )?;
+    gst::Element::link_many([&source, &convert, &resample, &rate, &filter, &delay])
+        .map_err(link_error)?;
+    let mut tail = delay;
+    for element in build_audio_processing(request.processing)? {
+        pipeline.add(&element).map_err(pipeline_error)?;
+        tail.link(&element).map_err(link_error)?;
+        tail = element;
+    }
+    Ok((tail, rate))
+}
+
+fn build_audio_processing(processing: AudioProcessing) -> Result<Vec<gst::Element>, LinkError> {
+    let mut elements = Vec::new();
+    if processing.gate {
+        elements.push(
+            gst::ElementFactory::make("audiodynamic")
+                .property_from_str("mode", "expander")
+                .property_from_str("characteristics", "hard-knee")
+                .property("threshold", db_to_linear(-50.0) as f32)
+                .property("ratio", 10.0_f32)
+                .build()
+                .map_err(build_error)?,
+        );
+    }
+    if processing.compressor {
+        elements.push(
+            gst::ElementFactory::make("audiodynamic")
+                .property_from_str("mode", "compressor")
+                .property_from_str("characteristics", "soft-knee")
+                .property("threshold", db_to_linear(-12.0) as f32)
+                .property("ratio", 4.0_f32)
+                .build()
+                .map_err(build_error)?,
+        );
+    }
+    if processing.limiter {
+        elements.push(
+            gst::ElementFactory::make("audiodynamic")
+                .property_from_str("mode", "compressor")
+                .property_from_str("characteristics", "hard-knee")
+                .property("threshold", db_to_linear(-1.0) as f32)
+                .property("ratio", 20.0_f32)
+                .build()
+                .map_err(build_error)?,
+        );
+        elements.push(
+            gst::ElementFactory::make("audioamplify")
+                .property("amplification", 1.0_f32)
+                .property_from_str("clipping-method", "clip")
+                .build()
+                .map_err(build_error)?,
+        );
+    }
+    Ok(elements)
+}
+
+fn attach_audio_stats(
+    element: &gst::Element,
+    sample_rate: u32,
+    channels: u32,
+    interval: Duration,
+) -> Result<Arc<Mutex<AudioStatsState>>, LinkError> {
+    let state = Arc::new(Mutex::new(AudioStatsState::default()));
+    let state_for_probe = Arc::clone(&state);
+    let interval_samples = ((interval.as_secs_f64() * f64::from(sample_rate) * f64::from(channels))
+        .round() as u64)
+        .max(1);
+    let pad = element
+        .static_pad("src")
+        .ok_or_else(|| media_error("audio telemetry element has no source pad"))?;
+    pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+        if let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_ref()
+            && let Ok(mut stats) = state_for_probe.lock()
+        {
+            stats.buffers = stats.buffers.saturating_add(1);
+            stats.bytes = stats.bytes.saturating_add(buffer.size() as u64);
+            if stats.buffers > 1 && buffer.flags().contains(gst::BufferFlags::DISCONT) {
+                stats.timestamp_discontinuities = stats.timestamp_discontinuities.saturating_add(1);
+            }
+            match buffer.pts() {
+                Some(pts) if stats.last_pts.is_some_and(|last| pts < last) => {
+                    stats.timestamp_discontinuities =
+                        stats.timestamp_discontinuities.saturating_add(1);
+                    stats.last_pts = Some(pts);
+                }
+                Some(pts) => stats.last_pts = Some(pts),
+                None => {
+                    stats.timestamp_discontinuities =
+                        stats.timestamp_discontinuities.saturating_add(1);
+                }
+            }
+            if let Ok(map) = buffer.map_readable() {
+                let mut local_peak = 0.0_f64;
+                let mut local_sum_squares = 0.0_f64;
+                let mut local_samples = 0_u64;
+                for bytes in map.as_slice().chunks_exact(2) {
+                    let sample = f64::from(i16::from_le_bytes([bytes[0], bytes[1]])) / 32768.0;
+                    let absolute = sample.abs();
+                    local_peak = local_peak.max(absolute);
+                    local_sum_squares += sample * sample;
+                    local_samples = local_samples.saturating_add(1);
+                }
+                if local_peak >= db_to_linear(-0.1) {
+                    stats.clipping_events = stats.clipping_events.saturating_add(1);
+                }
+                stats.peak = stats.peak.max(local_peak);
+                stats.total_samples = stats.total_samples.saturating_add(local_samples);
+                stats.total_sum_squares += local_sum_squares;
+                stats.event_samples = stats.event_samples.saturating_add(local_samples);
+                stats.event_sum_squares += local_sum_squares;
+                stats.event_peak = stats.event_peak.max(local_peak);
+                if stats.event_samples >= interval_samples {
+                    let rms = (stats.event_sum_squares / stats.event_samples as f64).sqrt();
+                    stats.sequence = stats.sequence.saturating_add(1);
+                    let event = AudioLevelEvent {
+                        sequence: stats.sequence,
+                        elapsed_ms: stats.total_samples.saturating_mul(1_000)
+                            / u64::from(sample_rate)
+                                .saturating_mul(u64::from(channels))
+                                .max(1),
+                        peak_dbfs: linear_to_db(stats.event_peak),
+                        rms_dbfs: linear_to_db(rms),
+                        clipped: stats.event_peak >= db_to_linear(-0.1),
+                        discontinuities: stats.timestamp_discontinuities,
+                    };
+                    stats.events.push_back(event);
+                    stats.event_samples = 0;
+                    stats.event_sum_squares = 0.0;
+                    stats.event_peak = 0.0;
+                }
+            }
+        }
+        gst::PadProbeReturn::Ok
+    });
+    Ok(state)
+}
+
+fn finish_audio_stats(
+    state: &Arc<Mutex<AudioStatsState>>,
+    rate: &gst::Element,
+    sample_rate: u32,
+    channels: u32,
+    codec: Option<String>,
+    processing: AudioProcessing,
+) -> AudioStats {
+    let state = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let rms = if state.total_samples == 0 {
+        0.0
+    } else {
+        (state.total_sum_squares / state.total_samples as f64).sqrt()
+    };
+    AudioStats {
+        buffers: state.buffers,
+        bytes: state.bytes,
+        clipping_events: state.clipping_events,
+        timestamp_discontinuities: state.timestamp_discontinuities,
+        dropped_samples: rate.property::<u64>("drop"),
+        added_samples: rate.property::<u64>("add"),
+        sample_rate,
+        channels,
+        peak_dbfs: linear_to_db(state.peak),
+        rms_dbfs: linear_to_db(rms),
+        codec,
+        processing,
+    }
+}
+
+fn drain_audio_events<F>(
+    state: &Arc<Mutex<AudioStatsState>>,
+    emit: &mut Option<&mut F>,
+) -> Result<(), LinkError>
+where
+    F: FnMut(&AudioLevelEvent) -> Result<(), LinkError> + ?Sized,
+{
+    let events = {
+        let mut state = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.events.drain(..).collect::<Vec<_>>()
+    };
+    if let Some(emit) = emit.as_deref_mut() {
+        for event in &events {
+            emit(event)?;
+        }
+    }
+    Ok(())
+}
+
+fn run_audio_pipeline(
+    pipeline: gst::Pipeline,
+    request: &AudioSourceRequest,
+    telemetry: Arc<Mutex<AudioStatsState>>,
+    rate: &gst::Element,
+    codec: Option<String>,
+    mut emit: AudioEventSink<'_>,
+) -> Result<AudioRunReport, LinkError> {
+    INTERRUPTED.store(false, Ordering::SeqCst);
+    let bus = pipeline
+        .bus()
+        .ok_or_else(|| media_error("GStreamer audio pipeline has no bus"))?;
+    pipeline
+        .set_state(gst::State::Playing)
+        .map_err(state_error)?;
+    let started = Instant::now();
+    let mut requested_stop = None;
+    let mut stop_requested_at = None;
+    let mut finalized = false;
+    let mut failure = None;
+    loop {
+        drain_audio_events(&telemetry, &mut emit)?;
+        if requested_stop.is_none() {
+            let reason = if INTERRUPTED.load(Ordering::SeqCst) {
+                Some(AudioStopReason::Interrupted)
+            } else if request
+                .duration
+                .is_some_and(|limit| started.elapsed() >= limit)
+            {
+                Some(AudioStopReason::Completed)
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                requested_stop = Some(reason);
+                stop_requested_at = Some(Instant::now());
+                pipeline.send_event(gst::event::Eos::new());
+            }
+        } else if stop_requested_at.is_some_and(|at| at.elapsed() >= request.shutdown_timeout) {
+            failure = Some(LinkError::new(
+                ErrorKind::Timeout,
+                "audio pipeline did not finalize before the shutdown timeout",
+            ));
+            break;
+        }
+        let Some(message) = bus.timed_pop(gst::ClockTime::from_mseconds(100)) else {
+            continue;
+        };
+        match message.view() {
+            gst::MessageView::Eos(..) => {
+                finalized = true;
+                break;
+            }
+            gst::MessageView::Error(error) => {
+                let reason = error.error().to_string();
+                let debug = error
+                    .debug()
+                    .map(|value| value.to_string())
+                    .unwrap_or_default();
+                if reason.to_ascii_lowercase().contains("broken pipe")
+                    || debug.to_ascii_lowercase().contains("broken pipe")
+                {
+                    requested_stop = Some(AudioStopReason::BrokenPipe);
+                    break;
+                }
+                failure = Some(
+                    LinkError::new(
+                        ErrorKind::MediaPipelineFailure,
+                        "GStreamer audio pipeline failed",
+                    )
+                    .with_detail("reason", reason)
+                    .with_detail("debug", debug),
+                );
+                break;
+            }
+            _ => {}
+        }
+    }
+    drain_audio_events(&telemetry, &mut emit)?;
+    let _ = pipeline.set_state(gst::State::Null);
+    if let Some(failure) = failure {
+        return Err(failure);
+    }
+    Ok(AudioRunReport {
+        source_id: request.id.clone(),
+        stats: finish_audio_stats(
+            &telemetry,
+            rate,
+            request.sample_rate,
+            request.channels,
+            codec,
+            request.processing,
+        ),
+        stop_reason: requested_stop.unwrap_or(AudioStopReason::Completed),
+        outputs: Vec::new(),
+        finalized,
+    })
+}
+
+fn attach_av_sync(
+    video: &gst::Element,
+    audio: &gst::Element,
+) -> Result<Arc<Mutex<AvSyncState>>, LinkError> {
+    let state = Arc::new(Mutex::new(AvSyncState::default()));
+    let epoch = Instant::now();
+    attach_sync_pad(video, Arc::clone(&state), epoch, true)?;
+    attach_sync_pad(audio, Arc::clone(&state), epoch, false)?;
+    Ok(state)
+}
+
+fn attach_sync_pad(
+    element: &gst::Element,
+    state: Arc<Mutex<AvSyncState>>,
+    epoch: Instant,
+    video: bool,
+) -> Result<(), LinkError> {
+    let pad = element
+        .static_pad("src")
+        .ok_or_else(|| media_error("sync telemetry element has no source pad"))?;
+    pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+        if let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_ref()
+            && let Some(pts) = buffer.pts()
+            && let Ok(mut state) = state.lock()
+        {
+            let elapsed = u64::try_from(epoch.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            let clock_bias = i128::from(pts.nseconds()) - i128::from(elapsed);
+            if video {
+                state.video_clock_bias_ns = Some(clock_bias);
+            } else {
+                state.audio_clock_bias_ns = Some(clock_bias);
+            }
+            if let (Some(video_bias), Some(audio_bias)) =
+                (state.video_clock_bias_ns, state.audio_clock_bias_ns)
+            {
+                let offset = audio_bias - video_bias;
+                let first_pair = *state.first_pair_time_ns.get_or_insert(elapsed);
+                state.raw_initial_offset_ns.get_or_insert(offset);
+                state.raw_final_offset_ns = Some(offset);
+                state.raw_max_abs_offset_ns =
+                    state.raw_max_abs_offset_ns.max(offset.unsigned_abs());
+                if elapsed.saturating_sub(first_pair) < AV_SYNC_WARMUP_NS {
+                    return gst::PadProbeReturn::Ok;
+                }
+                state.measurement_first_time_ns.get_or_insert(elapsed);
+                state.last_pair_time_ns = Some(elapsed);
+                if state.initial_offset_samples < AV_SYNC_WINDOW_SAMPLES as u32 {
+                    state.initial_offset_sum_ns += offset;
+                    state.initial_offset_samples += 1;
+                }
+                state.recent_offsets_ns.push_back(offset);
+                if state.recent_offsets_ns.len() > AV_SYNC_WINDOW_SAMPLES {
+                    state.recent_offsets_ns.pop_front();
+                }
+                state.max_abs_offset_ns = state.max_abs_offset_ns.max(offset.unsigned_abs());
+            }
+        }
+        gst::PadProbeReturn::Ok
+    });
+    Ok(())
+}
+
+fn finish_av_sync(state: &Arc<Mutex<AvSyncState>>) -> AvSyncStats {
+    let state = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let measured = state.initial_offset_samples > 0 && !state.recent_offsets_ns.is_empty();
+    let initial = if measured {
+        state.initial_offset_sum_ns / i128::from(state.initial_offset_samples)
+    } else {
+        state.raw_initial_offset_ns.unwrap_or_default()
+    };
+    let final_offset = if measured {
+        state.recent_offsets_ns.iter().sum::<i128>() / state.recent_offsets_ns.len() as i128
+    } else {
+        state.raw_final_offset_ns.unwrap_or(initial)
+    };
+    let drift = final_offset - initial;
+    let elapsed = state
+        .last_pair_time_ns
+        .zip(state.measurement_first_time_ns.or(state.first_pair_time_ns))
+        .map_or(0, |(last, first)| last.saturating_sub(first));
+    AvSyncStats {
+        initial_offset_ms: initial as f64 / 1_000_000.0,
+        final_offset_ms: final_offset as f64 / 1_000_000.0,
+        max_abs_offset_ms: if measured {
+            state.max_abs_offset_ns
+        } else {
+            state.raw_max_abs_offset_ns
+        } as f64
+            / 1_000_000.0,
+        drift_ms: drift as f64 / 1_000_000.0,
+        drift_ppm: if elapsed == 0 {
+            0.0
+        } else {
+            drift as f64 / elapsed as f64 * 1_000_000.0
+        },
+        corrected: true,
+    }
+}
+
+struct AudioOutputPlan {
+    requested: PathBuf,
+    temporary: PathBuf,
+    overwrite: bool,
+}
+
+impl AudioOutputPlan {
+    fn new(requested: &Path, overwrite: bool) -> Result<Self, LinkError> {
+        validate_output_parent(requested)?;
+        if requested.exists() && !overwrite {
+            return Err(LinkError::new(
+                ErrorKind::InvalidInvocation,
+                "audio output already exists; use --overwrite to replace it",
+            )
+            .with_detail("path", requested.display().to_string()));
+        }
+        let parent = requested.parent().unwrap_or_else(|| Path::new("."));
+        let stem = requested
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| media_error("audio output has no valid file stem"))?;
+        let extension = requested
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("audio");
+        let mut counter = 0_u32;
+        let temporary = loop {
+            let candidate = parent.join(format!(
+                ".{stem}.linkctl-audio-part-{}-{counter}.{extension}",
+                std::process::id()
+            ));
+            if !candidate.exists() {
+                break candidate;
+            }
+            counter = counter.saturating_add(1);
+        };
+        Ok(Self {
+            requested: requested.to_owned(),
+            temporary,
+            overwrite,
+        })
+    }
+
+    fn finish(self, finalized: bool) -> Result<Vec<PathBuf>, LinkError> {
+        if !finalized {
+            return Ok(vec![self.temporary]);
+        }
+        if self.requested.exists() && !self.overwrite {
+            return Err(LinkError::new(
+                ErrorKind::IoFailure,
+                "audio destination appeared before finalization",
+            )
+            .with_detail("path", self.requested.display().to_string())
+            .with_detail("recoverable", self.temporary.display().to_string()));
+        }
+        fs::rename(&self.temporary, &self.requested).map_err(|error| {
+            filesystem_error("failed to finalize audio output", &self.requested, &error)
+                .with_detail("recoverable", self.temporary.display().to_string())
+        })?;
+        Ok(vec![self.requested])
+    }
+}
+
+const fn audio_encoding_name(encoding: AudioEncoding) -> &'static str {
+    match encoding {
+        AudioEncoding::Wav => "pcm-s16le",
+        AudioEncoding::Flac => "flac",
+        AudioEncoding::Raw => "pcm-s16le",
+    }
+}
+
+fn db_to_linear(db: f64) -> f64 {
+    10_f64.powf(db / 20.0)
+}
+
+fn linear_to_db(value: f64) -> f64 {
+    if value <= 0.0 {
+        -120.0
+    } else {
+        20.0 * value.log10()
+    }
 }
 
 /// Parse a binary size such as `5GiB`, `100MB`, or a raw byte count.
@@ -413,7 +1363,7 @@ pub fn parse_byte_size(input: &str) -> Result<u64, LinkError> {
 fn run_pipeline(
     pipeline: gst::Pipeline,
     request: &ForegroundRequest,
-    stats: Arc<Mutex<StatsState>>,
+    telemetry: MediaTelemetry,
     pass_through: bool,
     disk_guard: Option<(&Path, u64)>,
     size_guard: Option<(&OutputPlan, u64)>,
@@ -497,13 +1447,26 @@ fn run_pipeline(
     if let Some(failure) = failure {
         return Err(failure);
     }
+    let audio = telemetry.audio.map(|runtime| {
+        finish_audio_stats(
+            &runtime.telemetry,
+            &runtime.rate,
+            runtime.sample_rate,
+            runtime.channels,
+            Some(runtime.codec),
+            runtime.processing,
+        )
+    });
+    let av_sync = telemetry.av_sync.as_ref().map(finish_av_sync);
     let report = MediaRunReport {
         tuple: request.tuple.clone().normalized(),
-        stats: finish_stats(&stats, started.elapsed()),
+        stats: finish_stats(&telemetry.video, started.elapsed()),
         stop_reason: requested_stop.unwrap_or(MediaStopReason::Completed),
         outputs: Vec::new(),
         pass_through,
         finalized,
+        audio,
+        av_sync,
     };
     Ok(report)
 }
@@ -995,12 +1958,47 @@ fn filesystem_error(message: &'static str, path: &Path, error: &io::Error) -> Li
 
 #[cfg(test)]
 mod tests {
-    use super::parse_byte_size;
+    use std::sync::{Arc, Mutex};
+
+    use link_core::audio::AudioProcessing;
+
+    use super::{AvSyncState, audio_processing_elements, finish_av_sync, parse_byte_size};
 
     #[test]
     fn binary_and_decimal_byte_sizes_are_explicit() {
         assert_eq!(parse_byte_size("5GiB").unwrap(), 5 * 1_073_741_824);
         assert_eq!(parse_byte_size("1.5MB").unwrap(), 1_500_000);
         assert!(parse_byte_size("lots").is_err());
+    }
+
+    #[test]
+    fn requested_processing_presets_map_to_the_needed_plugins() {
+        assert!(audio_processing_elements(AudioProcessing::default()).is_empty());
+        assert_eq!(
+            audio_processing_elements(AudioProcessing {
+                gate: true,
+                compressor: true,
+                limiter: true,
+            }),
+            vec!["audiodynamic", "audioamplify"]
+        );
+    }
+
+    #[test]
+    fn sync_report_exposes_offset_and_drift_in_stable_units() {
+        let state = Arc::new(Mutex::new(AvSyncState {
+            first_pair_time_ns: Some(0),
+            last_pair_time_ns: Some(1_000_000_000),
+            raw_initial_offset_ns: Some(2_000_000),
+            raw_final_offset_ns: Some(3_000_000),
+            raw_max_abs_offset_ns: 4_000_000,
+            ..AvSyncState::default()
+        }));
+        let report = finish_av_sync(&state);
+        assert!((report.initial_offset_ms - 2.0).abs() < f64::EPSILON);
+        assert!((report.final_offset_ms - 3.0).abs() < f64::EPSILON);
+        assert!((report.drift_ms - 1.0).abs() < f64::EPSILON);
+        assert!((report.drift_ppm - 1_000.0).abs() < f64::EPSILON);
+        assert!(report.corrected);
     }
 }

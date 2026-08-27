@@ -32,6 +32,7 @@ fn help_and_version_advertise_only_implemented_commands() {
     assert!(stdout.contains("control"));
     assert!(stdout.contains("image"));
     assert!(stdout.contains("video"));
+    assert!(stdout.contains("audio"));
     assert!(stdout.contains("snapshot"));
     assert!(stdout.contains("capture"));
     assert!(stdout.contains("record"));
@@ -67,6 +68,35 @@ fn media_help_exposes_exact_tuple_and_output_options() {
     assert!(stdout.contains("--segment-duration"));
     assert!(stdout.contains("--rolling"));
     assert!(stdout.contains("--disk-reserve"));
+    assert!(stdout.contains("--audio"));
+    assert!(stdout.contains("--audio-delay"));
+    assert!(stdout.contains("--gate"));
+}
+
+#[test]
+fn audio_help_exposes_discovery_control_and_streaming_commands() {
+    let audio = run(&["audio", "--help"]);
+    assert!(audio.status.success());
+    let stdout = String::from_utf8(audio.stdout).expect("UTF-8 help");
+    for command in [
+        "devices", "status", "gain", "mute", "unmute", "meter", "capture", "monitor",
+    ] {
+        assert!(stdout.contains(command));
+    }
+
+    let capture = run(&["audio", "capture", "--help"]);
+    assert!(capture.status.success());
+    let stdout = String::from_utf8(capture.stdout).expect("UTF-8 help");
+    for option in ["--stdout", "--audio-format", "--sample-rate", "--channels"] {
+        assert!(stdout.contains(option));
+    }
+}
+
+#[test]
+fn binary_audio_stdout_requires_an_explicit_encoding_before_discovery() {
+    let output = run(&["audio", "capture", "--stdout"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires --audio-format"));
 }
 
 #[test]

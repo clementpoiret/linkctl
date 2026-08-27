@@ -5,6 +5,7 @@ use std::{cmp::Ordering, path::PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    audio::{AudioStats, AvSyncStats},
     control::ControlValue,
     probe::{Rational, VideoFormatReport},
 };
@@ -145,7 +146,7 @@ pub enum MediaStopReason {
 }
 
 /// Final report for capture, recording, statistics, or restreaming.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MediaRunReport {
     /// Applied source tuple.
     pub tuple: VideoTuple,
@@ -159,6 +160,10 @@ pub struct MediaRunReport {
     pub pass_through: bool,
     /// Whether the container received EOS and was finalized.
     pub finalized: bool,
+    /// Audio-branch statistics when audio was part of the operation.
+    pub audio: Option<AudioStats>,
+    /// Audio/video timestamp relationship for muxed operations.
+    pub av_sync: Option<AvSyncStats>,
 }
 
 /// One control value captured in snapshot metadata.

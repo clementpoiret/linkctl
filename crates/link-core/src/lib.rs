@@ -1,5 +1,6 @@
 //! Shared contracts for the `linkctl` command-line tools and services.
 
+pub mod audio;
 pub mod config;
 pub mod control;
 pub mod device;

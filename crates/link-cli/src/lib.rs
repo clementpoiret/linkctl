@@ -13,9 +13,12 @@ use std::{
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind as ClapErrorKind};
 use clap_complete::Shell;
 #[cfg(feature = "gstreamer")]
+use link_core::audio::{AudioDirection, AudioProcessing};
+#[cfg(feature = "gstreamer")]
 use link_core::media::{SnapshotControl, SnapshotMetadata};
 use link_core::{
     ErrorKind, LinkError, ProcessExit, SCHEMA_VERSION,
+    audio::{AudioBackendKind, AudioControlLayer, AudioEndpoint, AudioInventory},
     config::{
         Config, ConfigLoader, ConfigOverrides, DaemonMode, DurationValue, LogLevel, OutputFormat,
     },
@@ -137,13 +140,18 @@ pub enum Command {
         #[command(subcommand)]
         command: VideoCommand,
     },
+    /// Discover, control, capture, meter, and monitor Linux audio devices.
+    Audio {
+        #[command(subcommand)]
+        command: AudioCommand,
+    },
     /// Capture one or more JPEG, PNG, or raw compressed frames.
     #[cfg(feature = "gstreamer")]
     Snapshot(SnapshotArgs),
     /// Copy a raw H.264 or MJPEG stream to standard output.
     #[cfg(feature = "gstreamer")]
     Capture(CaptureArgs),
-    /// Record a foreground audio-less video stream.
+    /// Record a foreground video stream with optional audio.
     #[cfg(feature = "gstreamer")]
     Record {
         #[command(subcommand)]
@@ -341,6 +349,154 @@ pub struct VideoTupleArgs {
     pub fps: Option<String>,
 }
 
+/// Standard and host audio operations.
+#[derive(Clone, Debug, Subcommand)]
+pub enum AudioCommand {
+    /// List logical capture and playback endpoints with ALSA/PipeWire routes.
+    Devices,
+    /// Show hardware and host-session gain/mute state.
+    Status {
+        /// `camera`, a stable audio ID, or `alsa:`/`pipewire:` selector.
+        #[arg(long, default_value = "camera")]
+        source: String,
+    },
+    /// Set normalized capture gain.
+    Gain {
+        /// Percentage such as `70%`, or normalized value such as `0.7`.
+        gain: String,
+        /// `camera`, a stable audio ID, or `alsa:`/`pipewire:` selector.
+        #[arg(long, default_value = "camera")]
+        source: String,
+        /// Clamp a value outside the supported normalized range.
+        #[arg(long)]
+        clamp: bool,
+    },
+    /// Mute the selected capture source.
+    Mute {
+        #[arg(long, default_value = "camera")]
+        source: String,
+    },
+    /// Unmute the selected capture source.
+    Unmute {
+        #[arg(long, default_value = "camera")]
+        source: String,
+    },
+    /// Emit periodic peak/RMS and discontinuity events.
+    #[cfg(feature = "gstreamer")]
+    Meter(AudioMeterArgs),
+    /// Capture WAV, FLAC, or headerless signed 16-bit PCM.
+    #[cfg(feature = "gstreamer")]
+    Capture(AudioCaptureArgs),
+    /// Monitor a capture source through a playback sink.
+    #[cfg(feature = "gstreamer")]
+    Monitor(AudioMonitorArgs),
+}
+
+/// Optional host audio processing presets.
+#[cfg(feature = "gstreamer")]
+#[derive(Clone, Debug, Default, clap::Args)]
+pub struct AudioProcessingArgs {
+    /// Enable the fixed conservative noise-gate preset.
+    #[arg(long)]
+    pub gate: bool,
+    /// Enable the fixed conservative compressor preset.
+    #[arg(long)]
+    pub compressor: bool,
+    /// Enable the fixed conservative limiter preset.
+    #[arg(long)]
+    pub limiter: bool,
+}
+
+#[cfg(feature = "gstreamer")]
+impl From<AudioProcessingArgs> for AudioProcessing {
+    fn from(value: AudioProcessingArgs) -> Self {
+        Self {
+            gate: value.gate,
+            compressor: value.compressor,
+            limiter: value.limiter,
+        }
+    }
+}
+
+/// Common resolved audio source arguments.
+#[cfg(feature = "gstreamer")]
+#[derive(Clone, Debug, clap::Args)]
+pub struct AudioStreamArgs {
+    /// `camera`, a stable audio ID, or `alsa:`/`pipewire:` selector.
+    #[arg(long, default_value = "camera")]
+    pub source: String,
+    /// Output sample rate; defaults to the selected source's native maximum.
+    #[arg(long)]
+    pub sample_rate: Option<u32>,
+    /// Output channel count; defaults to the selected source's native minimum.
+    #[arg(long)]
+    pub channels: Option<u32>,
+    #[command(flatten)]
+    pub processing: AudioProcessingArgs,
+}
+
+/// Audio meter arguments.
+#[cfg(feature = "gstreamer")]
+#[derive(Clone, Debug, clap::Args)]
+pub struct AudioMeterArgs {
+    #[command(flatten)]
+    pub stream: AudioStreamArgs,
+    /// Stop after this duration; otherwise run until interrupted.
+    #[arg(long)]
+    pub duration: Option<DurationValue>,
+    /// Peak/RMS event interval.
+    #[arg(long, default_value = "100ms")]
+    pub interval: DurationValue,
+}
+
+/// Standalone audio capture arguments.
+#[cfg(feature = "gstreamer")]
+#[derive(Clone, Debug, clap::Args)]
+pub struct AudioCaptureArgs {
+    /// Output path. Omit only with `--stdout`.
+    pub output: Option<PathBuf>,
+    /// Write binary audio to standard output.
+    #[arg(long)]
+    pub stdout: bool,
+    /// Encoding override; required for standard output.
+    #[arg(long, value_enum)]
+    pub audio_format: Option<AudioFormatChoice>,
+    #[command(flatten)]
+    pub stream: AudioStreamArgs,
+    /// Stop and finalize after this duration.
+    #[arg(long)]
+    pub duration: Option<DurationValue>,
+    /// Replace an existing output file.
+    #[arg(long)]
+    pub overwrite: bool,
+}
+
+/// Live audio monitoring arguments.
+#[cfg(feature = "gstreamer")]
+#[derive(Clone, Debug, clap::Args)]
+pub struct AudioMonitorArgs {
+    #[command(flatten)]
+    pub stream: AudioStreamArgs,
+    /// Playback endpoint ID, `alsa:`/`pipewire:` selector, or `default`.
+    #[arg(long, default_value = "default")]
+    pub sink: String,
+    /// Target buffering latency.
+    #[arg(long, default_value = "50ms")]
+    pub latency: DurationValue,
+    /// Stop after this duration; otherwise run until interrupted.
+    #[arg(long)]
+    pub duration: Option<DurationValue>,
+}
+
+/// Standalone audio output encoding.
+#[cfg(feature = "gstreamer")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum AudioFormatChoice {
+    Wav,
+    Flac,
+    Raw,
+}
+
 /// Snapshot command arguments.
 #[cfg(feature = "gstreamer")]
 #[derive(Clone, Debug, clap::Args)]
@@ -394,7 +550,7 @@ pub struct CaptureArgs {
 #[cfg(feature = "gstreamer")]
 #[derive(Clone, Debug, Subcommand)]
 pub enum RecordCommand {
-    /// Start a blocking, audio-less recording.
+    /// Start a blocking recording.
     Start {
         /// Final output path; segmented output derives numbered siblings.
         output: PathBuf,
@@ -427,6 +583,14 @@ pub enum RecordCommand {
         /// Replace conflicting output files.
         #[arg(long)]
         overwrite: bool,
+        /// Opt in to audio with `camera`, a stable audio ID, or an explicit backend selector.
+        #[arg(long)]
+        audio: Option<String>,
+        /// Signed audio timestamp offset, such as `25ms` or `-40ms`.
+        #[arg(long, default_value = "0ms")]
+        audio_delay: String,
+        #[command(flatten)]
+        audio_processing: AudioProcessingArgs,
     },
 }
 
@@ -694,6 +858,7 @@ pub fn run(arguments: Vec<OsString>) -> u8 {
             run_image(&config, cli.backend, command, cli.dry_run, cli.yes)
         }
         Some(Command::Video { command }) => run_video(&config, cli.backend, command, cli.dry_run),
+        Some(Command::Audio { command }) => run_audio(&config, cli.backend, command, cli.dry_run),
         #[cfg(feature = "gstreamer")]
         Some(Command::Snapshot(arguments)) => {
             run_snapshot(&config, cli.backend, arguments, cli.dry_run)
@@ -728,6 +893,10 @@ fn uses_binary_stdout(command: Option<&Command>) -> bool {
         Some(Command::Capture(_)) => true,
         #[cfg(feature = "gstreamer")]
         Some(Command::Snapshot(arguments)) => arguments.output == Path::new("-"),
+        #[cfg(feature = "gstreamer")]
+        Some(Command::Audio {
+            command: AudioCommand::Capture(arguments),
+        }) => arguments.stdout,
         _ => false,
     }
 }
@@ -769,6 +938,19 @@ fn command_identifier(command: Option<&Command>) -> &'static str {
             VideoCommand::Status => "video.status",
             VideoCommand::Set { .. } => "video.set",
             VideoCommand::Stats { .. } => "video.stats",
+        },
+        Some(Command::Audio { command }) => match command {
+            AudioCommand::Devices => "audio.devices",
+            AudioCommand::Status { .. } => "audio.status",
+            AudioCommand::Gain { .. } => "audio.gain",
+            AudioCommand::Mute { .. } => "audio.mute",
+            AudioCommand::Unmute { .. } => "audio.unmute",
+            #[cfg(feature = "gstreamer")]
+            AudioCommand::Meter(_) => "audio.meter",
+            #[cfg(feature = "gstreamer")]
+            AudioCommand::Capture(_) => "audio.capture",
+            #[cfg(feature = "gstreamer")]
+            AudioCommand::Monitor(_) => "audio.monitor",
         },
         #[cfg(feature = "gstreamer")]
         Some(Command::Snapshot(_)) => "snapshot",
@@ -1399,6 +1581,663 @@ fn emit_media_dry_run(
     }
 }
 
+fn discover_audio() -> Result<(AudioInventory, Vec<DiscoveredDevice>), LinkError> {
+    let cameras = discovered_devices()?;
+    let associations = cameras
+        .iter()
+        .filter(|device| device.mode() == DeviceMode::Camera)
+        .map(|device| link_audio::CameraAudioAssociation {
+            stable_id: device.identity.stable_id(),
+            usb: device.identity.clone(),
+            card_indexes: device.alsa_card_indexes(),
+        })
+        .collect::<Vec<_>>();
+    Ok((link_audio::inventory(&associations)?, cameras))
+}
+
+fn selected_audio_source(
+    config: &Config,
+    selector: &str,
+) -> Result<(AudioEndpoint, AudioInventory), LinkError> {
+    let (inventory, cameras) = discover_audio()?;
+    let camera = if selector == "camera" {
+        let selected = if let Some(selector) = config.default_device.as_deref() {
+            link_linux::select_devices(&cameras, selector)?
+        } else {
+            match cameras.as_slice() {
+                [camera] => vec![camera],
+                [] => {
+                    return Err(LinkError::new(
+                        ErrorKind::DeviceNotFound,
+                        "no camera device was discovered",
+                    ));
+                }
+                _ => {
+                    return Err(LinkError::new(
+                        ErrorKind::InvalidInvocation,
+                        "multiple cameras were discovered; select one with --device",
+                    ));
+                }
+            }
+        };
+        match selected.as_slice() {
+            [camera] => Some(camera.identity.stable_id()),
+            _ => {
+                return Err(LinkError::new(
+                    ErrorKind::InvalidInvocation,
+                    "camera audio requires exactly one selected camera",
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    let endpoint =
+        link_audio::resolve_capture_source(&inventory, Some(selector), camera.as_deref())?;
+    Ok((endpoint, inventory))
+}
+
+fn run_audio(
+    config: &Config,
+    backend: Option<BackendChoice>,
+    command: AudioCommand,
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    if config.daemon == DaemonMode::Always {
+        return Err(LinkError::new(
+            ErrorKind::DaemonUnavailable,
+            "the daemon is not implemented in this build",
+        ));
+    }
+    match command {
+        AudioCommand::Devices => run_audio_devices(config),
+        AudioCommand::Status { source } => {
+            if backend == Some(BackendChoice::Vendor) {
+                return Err(audio_backend_unsupported("vendor"));
+            }
+            let (endpoint, _) = selected_audio_source(config, &source)?;
+            let status = link_audio::status(&endpoint)?;
+            if config.output == OutputFormat::Human {
+                println!("{} ({})", status.source.name, status.source.id);
+                if let Some(hardware) = &status.hardware {
+                    println!(
+                        "  hardware: gain={} mute={}",
+                        hardware
+                            .gain
+                            .map_or_else(|| "-".into(), |gain| format!("{:.1}%", gain * 100.0)),
+                        hardware
+                            .muted
+                            .map_or_else(|| "-".into(), |muted| muted.to_string())
+                    );
+                }
+                if let Some(host) = &status.host {
+                    println!(
+                        "  host: gain={} mute={}",
+                        host.gain
+                            .map_or_else(|| "-".into(), |gain| format!("{:.1}%", gain * 100.0)),
+                        host.muted
+                            .map_or_else(|| "-".into(), |muted| muted.to_string())
+                    );
+                }
+                Ok(())
+            } else {
+                emit_success(config.output, "audio.status", None, &status)
+            }
+        }
+        AudioCommand::Gain {
+            gain,
+            source,
+            clamp,
+        } => {
+            let (endpoint, _) = selected_audio_source(config, &source)?;
+            let gain = parse_audio_gain(&gain, clamp)?;
+            let layer = select_audio_control_layer(&endpoint, backend, true)?;
+            let report = link_audio::set_gain(&endpoint, layer, gain, dry_run)?;
+            emit_audio_set_report(config, "audio.gain", &endpoint, &report)
+        }
+        AudioCommand::Mute { source } => run_audio_mute(config, backend, &source, true, dry_run),
+        AudioCommand::Unmute { source } => run_audio_mute(config, backend, &source, false, dry_run),
+        #[cfg(feature = "gstreamer")]
+        AudioCommand::Meter(arguments) => run_audio_meter(config, arguments, dry_run),
+        #[cfg(feature = "gstreamer")]
+        AudioCommand::Capture(arguments) => run_audio_capture(config, arguments, dry_run),
+        #[cfg(feature = "gstreamer")]
+        AudioCommand::Monitor(arguments) => run_audio_monitor(config, arguments, dry_run),
+    }
+}
+
+fn run_audio_mute(
+    config: &Config,
+    backend: Option<BackendChoice>,
+    source: &str,
+    muted: bool,
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    let (endpoint, _) = selected_audio_source(config, source)?;
+    let layer = select_audio_control_layer(&endpoint, backend, false)?;
+    let report = link_audio::set_mute(&endpoint, layer, muted, dry_run)?;
+    emit_audio_set_report(
+        config,
+        if muted { "audio.mute" } else { "audio.unmute" },
+        &endpoint,
+        &report,
+    )
+}
+
+fn run_audio_devices(config: &Config) -> Result<(), LinkError> {
+    let (mut inventory, cameras) = discover_audio()?;
+    if let Some(selector) = config.default_device.as_deref()
+        && selector != "all"
+    {
+        let selected = link_linux::select_devices(&cameras, selector)?;
+        let selected_ids = selected
+            .iter()
+            .map(|device| device.identity.stable_id())
+            .collect::<Vec<_>>();
+        inventory.endpoints.retain(|endpoint| {
+            endpoint
+                .associated_camera
+                .as_ref()
+                .is_some_and(|camera| selected_ids.contains(camera))
+        });
+        let endpoint_ids = inventory
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.id.as_str())
+            .collect::<Vec<_>>();
+        inventory
+            .states
+            .retain(|state| endpoint_ids.contains(&state.endpoint_id.as_str()));
+    }
+    if config.output == OutputFormat::Human {
+        println!("ID\tDIRECTION\tNAME\tBACKENDS\tCAMERA\tFORMAT\tROUTE\tSTATE");
+        for endpoint in &inventory.endpoints {
+            let backends = endpoint
+                .transports
+                .iter()
+                .map(|transport| match transport.backend {
+                    AudioBackendKind::Alsa => "alsa",
+                    AudioBackendKind::Pipewire => "pipewire",
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            let controls = endpoint
+                .mixer_controls
+                .iter()
+                .map(|control| control.name.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            let control_state = inventory
+                .states
+                .iter()
+                .find(|state| state.endpoint_id == endpoint.id)
+                .map(|state| {
+                    let hardware = state.hardware.as_ref().map_or_else(
+                        || "hw=-".into(),
+                        |value| {
+                            format!(
+                                "hw={}/{}",
+                                value.gain.map_or_else(
+                                    || "-".into(),
+                                    |gain| format!("{:.0}%", gain * 100.0)
+                                ),
+                                value.muted.map_or_else(
+                                    || String::from("-"),
+                                    |muted| String::from(if muted { "muted" } else { "open" })
+                                )
+                            )
+                        },
+                    );
+                    let host = state.host.as_ref().map_or_else(
+                        || "host=-".into(),
+                        |value| {
+                            format!(
+                                "host={}/{}",
+                                value.gain.map_or_else(
+                                    || "-".into(),
+                                    |gain| format!("{:.0}%", gain * 100.0)
+                                ),
+                                value.muted.map_or_else(
+                                    || String::from("-"),
+                                    |muted| String::from(if muted { "muted" } else { "open" })
+                                )
+                            )
+                        },
+                    );
+                    format!("{hardware};{host};controls={controls}")
+                })
+                .unwrap_or_else(|| format!("controls={controls}"));
+            println!(
+                "{}\t{:?}\t{}\t{}\t{}\t{}ch {}Hz {}\t{}\t{}{}",
+                endpoint.id,
+                endpoint.direction,
+                endpoint.name,
+                backends,
+                endpoint.associated_camera.as_deref().unwrap_or("-"),
+                endpoint.channels_max.unwrap_or_default(),
+                endpoint.rate_max.unwrap_or_default(),
+                endpoint.formats.join(","),
+                if endpoint.default { "default" } else { "-" },
+                if endpoint.busy { "busy;" } else { "" },
+                control_state,
+            );
+        }
+        Ok(())
+    } else {
+        emit_success(config.output, "audio.devices", None, &inventory)
+    }
+}
+
+fn select_audio_control_layer(
+    endpoint: &AudioEndpoint,
+    backend: Option<BackendChoice>,
+    gain: bool,
+) -> Result<AudioControlLayer, LinkError> {
+    match backend.unwrap_or(BackendChoice::Auto) {
+        BackendChoice::Standard => Ok(AudioControlLayer::Hardware),
+        BackendChoice::Host => Ok(AudioControlLayer::Host),
+        BackendChoice::Vendor => Err(audio_backend_unsupported("vendor")),
+        BackendChoice::Auto => {
+            let status = link_audio::status(endpoint)?;
+            if status.hardware.as_ref().is_some_and(|state| {
+                if gain {
+                    state.gain.is_some()
+                } else {
+                    state.muted.is_some()
+                }
+            }) {
+                Ok(AudioControlLayer::Hardware)
+            } else {
+                Ok(AudioControlLayer::Host)
+            }
+        }
+    }
+}
+
+fn audio_backend_unsupported(backend: &'static str) -> LinkError {
+    LinkError::new(
+        ErrorKind::CapabilityUnsupported,
+        "the requested backend cannot provide this audio operation",
+    )
+    .with_detail("requested_backend", backend)
+}
+
+fn parse_audio_gain(value: &str, clamp: bool) -> Result<f64, LinkError> {
+    let value = value.trim();
+    let parsed = if let Some(percent) = value.strip_suffix('%') {
+        percent.parse::<f64>().map(|value| value / 100.0)
+    } else {
+        value.parse::<f64>()
+    }
+    .map_err(|_| {
+        LinkError::new(ErrorKind::InvalidInvocation, "invalid audio gain")
+            .with_detail("value", value.to_owned())
+            .with_detail("expected", "70% or normalized 0.7")
+    })?;
+    if !parsed.is_finite() {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "audio gain must be finite",
+        ));
+    }
+    if (0.0..=1.0).contains(&parsed) {
+        Ok(parsed)
+    } else if clamp {
+        Ok(parsed.clamp(0.0, 1.0))
+    } else {
+        Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "audio gain must be between 0% and 100%; use --clamp to clamp it",
+        ))
+    }
+}
+
+fn emit_audio_set_report(
+    config: &Config,
+    command: &'static str,
+    endpoint: &AudioEndpoint,
+    report: &link_core::audio::AudioSetReport,
+) -> Result<(), LinkError> {
+    if config.output == OutputFormat::Human {
+        println!(
+            "{} {}: {}{}",
+            endpoint.name,
+            report.field,
+            if report.dry_run {
+                "validated"
+            } else {
+                "applied and verified"
+            },
+            if report.dry_run { " (dry run)" } else { "" }
+        );
+        Ok(())
+    } else {
+        emit_success(config.output, command, None, report)
+    }
+}
+
+#[cfg(feature = "gstreamer")]
+fn resolved_audio_request(
+    config: &Config,
+    stream: AudioStreamArgs,
+    duration: Option<Duration>,
+    delay_ns: i64,
+) -> Result<link_media::AudioSourceRequest, LinkError> {
+    let (endpoint, _) = selected_audio_source(config, &stream.source)?;
+    let transport = if let Some(selector) = stream.source.strip_prefix("alsa:") {
+        endpoint.transports.iter().find(|transport| {
+            transport.backend == AudioBackendKind::Alsa && transport.selector == selector
+        })
+    } else if let Some(selector) = stream.source.strip_prefix("pipewire:") {
+        endpoint.transports.iter().find(|transport| {
+            transport.backend == AudioBackendKind::Pipewire && transport.selector == selector
+        })
+    } else {
+        endpoint
+            .transports
+            .iter()
+            .find(|transport| transport.backend == AudioBackendKind::Pipewire)
+            .or_else(|| endpoint.transports.first())
+    }
+    .ok_or_else(|| {
+        LinkError::new(
+            ErrorKind::CapabilityUnsupported,
+            "selected audio endpoint has no usable capture transport",
+        )
+    })?;
+    if endpoint.busy && transport.backend == AudioBackendKind::Alsa {
+        return Err(LinkError::new(
+            ErrorKind::DeviceBusy,
+            "selected ALSA capture source is busy",
+        ));
+    }
+    let sample_rate = stream.sample_rate.or(endpoint.rate_max).unwrap_or(48_000);
+    let channels = stream.channels.or(endpoint.channels_min).unwrap_or(1);
+    if !(8_000..=384_000).contains(&sample_rate) || !(1..=32).contains(&channels) {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "audio sample rate or channel count is outside supported conversion limits",
+        )
+        .with_detail("sample_rate", u64::from(sample_rate))
+        .with_detail("channels", u64::from(channels)));
+    }
+    Ok(link_media::AudioSourceRequest {
+        id: endpoint.id,
+        backend: transport.backend,
+        selector: transport.selector.clone(),
+        sample_rate,
+        channels,
+        duration,
+        shutdown_timeout: config.timeout.get(),
+        processing: stream.processing.into(),
+        delay_ns,
+    })
+}
+
+#[cfg(feature = "gstreamer")]
+fn run_audio_meter(
+    config: &Config,
+    arguments: AudioMeterArgs,
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    ensure_watch_format(config.output)?;
+    if arguments.interval.get().is_zero() {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "audio meter interval must be greater than zero",
+        ));
+    }
+    let source = resolved_audio_request(
+        config,
+        arguments.stream,
+        arguments.duration.map(DurationValue::get),
+        0,
+    )?;
+    if dry_run {
+        return emit_audio_dry_run(config, "audio.meter", &source, None);
+    }
+    let report = link_media::audio_meter(
+        &link_media::AudioMeterRequest {
+            source,
+            interval: arguments.interval.get(),
+        },
+        |event| match config.output {
+            OutputFormat::Human => {
+                println!(
+                    "{:>8} ms  peak {:>7.2} dBFS  rms {:>7.2} dBFS{}",
+                    event.elapsed_ms,
+                    event.peak_dbfs,
+                    event.rms_dbfs,
+                    if event.clipped { "  CLIP" } else { "" }
+                );
+                Ok(())
+            }
+            OutputFormat::Jsonl => emit_success(config.output, "audio.meter", None, event),
+            OutputFormat::Json => unreachable!("meter format is validated"),
+        },
+    )?;
+    if config.output == OutputFormat::Human {
+        println!(
+            "{} buffers, {} clipping events, {} discontinuities",
+            report.stats.buffers,
+            report.stats.clipping_events,
+            report.stats.timestamp_discontinuities
+        );
+        Ok(())
+    } else {
+        emit_success(config.output, "audio.meter", None, &report)
+    }
+}
+
+#[cfg(feature = "gstreamer")]
+fn run_audio_capture(
+    config: &Config,
+    arguments: AudioCaptureArgs,
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    match (&arguments.output, arguments.stdout) {
+        (Some(_), true) => {
+            return Err(LinkError::new(
+                ErrorKind::InvalidInvocation,
+                "audio capture OUTPUT cannot be combined with --stdout",
+            ));
+        }
+        (None, false) => {
+            return Err(LinkError::new(
+                ErrorKind::InvalidInvocation,
+                "audio capture requires OUTPUT or --stdout",
+            ));
+        }
+        _ => {}
+    }
+    let encoding = audio_encoding(arguments.audio_format, arguments.output.as_deref())?;
+    let source = resolved_audio_request(
+        config,
+        arguments.stream,
+        arguments.duration.map(DurationValue::get),
+        0,
+    )?;
+    if dry_run {
+        return emit_audio_dry_run(
+            config,
+            "audio.capture",
+            &source,
+            Some(audio_encoding_label(encoding)),
+        );
+    }
+    let report = link_media::audio_capture(&link_media::AudioCaptureRequest {
+        source,
+        output: arguments.output,
+        encoding,
+        overwrite: arguments.overwrite,
+    })?;
+    if arguments.stdout {
+        emit_success_to_stderr(config.output, "audio.capture", None, &report)
+    } else if config.output == OutputFormat::Human {
+        for output in &report.outputs {
+            println!("Audio capture: {}", output.display());
+        }
+        Ok(())
+    } else {
+        emit_success(config.output, "audio.capture", None, &report)
+    }
+}
+
+#[cfg(feature = "gstreamer")]
+fn run_audio_monitor(
+    config: &Config,
+    arguments: AudioMonitorArgs,
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    let (_, inventory) = selected_audio_source(config, &arguments.stream.source)?;
+    let source = resolved_audio_request(
+        config,
+        arguments.stream,
+        arguments.duration.map(DurationValue::get),
+        0,
+    )?;
+    let sink = resolve_audio_sink(&inventory, &arguments.sink)?;
+    if dry_run {
+        return emit_audio_dry_run(config, "audio.monitor", &source, None);
+    }
+    let report = link_media::audio_monitor(&link_media::AudioMonitorRequest {
+        source,
+        sink,
+        latency: arguments.latency.get(),
+    })?;
+    if config.output == OutputFormat::Human {
+        println!(
+            "Monitor stopped: {} buffers, {} discontinuities",
+            report.stats.buffers, report.stats.timestamp_discontinuities
+        );
+        Ok(())
+    } else {
+        emit_success(config.output, "audio.monitor", None, &report)
+    }
+}
+
+#[cfg(feature = "gstreamer")]
+fn resolve_audio_sink(
+    inventory: &AudioInventory,
+    selector: &str,
+) -> Result<Option<link_media::AudioSinkRequest>, LinkError> {
+    if selector == "default" {
+        return Ok(None);
+    }
+    let endpoint = inventory
+        .endpoints
+        .iter()
+        .filter(|endpoint| endpoint.direction == AudioDirection::Playback)
+        .find(|endpoint| {
+            endpoint.id == selector
+                || selector.strip_prefix("alsa:").is_some_and(|value| {
+                    endpoint.transports.iter().any(|transport| {
+                        transport.backend == AudioBackendKind::Alsa && transport.selector == value
+                    })
+                })
+                || selector.strip_prefix("pipewire:").is_some_and(|value| {
+                    endpoint.transports.iter().any(|transport| {
+                        transport.backend == AudioBackendKind::Pipewire
+                            && transport.selector == value
+                    })
+                })
+        })
+        .ok_or_else(|| {
+            LinkError::new(
+                ErrorKind::DeviceNotFound,
+                "audio playback sink was not found",
+            )
+            .with_detail("sink", selector.to_owned())
+        })?;
+    let transport = if let Some(value) = selector.strip_prefix("alsa:") {
+        endpoint.transports.iter().find(|transport| {
+            transport.backend == AudioBackendKind::Alsa && transport.selector == value
+        })
+    } else if let Some(value) = selector.strip_prefix("pipewire:") {
+        endpoint.transports.iter().find(|transport| {
+            transport.backend == AudioBackendKind::Pipewire && transport.selector == value
+        })
+    } else {
+        endpoint
+            .transports
+            .iter()
+            .find(|transport| transport.backend == AudioBackendKind::Pipewire)
+            .or_else(|| endpoint.transports.first())
+    }
+    .ok_or_else(|| audio_backend_unsupported("audio-sink"))?;
+    Ok(Some(link_media::AudioSinkRequest {
+        backend: transport.backend,
+        selector: transport.selector.clone(),
+    }))
+}
+
+#[cfg(feature = "gstreamer")]
+fn audio_encoding(
+    requested: Option<AudioFormatChoice>,
+    output: Option<&Path>,
+) -> Result<link_media::AudioEncoding, LinkError> {
+    match requested {
+        Some(AudioFormatChoice::Wav) => Ok(link_media::AudioEncoding::Wav),
+        Some(AudioFormatChoice::Flac) => Ok(link_media::AudioEncoding::Flac),
+        Some(AudioFormatChoice::Raw) => Ok(link_media::AudioEncoding::Raw),
+        None => match output
+            .and_then(Path::extension)
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("wav") => Ok(link_media::AudioEncoding::Wav),
+            Some("flac") => Ok(link_media::AudioEncoding::Flac),
+            Some("raw" | "pcm" | "s16le") => Ok(link_media::AudioEncoding::Raw),
+            None => Err(LinkError::new(
+                ErrorKind::InvalidInvocation,
+                "audio capture stdout requires --audio-format",
+            )),
+            _ => Err(LinkError::new(
+                ErrorKind::InvalidInvocation,
+                "cannot infer audio encoding from output extension",
+            )),
+        },
+    }
+}
+
+#[cfg(feature = "gstreamer")]
+const fn audio_encoding_label(encoding: link_media::AudioEncoding) -> &'static str {
+    match encoding {
+        link_media::AudioEncoding::Wav => "wav",
+        link_media::AudioEncoding::Flac => "flac",
+        link_media::AudioEncoding::Raw => "raw-s16le",
+    }
+}
+
+#[cfg(feature = "gstreamer")]
+fn emit_audio_dry_run(
+    config: &Config,
+    command: &'static str,
+    source: &link_media::AudioSourceRequest,
+    encoding: Option<&str>,
+) -> Result<(), LinkError> {
+    let result = json!({
+        "dry_run": true,
+        "source_id": source.id,
+        "backend": source.backend,
+        "selector": source.selector,
+        "sample_rate": source.sample_rate,
+        "channels": source.channels,
+        "processing": source.processing,
+        "encoding": encoding,
+    });
+    if config.output == OutputFormat::Human {
+        println!(
+            "Dry run: {} via {:?}, {} Hz, {} channel(s)",
+            source.id, source.backend, source.sample_rate, source.channels
+        );
+        Ok(())
+    } else {
+        emit_success(config.output, command, None, &result)
+    }
+}
+
 #[cfg(feature = "gstreamer")]
 fn run_snapshot(
     config: &Config,
@@ -1723,6 +2562,9 @@ fn run_record(
         rolling,
         disk_reserve,
         overwrite,
+        audio,
+        audio_delay,
+        audio_processing,
     } = command;
     if rolling == Some(0) {
         return Err(LinkError::new(
@@ -1753,6 +2595,30 @@ fn run_record(
     let (device, node) = selected_video_device(config)?;
     let summary = device_summary(&device);
     let tuple = resolve_media_tuple(&node, config, &tuple_arguments, None)?;
+    let delay_ns = parse_signed_duration_ns(&audio_delay)?;
+    let processing_enabled =
+        audio_processing.gate || audio_processing.compressor || audio_processing.limiter;
+    if audio.is_none() && (delay_ns != 0 || processing_enabled) {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "audio delay and processing options require --audio",
+        ));
+    }
+    let audio = audio
+        .map(|source| {
+            resolved_audio_request(
+                config,
+                AudioStreamArgs {
+                    source,
+                    sample_rate: None,
+                    channels: None,
+                    processing: audio_processing,
+                },
+                None,
+                delay_ns,
+            )
+        })
+        .transpose()?;
     if dry_run {
         return emit_media_dry_run(config, "record.start", summary, &node, &tuple);
     }
@@ -1773,8 +2639,29 @@ fn run_record(
         rolling_files: rolling,
         disk_reserve_bytes: disk_reserve,
         overwrite,
+        audio,
     })?;
     emit_media_report(config, "record.start", summary, &report, false)
+}
+
+#[cfg(feature = "gstreamer")]
+fn parse_signed_duration_ns(value: &str) -> Result<i64, LinkError> {
+    let value = value.trim();
+    let (negative, magnitude) = value
+        .strip_prefix('-')
+        .map_or((false, value), |magnitude| (true, magnitude));
+    let magnitude = humantime::parse_duration(magnitude).map_err(|error| {
+        LinkError::new(ErrorKind::InvalidInvocation, "invalid signed audio delay")
+            .with_detail("value", value.to_owned())
+            .with_detail("reason", error.to_string())
+    })?;
+    let nanoseconds = i64::try_from(magnitude.as_nanos()).map_err(|_| {
+        LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "audio delay exceeds the supported signed nanosecond range",
+        )
+    })?;
+    Ok(if negative { -nanoseconds } else { nanoseconds })
 }
 
 #[cfg(feature = "gstreamer")]
@@ -3772,7 +4659,7 @@ fn emit_success_to_stderr<T: Serialize>(
             "{}",
             serde_json::to_string(&envelope).map_err(serialization_error)?
         ),
-        OutputFormat::Human => unreachable!("human stderr output has a dedicated renderer"),
+        OutputFormat::Human => eprintln!("{command} completed"),
     }
     Ok(())
 }

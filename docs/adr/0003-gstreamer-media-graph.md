@@ -10,7 +10,7 @@ Capture fan-out, recording, transforms, virtual cameras, and network outputs req
 
 `link-media` will use the [official GStreamer Rust bindings](https://gstreamer.freedesktop.org/documentation/rust/stable/latest/docs/gstreamer/) behind the `gstreamer` feature. Pipelines will be built programmatically from typed requests. Untrusted clients and configuration will not provide arbitrary pipeline strings.
 
-Normal builds include the media backend; `--no-default-features` retains a compile-only build without the native backend. The devenv supplies GStreamer 1.28 core, base, good, bad, and libav plugins. The `network` feature adds typed RTP/UDP output without accepting arbitrary pipeline strings.
+Normal builds include the media backend; `--no-default-features` retains a compile-only build without the native backend. The devenv supplies GStreamer 1.28 core, base, good, bad, and libav plugins. Programmatic audio graphs provide capture, metering, monitoring, fixed optional DSP, resampling, and A/V muxing. The `network` feature adds typed RTP/UDP output without accepting arbitrary pipeline strings.
 
 ## Consequences
 

@@ -1,4 +1,4 @@
-# Video capture and recording
+# Media capture and recording
 
 `linkctl` enumerates the selected capture node before using it. It never synthesizes an advertised product mode: FourCC, dimensions, and frame rate must match a live discrete or stepwise V4L2 range.
 
@@ -28,16 +28,22 @@ Direct media commands take a per-device advisory lock. A snapshot attempted whil
 
 ## Recording and pipes
 
-Foreground recording is audio-less and blocks until its duration/size limit, Ctrl-C, a disk guard, or an error stops it.
+Foreground recording blocks until its duration/size limit, Ctrl-C, a disk guard, or an error stops it. Video-only recording remains the default. `--audio` opts in to a microphone source without changing camera controls.
 
 ```sh
 linkctl record start meeting.mkv --video-copy
+linkctl record start meeting.mkv --video-copy --audio camera
+linkctl record start clip.mp4 --audio audio-… --audio-delay=-25ms
 linkctl record start clip.mp4 --duration 30s
 linkctl record start rolling.mkv --segment-duration 5m --rolling 6
 linkctl capture --video h264 --stdout | consumer
 ```
 
 Matroska is the default container. MP4 uses short fragments and is finalized on EOS. A successful single-file recording is atomically renamed from a same-directory temporary path; an abnormal interruption may leave a clearly named `.linkctl-part-*` recovery candidate. Segmented recordings use `name-00000.ext` siblings. Rolling mode deletes only older siblings generated for that explicit recording prefix.
+
+Matroska audio is encoded as FLAC; MP4 audio is encoded as AAC. The audio branch converts channel layout and sample rate, uses monotonic timestamps, and applies `audiorate` correction. The final report includes audio buffers/bytes, clipping and discontinuity counts, dropped/added samples, levels, and measured A/V offset and drift. `--audio-delay` applies a signed timestamp offset. `--gate`, `--compressor`, and `--limiter` enable fixed conservative host presets and are disabled by default.
+
+See [audio](audio.md) for source selection, standalone capture, monitoring, and gain/mute behavior.
 
 The configured `media.disk_free_minimum` defaults to `5GiB`. Recording checks it before starting and while running. `--disk-reserve`, `--max-size`, `--segment-size`, and the configuration accept bytes plus decimal `KB/MB/GB` or binary `KiB/MiB/GiB` units.
 

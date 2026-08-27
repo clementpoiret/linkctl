@@ -21,4 +21,12 @@ linkctl --device link2cpro-… control get brightness
 
 If access remains denied, confirm that the graphical session is active, inspect `getfacl /dev/videoN`, and check membership in the distribution's `video` group. Log out and back in after adding group membership. Avoid running `linkctl` with `sudo`: doing so changes configuration paths and can hide a missing user-session ACL.
 
-The rule intentionally does not grant access to unrelated Insta360 products, generic webcams, USB devices, firmware interfaces, storage nodes, or raw USB endpoints. Audio access remains governed by the distribution's normal PipeWire/ALSA session policy.
+The rule intentionally does not grant access to unrelated Insta360 products, generic webcams, USB devices, firmware interfaces, storage nodes, or raw USB endpoints. Audio access remains governed by the distribution's normal PipeWire/ALSA session policy. Run PipeWire commands in the logged-in user's session so the client can reach that user's PipeWire socket and routing metadata. On ALSA-only systems, the user may also need membership in the distribution's `audio` group or an equivalent logind ACL. Verify access without elevation:
+
+```sh
+linkctl audio devices
+linkctl --device link2cpro-… audio status
+linkctl --device link2cpro-… audio meter --duration 1s
+```
+
+An exclusive direct ALSA capture reports the endpoint as busy. Prefer the PipeWire route on desktop systems when other applications must share the microphone. Avoid `sudo`: root normally cannot use the desktop user's PipeWire session and would create root-owned recording files.
