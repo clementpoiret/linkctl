@@ -12,6 +12,8 @@ use std::{
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind as ClapErrorKind};
 use clap_complete::Shell;
+#[cfg(feature = "gstreamer")]
+use link_core::media::{SnapshotControl, SnapshotMetadata};
 use link_core::{
     ErrorKind, LinkError, ProcessExit, SCHEMA_VERSION,
     config::{
@@ -24,10 +26,11 @@ use link_core::{
     },
     device::{DeviceEvent, DeviceState, DoctorCheck, DoctorReport, DoctorStatus},
     logging,
+    media::VideoTuple,
     output::{DeviceSummary, Envelope},
     probe::{
         DeviceListEntry, DeviceMode, HostReport, NodeAssociation, ProbeIssue, ProbeReport,
-        VideoNodeKind,
+        Rational, VideoNodeKind,
     },
     safety::{Operation, SafetyPolicy},
 };
@@ -36,6 +39,8 @@ use link_profiles::ProfileCatalog;
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+#[cfg(feature = "gstreamer")]
+use std::io::Write;
 
 /// Root command-line parser. Functional subcommands are added only with their implementation.
 #[derive(Clone, Debug, Parser)]
@@ -126,6 +131,29 @@ pub enum Command {
     Image {
         #[command(subcommand)]
         command: ImageCommand,
+    },
+    /// Inspect or negotiate exact V4L2 video formats.
+    Video {
+        #[command(subcommand)]
+        command: VideoCommand,
+    },
+    /// Capture one or more JPEG, PNG, or raw compressed frames.
+    #[cfg(feature = "gstreamer")]
+    Snapshot(SnapshotArgs),
+    /// Copy a raw H.264 or MJPEG stream to standard output.
+    #[cfg(feature = "gstreamer")]
+    Capture(CaptureArgs),
+    /// Record a foreground audio-less video stream.
+    #[cfg(feature = "gstreamer")]
+    Record {
+        #[command(subcommand)]
+        command: RecordCommand,
+    },
+    /// Restream video through an explicitly enabled network backend.
+    #[cfg(feature = "network")]
+    Stream {
+        #[command(subcommand)]
+        command: StreamCommand,
     },
     /// Run read-only configuration, permission, and device diagnostics.
     Doctor,
@@ -254,6 +282,199 @@ pub enum ImageCommand {
     Hdr { value: ToggleChoice },
     /// Reset every present semantic image control with a valid default.
     Reset,
+}
+
+/// V4L2 video format and direct stream statistics operations.
+#[derive(Clone, Debug, Subcommand)]
+pub enum VideoCommand {
+    /// List kernel-advertised formats, sizes, and frame rates.
+    Formats(VideoFilterArgs),
+    /// Show the current format, frame rate, and colorimetry.
+    Status,
+    /// Set and verify one exact format tuple.
+    Set {
+        /// Canonical four-character pixel format.
+        #[arg(long)]
+        fourcc: String,
+        /// Exact frame size such as 3840x2160.
+        #[arg(long)]
+        size: String,
+        /// Exact FPS as an integer, decimal, or rational.
+        #[arg(long)]
+        fps: String,
+    },
+    /// Sample a direct stream and report frame/drop/timestamp statistics.
+    Stats {
+        #[command(flatten)]
+        tuple: VideoTupleArgs,
+        /// Measurement duration.
+        #[arg(long, default_value = "10s")]
+        duration: DurationValue,
+    },
+}
+
+/// Filters for `video formats`.
+#[derive(Clone, Debug, Default, clap::Args)]
+pub struct VideoFilterArgs {
+    /// Filter by canonical FourCC.
+    #[arg(long)]
+    pub fourcc: Option<String>,
+    /// Filter by exact size.
+    #[arg(long)]
+    pub size: Option<String>,
+    /// Filter by exact FPS.
+    #[arg(long)]
+    pub fps: Option<String>,
+}
+
+/// Optional media source tuple fields.
+#[derive(Clone, Debug, Default, clap::Args)]
+pub struct VideoTupleArgs {
+    /// Preferred source FourCC; defaults through configured transport preference.
+    #[arg(long)]
+    pub fourcc: Option<String>,
+    /// Source size; defaults to the current width and height.
+    #[arg(long)]
+    pub size: Option<String>,
+    /// Source frame rate; defaults to the current frame rate.
+    #[arg(long)]
+    pub fps: Option<String>,
+}
+
+/// Snapshot command arguments.
+#[cfg(feature = "gstreamer")]
+#[derive(Clone, Debug, clap::Args)]
+pub struct SnapshotArgs {
+    /// Output image path, or `-` for binary stdout.
+    pub output: PathBuf,
+    /// Decoded image encoding. Required for stdout unless `--raw-frame` is used.
+    #[arg(long, value_enum)]
+    pub image_format: Option<ImageFormatChoice>,
+    /// Write one source-compressed MJPEG frame or H.264 access unit.
+    #[arg(long)]
+    pub raw_frame: bool,
+    #[command(flatten)]
+    pub tuple: VideoTupleArgs,
+    /// Number of frames to capture.
+    #[arg(long, default_value_t = 1)]
+    pub count: u32,
+    /// Delay between burst frames.
+    #[arg(long, default_value = "0s")]
+    pub interval: DurationValue,
+    /// Do not write the default adjacent metadata sidecar.
+    #[arg(long)]
+    pub no_metadata: bool,
+    /// Replace existing output and metadata files.
+    #[arg(long)]
+    pub overwrite: bool,
+}
+
+/// Raw stdout capture arguments.
+#[cfg(feature = "gstreamer")]
+#[derive(Clone, Debug, clap::Args)]
+pub struct CaptureArgs {
+    /// Encoded transport written to stdout.
+    #[arg(long, value_enum)]
+    pub video: EncodedVideoChoice,
+    /// Confirm binary output on standard output.
+    #[arg(long, required = true)]
+    pub stdout: bool,
+    /// Source size; defaults to the current width and height.
+    #[arg(long)]
+    pub size: Option<String>,
+    /// Source frame rate; defaults to the current frame rate.
+    #[arg(long)]
+    pub fps: Option<String>,
+    /// Stop after this duration; otherwise run until interrupted or the pipe closes.
+    #[arg(long)]
+    pub duration: Option<DurationValue>,
+}
+
+/// Foreground recording operations.
+#[cfg(feature = "gstreamer")]
+#[derive(Clone, Debug, Subcommand)]
+pub enum RecordCommand {
+    /// Start a blocking, audio-less recording.
+    Start {
+        /// Final output path; segmented output derives numbered siblings.
+        output: PathBuf,
+        #[command(flatten)]
+        tuple: VideoTupleArgs,
+        /// Override the container inferred from the extension/configuration.
+        #[arg(long, value_enum)]
+        container: Option<ContainerChoice>,
+        /// Fail unless the encoded camera stream can pass through without decode/re-encode.
+        #[arg(long)]
+        video_copy: bool,
+        /// Stop and finalize after this duration.
+        #[arg(long)]
+        duration: Option<DurationValue>,
+        /// Stop and finalize after total output reaches this size.
+        #[arg(long)]
+        max_size: Option<String>,
+        /// Start a new numbered file after this duration.
+        #[arg(long)]
+        segment_duration: Option<DurationValue>,
+        /// Start a new numbered file after this size.
+        #[arg(long)]
+        segment_size: Option<String>,
+        /// Retain at most this many numbered segments.
+        #[arg(long)]
+        rolling: Option<u32>,
+        /// Override the configured free-space reserve.
+        #[arg(long)]
+        disk_reserve: Option<String>,
+        /// Replace conflicting output files.
+        #[arg(long)]
+        overwrite: bool,
+    },
+}
+
+/// Feature-gated RTP streaming operations.
+#[cfg(feature = "network")]
+#[derive(Clone, Debug, Subcommand)]
+pub enum StreamCommand {
+    /// Start blocking RTP/UDP output to an explicit destination.
+    Start {
+        /// Destination hostname or IP address.
+        #[arg(long)]
+        host: String,
+        /// Destination UDP port.
+        #[arg(long)]
+        port: u16,
+        #[command(flatten)]
+        tuple: VideoTupleArgs,
+        /// RTP dynamic payload type; MJPEG defaults to 26 and H.264 to 96.
+        #[arg(long)]
+        payload_type: Option<u8>,
+        /// Stop after this duration; otherwise run until interrupted.
+        #[arg(long)]
+        duration: Option<DurationValue>,
+    },
+}
+
+/// Decoded snapshot encoding.
+#[cfg(feature = "gstreamer")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ImageFormatChoice {
+    Jpeg,
+    Png,
+}
+
+/// Encoded pass-through transport.
+#[cfg(feature = "gstreamer")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum EncodedVideoChoice {
+    H264,
+    Mjpeg,
+}
+
+/// Recording container.
+#[cfg(feature = "gstreamer")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ContainerChoice {
+    Matroska,
+    Mp4,
 }
 
 /// Normalized semantic scalar arguments.
@@ -445,6 +666,7 @@ pub fn run(arguments: Vec<OsString>) -> u8 {
     }
 
     let command_id = command_identifier(cli.command.as_ref());
+    let binary_stdout = uses_binary_stdout(cli.command.as_ref());
     let result = match cli.command {
         Some(Command::Device {
             command: DeviceCommand::List { include_serial },
@@ -471,6 +693,19 @@ pub fn run(arguments: Vec<OsString>) -> u8 {
         Some(Command::Image { command }) => {
             run_image(&config, cli.backend, command, cli.dry_run, cli.yes)
         }
+        Some(Command::Video { command }) => run_video(&config, cli.backend, command, cli.dry_run),
+        #[cfg(feature = "gstreamer")]
+        Some(Command::Snapshot(arguments)) => {
+            run_snapshot(&config, cli.backend, arguments, cli.dry_run)
+        }
+        #[cfg(feature = "gstreamer")]
+        Some(Command::Capture(arguments)) => {
+            run_capture(&config, cli.backend, arguments, cli.dry_run)
+        }
+        #[cfg(feature = "gstreamer")]
+        Some(Command::Record { command }) => run_record(&config, cli.backend, command, cli.dry_run),
+        #[cfg(feature = "network")]
+        Some(Command::Stream { command }) => run_stream(&config, cli.backend, command, cli.dry_run),
         Some(Command::Doctor) => run_doctor(&config),
         Some(Command::Completion { shell }) => run_completion(&config, shell),
         None => Err(LinkError::new(
@@ -480,7 +715,20 @@ pub fn run(arguments: Vec<OsString>) -> u8 {
     };
     match result {
         Ok(()) => ProcessExit::Success.code(),
+        Err(error) if binary_stdout => {
+            emit_command_error_to_stderr(config.output, command_id, None, &error)
+        }
         Err(error) => emit_command_error(config.output, command_id, None, &error),
+    }
+}
+
+fn uses_binary_stdout(command: Option<&Command>) -> bool {
+    match command {
+        #[cfg(feature = "gstreamer")]
+        Some(Command::Capture(_)) => true,
+        #[cfg(feature = "gstreamer")]
+        Some(Command::Snapshot(arguments)) => arguments.output == Path::new("-"),
+        _ => false,
     }
 }
 
@@ -516,6 +764,20 @@ fn command_identifier(command: Option<&Command>) -> &'static str {
             ImageCommand::Hdr { .. } => "image.hdr",
             ImageCommand::Reset => "image.reset",
         },
+        Some(Command::Video { command }) => match command {
+            VideoCommand::Formats(_) => "video.formats",
+            VideoCommand::Status => "video.status",
+            VideoCommand::Set { .. } => "video.set",
+            VideoCommand::Stats { .. } => "video.stats",
+        },
+        #[cfg(feature = "gstreamer")]
+        Some(Command::Snapshot(_)) => "snapshot",
+        #[cfg(feature = "gstreamer")]
+        Some(Command::Capture(_)) => "capture",
+        #[cfg(feature = "gstreamer")]
+        Some(Command::Record { .. }) => "record.start",
+        #[cfg(feature = "network")]
+        Some(Command::Stream { .. }) => "stream.start",
         Some(Command::Doctor) => "doctor",
         Some(Command::Completion { .. }) => "completion",
         None => "linkctl",
@@ -817,6 +1079,802 @@ fn ensure_standard_backend(
                 _ => unreachable!(),
             },
         )),
+    }
+}
+
+fn ensure_direct_video_backend(
+    config: &Config,
+    backend: Option<BackendChoice>,
+) -> Result<(), LinkError> {
+    ensure_standard_backend(config, backend)
+}
+
+fn selected_video_device(
+    config: &Config,
+) -> Result<(DiscoveredDevice, NodeAssociation), LinkError> {
+    let mut devices = selected_devices(config, false)?;
+    let device = devices
+        .pop()
+        .ok_or_else(|| LinkError::new(ErrorKind::DeviceNotFound, "no camera was selected"))?;
+    let node = control_node(&device, config.default_device.as_deref())?;
+    Ok((device, node))
+}
+
+fn run_video(
+    config: &Config,
+    backend: Option<BackendChoice>,
+    command: VideoCommand,
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    ensure_direct_video_backend(config, backend)?;
+    let (device, node) = selected_video_device(config)?;
+    let summary = device_summary(&device);
+    match command {
+        VideoCommand::Formats(filters) => {
+            let backend = link_v4l2::video::VideoDevice::open_read(&node.path)?;
+            let mut inventory = backend.formats()?;
+            let size = filters.size.as_deref().map(parse_size).transpose()?;
+            let fps = filters.fps.as_deref().map(parse_fps).transpose()?;
+            inventory.discrete.retain(|format| {
+                filters
+                    .fourcc
+                    .as_ref()
+                    .is_none_or(|fourcc| format.tuple.fourcc.eq_ignore_ascii_case(fourcc))
+                    && size.is_none_or(|(width, height)| {
+                        format.tuple.width == width && format.tuple.height == height
+                    })
+                    && fps.is_none_or(|fps| {
+                        link_core::media::rational_cmp(format.tuple.fps, fps).is_eq()
+                    })
+            });
+            if config.output == OutputFormat::Human {
+                println!("FOURCC\tSIZE\tFPS\tCLASS\tORIENTATION\tREMUX\tEST. BANDWIDTH");
+                for format in &inventory.discrete {
+                    let bandwidth = format
+                        .estimated_bandwidth_bps
+                        .map_or_else(|| "-".into(), |value| format!("{value} bps"));
+                    println!(
+                        "{}\t{}x{}\t{}/{}\t{}\t{}\t{}\t{}",
+                        format.tuple.fourcc,
+                        format.tuple.width,
+                        format.tuple.height,
+                        format.tuple.fps.numerator,
+                        format.tuple.fps.denominator,
+                        if format.compressed {
+                            "compressed"
+                        } else {
+                            "raw"
+                        },
+                        if format.portrait {
+                            "portrait"
+                        } else {
+                            "landscape"
+                        },
+                        format.remuxable,
+                        bandwidth,
+                    );
+                }
+                Ok(())
+            } else {
+                emit_success(config.output, "video.formats", Some(summary), &inventory)
+            }
+        }
+        VideoCommand::Status => {
+            let status = link_v4l2::video::VideoDevice::open_read(&node.path)?.status()?;
+            if config.output == OutputFormat::Human {
+                println!(
+                    "{}: {} {}x{} at {}/{} fps (colorspace {}, transfer {}, quantization {})",
+                    status.node,
+                    status.tuple.fourcc,
+                    status.tuple.width,
+                    status.tuple.height,
+                    status.tuple.fps.numerator,
+                    status.tuple.fps.denominator,
+                    status.colorspace,
+                    status.transfer_function,
+                    status.quantization,
+                );
+                Ok(())
+            } else {
+                emit_success(config.output, "video.status", Some(summary), &status)
+            }
+        }
+        VideoCommand::Set { fourcc, size, fps } => {
+            let (width, height) = parse_size(&size)?;
+            let requested = VideoTuple {
+                fourcc,
+                width,
+                height,
+                fps: parse_fps(&fps)?,
+            }
+            .normalized();
+            let report = if dry_run {
+                link_v4l2::video::VideoDevice::open_read(&node.path)?.validate(&requested)?
+            } else {
+                link_v4l2::video::VideoDevice::open_write(&node.path)?.set_format(&requested)?
+            };
+            if config.output == OutputFormat::Human {
+                println!(
+                    "{} {}x{} at {}/{} fps: {}",
+                    report.requested.fourcc,
+                    report.requested.width,
+                    report.requested.height,
+                    report.requested.fps.numerator,
+                    report.requested.fps.denominator,
+                    if report.dry_run {
+                        "validated (dry-run)"
+                    } else {
+                        "applied and verified"
+                    },
+                );
+                Ok(())
+            } else {
+                emit_success(config.output, "video.set", Some(summary), &report)
+            }
+        }
+        VideoCommand::Stats { tuple, duration } => {
+            let tuple = resolve_media_tuple(&node, config, &tuple, None)?;
+            if dry_run {
+                return emit_media_dry_run(config, "video.stats", summary, &node, &tuple);
+            }
+            #[cfg(feature = "gstreamer")]
+            {
+                let _lease = link_media::MediaLease::acquire(&summary.stable_id, "video.stats")?;
+                let report = link_media::stats(&link_media::ForegroundRequest {
+                    node: PathBuf::from(&node.path),
+                    tuple,
+                    duration: Some(duration.get()),
+                    shutdown_timeout: config.timeout.get(),
+                })?;
+                emit_media_report(config, "video.stats", summary, &report, false)
+            }
+            #[cfg(not(feature = "gstreamer"))]
+            {
+                let _ = duration;
+                Err(LinkError::new(
+                    ErrorKind::CapabilityUnsupported,
+                    "this build does not include direct video statistics",
+                ))
+            }
+        }
+    }
+}
+
+fn resolve_media_tuple(
+    node: &NodeAssociation,
+    config: &Config,
+    arguments: &VideoTupleArgs,
+    forced_fourcc: Option<&str>,
+) -> Result<VideoTuple, LinkError> {
+    let backend = link_v4l2::video::VideoDevice::open_read(&node.path)?;
+    let status = backend.status()?;
+    let inventory = backend.formats()?;
+    let (width, height) = arguments
+        .size
+        .as_deref()
+        .map(parse_size)
+        .transpose()?
+        .unwrap_or((status.tuple.width, status.tuple.height));
+    let fps = arguments
+        .fps
+        .as_deref()
+        .map(parse_fps)
+        .transpose()?
+        .unwrap_or(status.tuple.fps);
+    let requested_fourcc = forced_fourcc.or(arguments.fourcc.as_deref());
+    let fourcc = if let Some(fourcc) = requested_fourcc {
+        fourcc.to_ascii_uppercase()
+    } else {
+        config
+            .media
+            .preferred_transport
+            .iter()
+            .find(|candidate| {
+                inventory.discrete.iter().any(|format| {
+                    format.tuple.fourcc.eq_ignore_ascii_case(candidate)
+                        && format.tuple.width == width
+                        && format.tuple.height == height
+                        && link_core::media::rational_cmp(format.tuple.fps, fps).is_eq()
+                })
+            })
+            .cloned()
+            .unwrap_or(status.tuple.fourcc)
+    };
+    let tuple = VideoTuple {
+        fourcc,
+        width,
+        height,
+        fps,
+    }
+    .normalized();
+    link_v4l2::video::validate_tuple(&inventory.formats, &tuple)?;
+    Ok(tuple)
+}
+
+fn parse_size(input: &str) -> Result<(u32, u32), LinkError> {
+    let (width, height) = input
+        .split_once(['x', 'X'])
+        .ok_or_else(|| invalid_video_value("size", input, "expected WIDTHxHEIGHT"))?;
+    let width = width
+        .parse::<u32>()
+        .map_err(|_| invalid_video_value("size", input, "width is not an integer"))?;
+    let height = height
+        .parse::<u32>()
+        .map_err(|_| invalid_video_value("size", input, "height is not an integer"))?;
+    if width == 0 || height == 0 {
+        return Err(invalid_video_value(
+            "size",
+            input,
+            "dimensions must be greater than zero",
+        ));
+    }
+    Ok((width, height))
+}
+
+fn parse_fps(input: &str) -> Result<Rational, LinkError> {
+    let trimmed = input.trim();
+    let (numerator, denominator) = if let Some((numerator, denominator)) = trimmed.split_once('/') {
+        let numerator = numerator
+            .parse::<u32>()
+            .map_err(|_| invalid_video_value("fps", input, "invalid rational numerator"))?;
+        let denominator = denominator
+            .parse::<u32>()
+            .map_err(|_| invalid_video_value("fps", input, "invalid rational denominator"))?;
+        (numerator, denominator)
+    } else if let Some((whole, fraction)) = trimmed.split_once('.') {
+        if fraction.is_empty() || fraction.len() > 6 {
+            return Err(invalid_video_value(
+                "fps",
+                input,
+                "decimal FPS supports one to six fractional digits",
+            ));
+        }
+        let denominator = 10_u32.pow(fraction.len() as u32);
+        let whole = whole
+            .parse::<u32>()
+            .map_err(|_| invalid_video_value("fps", input, "invalid decimal FPS"))?;
+        let fraction = fraction
+            .parse::<u32>()
+            .map_err(|_| invalid_video_value("fps", input, "invalid decimal FPS"))?;
+        (
+            whole
+                .checked_mul(denominator)
+                .and_then(|value| value.checked_add(fraction))
+                .ok_or_else(|| invalid_video_value("fps", input, "FPS is too large"))?,
+            denominator,
+        )
+    } else {
+        (
+            trimmed
+                .parse::<u32>()
+                .map_err(|_| invalid_video_value("fps", input, "FPS is not a number"))?,
+            1,
+        )
+    };
+    if numerator == 0 || denominator == 0 {
+        return Err(invalid_video_value(
+            "fps",
+            input,
+            "FPS must be greater than zero",
+        ));
+    }
+    Ok(link_core::media::normalize_rational(Rational {
+        numerator,
+        denominator,
+    }))
+}
+
+fn invalid_video_value(field: &'static str, value: &str, reason: &'static str) -> LinkError {
+    LinkError::new(ErrorKind::InvalidInvocation, "invalid video tuple value")
+        .with_detail("field", field)
+        .with_detail("value", value.to_owned())
+        .with_detail("reason", reason)
+}
+
+fn emit_media_dry_run(
+    config: &Config,
+    command: &'static str,
+    device: DeviceSummary,
+    node: &NodeAssociation,
+    tuple: &VideoTuple,
+) -> Result<(), LinkError> {
+    let result = json!({
+        "dry_run": true,
+        "node": node.path,
+        "tuple": tuple,
+    });
+    if config.output == OutputFormat::Human {
+        println!(
+            "Dry run: {} {}x{} at {}/{} fps on {}",
+            tuple.fourcc,
+            tuple.width,
+            tuple.height,
+            tuple.fps.numerator,
+            tuple.fps.denominator,
+            node.path,
+        );
+        Ok(())
+    } else {
+        emit_success(config.output, command, Some(device), &result)
+    }
+}
+
+#[cfg(feature = "gstreamer")]
+fn run_snapshot(
+    config: &Config,
+    backend: Option<BackendChoice>,
+    arguments: SnapshotArgs,
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    ensure_direct_video_backend(config, backend)?;
+    let (device, node) = selected_video_device(config)?;
+    let summary = device_summary(&device);
+    if arguments.count == 0 {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "snapshot --count must be greater than zero",
+        ));
+    }
+    let stdout = arguments.output == Path::new("-");
+    if stdout && arguments.count != 1 {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "snapshot stdout supports exactly one frame",
+        ));
+    }
+    let encoding = snapshot_encoding(&arguments, stdout)?;
+    let tuple = resolve_media_tuple(&node, config, &arguments.tuple, None)?;
+    if dry_run {
+        return emit_media_dry_run(config, "snapshot", summary, &node, &tuple);
+    }
+    let paths = if stdout {
+        Vec::new()
+    } else {
+        snapshot_paths(&arguments.output, arguments.count)?
+    };
+    validate_snapshot_outputs(
+        &paths,
+        !stdout && !arguments.no_metadata,
+        arguments.overwrite,
+    )?;
+    let _lease = link_media::MediaLease::acquire(&summary.stable_id, "snapshot")?;
+    let metadata_template = (!stdout && !arguments.no_metadata)
+        .then(|| build_snapshot_metadata(config, &device, &node, &tuple, encoding))
+        .transpose()?;
+    let frames = link_media::snapshot(&link_media::SnapshotRequest {
+        node: PathBuf::from(&node.path),
+        tuple: tuple.clone(),
+        encoding,
+        count: arguments.count,
+        interval: arguments.interval.get(),
+        timeout: config.timeout.get(),
+    })?;
+    if stdout {
+        std::io::stdout()
+            .write_all(&frames[0].bytes)
+            .and_then(|()| std::io::stdout().flush())
+            .map_err(|error| {
+                LinkError::new(ErrorKind::IoFailure, "failed to write snapshot to stdout")
+                    .with_detail("reason", error.to_string())
+            })?;
+        return emit_success_to_stderr(
+            config.output,
+            "snapshot",
+            Some(summary),
+            &json!({"tuple": tuple, "encoding": encoding, "bytes": frames[0].bytes.len()}),
+        );
+    }
+    let mut metadata_paths = Vec::new();
+    for (frame, path) in frames.iter().zip(&paths) {
+        write_atomic(path, &frame.bytes, arguments.overwrite)?;
+        if let Some(metadata_template) = &metadata_template {
+            let mut metadata = metadata_template.clone();
+            metadata.captured_unix_ms = frame.captured_unix_ms;
+            let metadata_path = PathBuf::from(format!("{}.json", path.display()));
+            let bytes = serde_json::to_vec_pretty(&metadata).map_err(serialization_error)?;
+            write_atomic(&metadata_path, &bytes, arguments.overwrite)?;
+            metadata_paths.push(metadata_path);
+        }
+    }
+    let result = json!({
+        "tuple": tuple,
+        "encoding": encoding,
+        "outputs": paths,
+        "metadata": metadata_paths,
+        "count": frames.len(),
+    });
+    if config.output == OutputFormat::Human {
+        for path in &paths {
+            println!("Snapshot: {}", path.display());
+        }
+        Ok(())
+    } else {
+        emit_success(config.output, "snapshot", Some(summary), &result)
+    }
+}
+
+#[cfg(feature = "gstreamer")]
+fn snapshot_encoding(
+    arguments: &SnapshotArgs,
+    stdout: bool,
+) -> Result<link_media::SnapshotEncoding, LinkError> {
+    if arguments.raw_frame {
+        if arguments.image_format.is_some() {
+            return Err(LinkError::new(
+                ErrorKind::InvalidInvocation,
+                "--raw-frame cannot be combined with --image-format",
+            ));
+        }
+        return Ok(link_media::SnapshotEncoding::Raw);
+    }
+    match arguments.image_format {
+        Some(ImageFormatChoice::Jpeg) => Ok(link_media::SnapshotEncoding::Jpeg),
+        Some(ImageFormatChoice::Png) => Ok(link_media::SnapshotEncoding::Png),
+        None if stdout => Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "snapshot stdout requires --image-format or --raw-frame",
+        )),
+        None => match arguments
+            .output
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("jpg" | "jpeg") => Ok(link_media::SnapshotEncoding::Jpeg),
+            Some("png") => Ok(link_media::SnapshotEncoding::Png),
+            _ => Err(LinkError::new(
+                ErrorKind::InvalidInvocation,
+                "cannot infer snapshot encoding from output extension",
+            )),
+        },
+    }
+}
+
+#[cfg(feature = "gstreamer")]
+fn build_snapshot_metadata(
+    config: &Config,
+    device: &DiscoveredDevice,
+    node: &NodeAssociation,
+    tuple: &VideoTuple,
+    encoding: link_media::SnapshotEncoding,
+) -> Result<SnapshotMetadata, LinkError> {
+    let catalog = ProfileCatalog::load(config.profile_dir.as_deref())?;
+    let profile = catalog.report(&device.identity, device.mode())?;
+    let controls = link_v4l2::production::ControlDevice::open_read(&node.path)?
+        .controls()?
+        .into_iter()
+        .filter_map(|control| {
+            control.current.map(|raw| SnapshotControl {
+                name: control.name.clone(),
+                value: link_v4l2::production::render_value(&control, raw),
+            })
+        })
+        .collect();
+    Ok(SnapshotMetadata {
+        schema_version: SCHEMA_VERSION,
+        captured_unix_ms: 0,
+        stable_id: device.identity.stable_id(),
+        model: device.model(),
+        tuple: tuple.clone(),
+        encoding: match encoding {
+            link_media::SnapshotEncoding::Jpeg => "jpeg".into(),
+            link_media::SnapshotEncoding::Png => "png".into(),
+            link_media::SnapshotEncoding::Raw => tuple.fourcc.clone(),
+        },
+        profile_id: profile.profile_id,
+        controls,
+    })
+}
+
+#[cfg(feature = "gstreamer")]
+fn snapshot_paths(output: &Path, count: u32) -> Result<Vec<PathBuf>, LinkError> {
+    if count == 1 {
+        return Ok(vec![output.to_owned()]);
+    }
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let stem = output
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            LinkError::new(
+                ErrorKind::InvalidInvocation,
+                "snapshot output has no file stem",
+            )
+        })?;
+    let extension = output
+        .extension()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            LinkError::new(
+                ErrorKind::InvalidInvocation,
+                "burst snapshot output needs an extension",
+            )
+        })?;
+    Ok((0..count)
+        .map(|index| parent.join(format!("{stem}-{index:05}.{extension}")))
+        .collect())
+}
+
+#[cfg(feature = "gstreamer")]
+fn validate_snapshot_outputs(
+    paths: &[PathBuf],
+    metadata: bool,
+    overwrite: bool,
+) -> Result<(), LinkError> {
+    for path in paths.iter().flat_map(|path| {
+        let metadata_path = metadata.then(|| PathBuf::from(format!("{}.json", path.display())));
+        std::iter::once(path.clone()).chain(metadata_path)
+    }) {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        if !parent.is_dir() {
+            return Err(
+                LinkError::new(ErrorKind::IoFailure, "output directory does not exist")
+                    .with_detail("path", parent.display().to_string()),
+            );
+        }
+        if path.exists() && !overwrite {
+            return Err(LinkError::new(
+                ErrorKind::InvalidInvocation,
+                "output already exists; use --overwrite to replace it",
+            )
+            .with_detail("path", path.display().to_string()));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "gstreamer")]
+fn write_atomic(path: &Path, bytes: &[u8], overwrite: bool) -> Result<(), LinkError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    if !parent.is_dir() {
+        return Err(
+            LinkError::new(ErrorKind::IoFailure, "output directory does not exist")
+                .with_detail("path", parent.display().to_string()),
+        );
+    }
+    if path.exists() && !overwrite {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "output already exists; use --overwrite to replace it",
+        )
+        .with_detail("path", path.display().to_string()));
+    }
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
+        LinkError::new(ErrorKind::IoFailure, "failed to create temporary output")
+            .with_detail("path", parent.display().to_string())
+            .with_detail("reason", error.to_string())
+    })?;
+    temporary.write_all(bytes).map_err(|error| {
+        LinkError::new(ErrorKind::IoFailure, "failed to write output")
+            .with_detail("path", path.display().to_string())
+            .with_detail("reason", error.to_string())
+    })?;
+    temporary.as_file().sync_all().map_err(|error| {
+        LinkError::new(ErrorKind::IoFailure, "failed to synchronize output")
+            .with_detail("path", path.display().to_string())
+            .with_detail("reason", error.to_string())
+    })?;
+    let persisted = if overwrite {
+        temporary.persist(path)
+    } else {
+        temporary.persist_noclobber(path)
+    };
+    persisted.map_err(|error| {
+        LinkError::new(ErrorKind::IoFailure, "failed to finalize output")
+            .with_detail("path", path.display().to_string())
+            .with_detail("reason", error.error.to_string())
+    })?;
+    Ok(())
+}
+
+#[cfg(feature = "gstreamer")]
+fn run_capture(
+    config: &Config,
+    backend: Option<BackendChoice>,
+    arguments: CaptureArgs,
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    ensure_direct_video_backend(config, backend)?;
+    let (device, node) = selected_video_device(config)?;
+    let summary = device_summary(&device);
+    let fourcc = match arguments.video {
+        EncodedVideoChoice::H264 => "H264",
+        EncodedVideoChoice::Mjpeg => "MJPG",
+    };
+    let tuple_arguments = VideoTupleArgs {
+        fourcc: None,
+        size: arguments.size,
+        fps: arguments.fps,
+    };
+    let tuple = resolve_media_tuple(&node, config, &tuple_arguments, Some(fourcc))?;
+    if dry_run {
+        return emit_media_dry_run(config, "capture", summary, &node, &tuple);
+    }
+    let _lease = link_media::MediaLease::acquire(&summary.stable_id, "capture")?;
+    let report = link_media::capture_stdout(&link_media::CaptureRequest {
+        source: link_media::ForegroundRequest {
+            node: PathBuf::from(&node.path),
+            tuple,
+            duration: arguments.duration.map(DurationValue::get),
+            shutdown_timeout: config.timeout.get(),
+        },
+    })?;
+    emit_media_report(config, "capture", summary, &report, true)
+}
+
+#[cfg(feature = "gstreamer")]
+fn run_record(
+    config: &Config,
+    backend: Option<BackendChoice>,
+    command: RecordCommand,
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    ensure_direct_video_backend(config, backend)?;
+    let RecordCommand::Start {
+        output,
+        tuple: tuple_arguments,
+        container,
+        video_copy,
+        duration,
+        max_size,
+        segment_duration,
+        segment_size,
+        rolling,
+        disk_reserve,
+        overwrite,
+    } = command;
+    if rolling == Some(0) {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "--rolling must retain at least one segment",
+        ));
+    }
+    if rolling.is_some() && segment_duration.is_none() && segment_size.is_none() {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "--rolling requires --segment-duration or --segment-size",
+        ));
+    }
+    let container = record_container(container, &output, &config.media.default_container)?;
+    let disk_reserve = link_media::parse_byte_size(
+        disk_reserve
+            .as_deref()
+            .unwrap_or(&config.media.disk_free_minimum),
+    )?;
+    let max_total_bytes = max_size
+        .as_deref()
+        .map(link_media::parse_byte_size)
+        .transpose()?;
+    let segment_bytes = segment_size
+        .as_deref()
+        .map(link_media::parse_byte_size)
+        .transpose()?;
+    let (device, node) = selected_video_device(config)?;
+    let summary = device_summary(&device);
+    let tuple = resolve_media_tuple(&node, config, &tuple_arguments, None)?;
+    if dry_run {
+        return emit_media_dry_run(config, "record.start", summary, &node, &tuple);
+    }
+    let _lease = link_media::MediaLease::acquire(&summary.stable_id, "record.start")?;
+    let report = link_media::record(&link_media::RecordRequest {
+        source: link_media::ForegroundRequest {
+            node: PathBuf::from(&node.path),
+            tuple,
+            duration: duration.map(DurationValue::get),
+            shutdown_timeout: config.timeout.get(),
+        },
+        output,
+        container,
+        require_video_copy: video_copy,
+        max_total_bytes,
+        segment_duration: segment_duration.map(DurationValue::get),
+        segment_bytes,
+        rolling_files: rolling,
+        disk_reserve_bytes: disk_reserve,
+        overwrite,
+    })?;
+    emit_media_report(config, "record.start", summary, &report, false)
+}
+
+#[cfg(feature = "gstreamer")]
+fn record_container(
+    requested: Option<ContainerChoice>,
+    output: &Path,
+    default: &str,
+) -> Result<link_media::RecordContainer, LinkError> {
+    let value = match requested {
+        Some(ContainerChoice::Matroska) => "matroska",
+        Some(ContainerChoice::Mp4) => "mp4",
+        None => match output.extension().and_then(|value| value.to_str()) {
+            Some("mkv" | "mka") => "matroska",
+            Some("mp4") => "mp4",
+            _ => default,
+        },
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "matroska" | "mkv" => Ok(link_media::RecordContainer::Matroska),
+        "mp4" => Ok(link_media::RecordContainer::Mp4),
+        _ => Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "unsupported recording container",
+        )
+        .with_detail("container", value.to_owned())),
+    }
+}
+
+#[cfg(feature = "network")]
+fn run_stream(
+    config: &Config,
+    backend: Option<BackendChoice>,
+    command: StreamCommand,
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    ensure_direct_video_backend(config, backend)?;
+    let StreamCommand::Start {
+        host,
+        port,
+        tuple: tuple_arguments,
+        payload_type,
+        duration,
+    } = command;
+    let (device, node) = selected_video_device(config)?;
+    let summary = device_summary(&device);
+    let tuple = resolve_media_tuple(&node, config, &tuple_arguments, None)?;
+    if !matches!(tuple.fourcc.as_str(), "H264" | "MJPG") {
+        return Err(LinkError::new(
+            ErrorKind::CapabilityUnsupported,
+            "RTP output requires H.264 or MJPEG input",
+        ));
+    }
+    if dry_run {
+        return emit_media_dry_run(config, "stream.start", summary, &node, &tuple);
+    }
+    let _lease = link_media::MediaLease::acquire(&summary.stable_id, "stream.start")?;
+    let report = link_media::rtp(&link_media::RtpRequest {
+        source: link_media::ForegroundRequest {
+            node: PathBuf::from(&node.path),
+            tuple,
+            duration: duration.map(DurationValue::get),
+            shutdown_timeout: config.timeout.get(),
+        },
+        host,
+        port,
+        payload_type,
+    })?;
+    emit_media_report(config, "stream.start", summary, &report, false)
+}
+
+#[cfg(feature = "gstreamer")]
+fn emit_media_report(
+    config: &Config,
+    command: &'static str,
+    device: DeviceSummary,
+    report: &link_core::media::MediaRunReport,
+    stderr: bool,
+) -> Result<(), LinkError> {
+    if config.output == OutputFormat::Human {
+        let line = format!(
+            "Frames: {}, bytes: {}, drops: {}, elapsed: {} ms, stop: {:?}",
+            report.stats.frames,
+            report.stats.bytes,
+            report.stats.sequence_drops + report.stats.qos_drops,
+            report.stats.elapsed_ms,
+            report.stop_reason,
+        );
+        if stderr {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+            for output in &report.outputs {
+                println!("Output: {}", output.display());
+            }
+        }
+        Ok(())
+    } else if stderr {
+        emit_success_to_stderr(config.output, command, Some(device), report)
+    } else {
+        emit_success(config.output, command, Some(device), report)
     }
 }
 
@@ -2693,6 +3751,32 @@ fn emit_success<T: Serialize>(
     Ok(())
 }
 
+#[cfg(feature = "gstreamer")]
+fn emit_success_to_stderr<T: Serialize>(
+    format: OutputFormat,
+    command: &str,
+    device: Option<DeviceSummary>,
+    result: &T,
+) -> Result<(), LinkError> {
+    let value = serde_json::to_value(result).map_err(|error| {
+        LinkError::new(ErrorKind::IoFailure, "failed to serialize command output")
+            .with_detail("reason", error.to_string())
+    })?;
+    let envelope = Envelope::success(command, device, value);
+    match format {
+        OutputFormat::Json => eprintln!(
+            "{}",
+            serde_json::to_string_pretty(&envelope).map_err(serialization_error)?
+        ),
+        OutputFormat::Jsonl => eprintln!(
+            "{}",
+            serde_json::to_string(&envelope).map_err(serialization_error)?
+        ),
+        OutputFormat::Human => unreachable!("human stderr output has a dedicated renderer"),
+    }
+    Ok(())
+}
+
 fn serialization_error(error: serde_json::Error) -> LinkError {
     LinkError::new(ErrorKind::IoFailure, "failed to serialize command output")
         .with_detail("reason", error.to_string())
@@ -2742,6 +3826,27 @@ fn emit_command_error(
     error.process_exit().code()
 }
 
+fn emit_command_error_to_stderr(
+    format: OutputFormat,
+    command: &str,
+    device: Option<DeviceSummary>,
+    error: &LinkError,
+) -> u8 {
+    match format {
+        OutputFormat::Human => eprintln!("error: {}", error.message()),
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            let envelope: Envelope<Value> = Envelope::failure(command, device, error);
+            match serde_json::to_string(&envelope) {
+                Ok(serialized) => eprintln!("{serialized}"),
+                Err(serialization_error) => {
+                    eprintln!("error: failed to serialize error output: {serialization_error}");
+                }
+            }
+        }
+    }
+    error.process_exit().code()
+}
+
 fn output_format_hint(arguments: &[OsString]) -> OutputFormat {
     let mut iterator = arguments.iter().skip(1);
     while let Some(argument) = iterator.next() {
@@ -2775,7 +3880,7 @@ fn parse_format_hint(value: &str) -> OutputFormat {
 mod tests {
     use clap::CommandFactory;
 
-    use super::{Cli, shutter_to_v4l2};
+    use super::{Cli, parse_fps, parse_size, shutter_to_v4l2};
 
     #[test]
     fn command_graph_excludes_mechanical_movement_commands() {
@@ -2788,6 +3893,15 @@ mod tests {
         assert_eq!(shutter_to_v4l2("1/100").unwrap(), 100);
         assert_eq!(shutter_to_v4l2("10ms").unwrap(), 100);
         assert!(shutter_to_v4l2("1/0").is_err());
+    }
+
+    #[test]
+    fn video_sizes_and_frame_rates_are_exact() {
+        assert_eq!(parse_size("3840x2160").unwrap(), (3840, 2160));
+        assert!(parse_size("3840").is_err());
+        assert_eq!(parse_fps("30000/1001").unwrap().numerator, 30000);
+        assert_eq!(parse_fps("29.97").unwrap().denominator, 100);
+        assert!(parse_fps("0").is_err());
     }
 
     fn assert_command_names_are_absent(command: &clap::Command, prohibited: &[&str]) {

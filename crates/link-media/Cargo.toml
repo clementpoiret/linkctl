@@ -6,12 +6,18 @@ repository.workspace = true
 publish.workspace = true
 
 [features]
-default = []
-gstreamer = []
-network = []
+default = ["gstreamer"]
+gstreamer = ["dep:ctrlc", "dep:gstreamer", "dep:gstreamer-app"]
+network = ["gstreamer"]
 
 [dependencies]
+ctrlc = { workspace = true, optional = true }
+gstreamer = { workspace = true, optional = true }
+gstreamer-app = { workspace = true, optional = true }
 link-core.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

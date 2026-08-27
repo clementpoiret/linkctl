@@ -5,6 +5,7 @@ pub mod control;
 pub mod device;
 pub mod error;
 pub mod logging;
+pub mod media;
 pub mod output;
 pub mod probe;
 pub mod safety;

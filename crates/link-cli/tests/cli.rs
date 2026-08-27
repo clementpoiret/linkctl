@@ -31,6 +31,10 @@ fn help_and_version_advertise_only_implemented_commands() {
     assert!(stdout.contains("device"));
     assert!(stdout.contains("control"));
     assert!(stdout.contains("image"));
+    assert!(stdout.contains("video"));
+    assert!(stdout.contains("snapshot"));
+    assert!(stdout.contains("capture"));
+    assert!(stdout.contains("record"));
     assert!(stdout.contains("doctor"));
     assert!(stdout.contains("completion"));
 
@@ -39,6 +43,44 @@ fn help_and_version_advertise_only_implemented_commands() {
 
     let unsafe_help = run(&["--unsafe-xu", "--help"]);
     assert!(unsafe_help.status.success());
+}
+
+#[test]
+fn media_help_exposes_exact_tuple_and_output_options() {
+    let video = run(&["video", "--help"]);
+    assert!(video.status.success());
+    let stdout = String::from_utf8(video.stdout).expect("UTF-8 help");
+    for command in ["formats", "status", "set", "stats"] {
+        assert!(stdout.contains(command));
+    }
+
+    let snapshot = run(&["snapshot", "--help"]);
+    assert!(snapshot.status.success());
+    let stdout = String::from_utf8(snapshot.stdout).expect("UTF-8 help");
+    assert!(stdout.contains("--image-format"));
+    assert!(stdout.contains("--raw-frame"));
+    assert!(!stdout.contains("--format <IMAGE"));
+
+    let record = run(&["record", "start", "--help"]);
+    assert!(record.status.success());
+    let stdout = String::from_utf8(record.stdout).expect("UTF-8 help");
+    assert!(stdout.contains("--segment-duration"));
+    assert!(stdout.contains("--rolling"));
+    assert!(stdout.contains("--disk-reserve"));
+}
+
+#[test]
+fn recording_dry_run_validates_limits_before_opening_hardware() {
+    let output = run(&[
+        "--dry-run",
+        "record",
+        "start",
+        "output.mkv",
+        "--max-size",
+        "invalid",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid byte-size value"));
 }
 
 #[test]

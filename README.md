@@ -2,7 +2,7 @@
 
 `linkctl` is a Linux command-line controller for the fixed-mount Insta360 Link 2C Pro. The project is capability-driven: it uses standard Linux camera and audio interfaces first, verified device profiles second, and explicitly labelled host-side processing where appropriate.
 
-The CLI discovers cameras by stable USB identity, reports their live capabilities, and controls standard V4L2 image settings:
+The CLI discovers cameras by stable USB identity, reports their live capabilities, controls standard V4L2 image settings, and captures media through exact runtime-enumerated video tuples:
 
 ```sh
 linkctl device list
@@ -11,11 +11,16 @@ linkctl --device link2cpro-… caps controls
 linkctl --device link2cpro-… control list
 linkctl --device link2cpro-… control set brightness 55%
 linkctl --device link2cpro-… image white-balance 5000K
+linkctl --device link2cpro-… video formats --fourcc H264
+linkctl --device link2cpro-… snapshot frame.png
+linkctl --device link2cpro-… record start meeting.mkv --video-copy
 ```
 
 Every mutation supports `--dry-run`, validates values, reads the previous value, verifies readback, and attempts rollback after a partial failure. Automatic/manual prerequisites are applied by default; `control set --raw` bypasses only that semantic gating. Pan and tilt remain read-only raw inventory even if a driver advertises them.
 
-Use `device watch --format jsonl` for hotplug events and `control watch --format jsonl` for control changes. `linkctl doctor` performs read-only configuration, permission, profile, and control checks. See [standard controls](docs/controls.md), [permissions and udev setup](docs/permissions.md), and the [hardware probe guide](docs/hardware-probe.md).
+Use `device watch --format jsonl` for hotplug events and `control watch --format jsonl` for control changes. `linkctl doctor` performs read-only configuration, permission, profile, and control checks. See [video capture and recording](docs/media.md), [standard controls](docs/controls.md), [permissions and udev setup](docs/permissions.md), and the [hardware probe guide](docs/hardware-probe.md).
+
+GStreamer media support is enabled in normal builds. H.264 and MJPEG recording paths preserve the camera encoding without decoding; RTP/UDP output is available when the `network` feature is enabled. Audio is deliberately not muxed yet.
 
 Generate shell completion source with `linkctl completion bash`, `zsh`, `fish`, or `elvish` and load or install the result using the conventions of that shell.
 
@@ -28,6 +33,8 @@ devenv shell
 cargo test --workspace --all-features --locked
 cargo run -p link-cli --bin linkctl -- --help
 ```
+
+The devenv includes GStreamer core, base, good, bad, and libav plugins required for camera capture, snapshot decoding, container muxing, and optional RTP output.
 
 Before submitting a change, run:
 

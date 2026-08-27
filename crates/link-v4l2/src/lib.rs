@@ -1,6 +1,7 @@
 //! V4L2 inventory and validated standard-control access.
 
 pub mod production;
+pub mod video;
 
 use std::fs::File;
 

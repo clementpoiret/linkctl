@@ -11,6 +11,11 @@
     pkgs.alsa-utils
     pkgs.cargo-deny
     pkgs.glibc.dev
+    pkgs.gst_all_1.gstreamer
+    pkgs.gst_all_1.gst-plugins-base
+    pkgs.gst_all_1.gst-plugins-good
+    pkgs.gst_all_1.gst-plugins-bad
+    pkgs.gst_all_1.gst-libav
     pkgs.libclang
     pkgs.linuxHeaders
     pkgs.pkg-config

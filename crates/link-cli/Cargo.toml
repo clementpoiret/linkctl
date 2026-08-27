@@ -10,12 +10,12 @@ name = "linkctl"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["gstreamer"]
 daemon = ["dep:link-ipc"]
 gstreamer = ["dep:link-media", "link-media/gstreamer"]
 pipewire = ["link-audio/pipewire"]
 host-ai = ["dep:link-effects", "link-effects/host-ai"]
-network = ["dep:link-ipc", "dep:link-media", "link-ipc/network", "link-media/network"]
+network = ["dep:link-ipc", "dep:link-media", "link-ipc/network", "link-media/network", "gstreamer"]
 sdk = ["dep:link-sdk-bridge", "link-sdk-bridge/sdk"]
 
 [dependencies]
