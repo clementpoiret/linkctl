@@ -1700,6 +1700,37 @@ firmware = ["v1.2.3"]
             [0xdd, 0x01]
         );
 
+        let compatibility = matched.profile.control("mode.compatibility").unwrap();
+        assert!(compatibility.writable);
+        assert!(compatibility.read_modify_write);
+        assert_eq!(compatibility.selector, 27);
+        assert_eq!(compatibility.length, 2);
+        assert_eq!(compatibility.write_mask, Some(0x2000));
+        assert_eq!(
+            compatibility.stream_requirement,
+            super::StreamRequirement::Restart
+        );
+        assert_eq!(
+            compatibility.verification,
+            super::VerificationMethod::Reenumeration
+        );
+        assert_eq!(
+            decode_control(compatibility, &[0xd5, 0x01]).unwrap(),
+            json!("standard")
+        );
+        assert_eq!(
+            decode_control(compatibility, &[0xd5, 0x21]).unwrap(),
+            json!("low-resolution")
+        );
+        assert_eq!(
+            encode_control(compatibility, "low-resolution", Some(&[0xdd, 0x11])).unwrap(),
+            [0xdd, 0x31]
+        );
+        assert_eq!(
+            encode_control(compatibility, "standard", Some(&[0xdd, 0x31])).unwrap(),
+            [0xdd, 0x11]
+        );
+
         let gestures = matched.profile.control("gesture.enabled").unwrap();
         assert!(gestures.writable);
         assert!(gestures.read_modify_write);
@@ -1944,6 +1975,26 @@ firmware = ["v1.2.3"]
             .unwrap();
         assert_eq!(bootstrap.profile.profile_id, "insta360-link-2c-pro");
         assert!(!bootstrap.semantic_write_authorized());
+
+        let low_resolution =
+            identity("f8ec69e87774e9831bef86c498625373ba5fbb9d22bbc558185d88fb271a1bc2");
+        let low_resolution_bootstrap = catalog
+            .matching(&low_resolution, DeviceMode::Camera, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            low_resolution_bootstrap.profile.profile_id,
+            "insta360-link-2c-pro"
+        );
+        let low_resolution_verified = catalog
+            .matching(&low_resolution, DeviceMode::Camera, Some("v0.2.9.8_build3"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            low_resolution_verified.profile.profile_id,
+            "insta360-link-2c-pro-v0.2.9.8-build3"
+        );
+        assert!(low_resolution_verified.semantic_write_authorized());
     }
 
     #[test]

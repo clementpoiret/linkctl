@@ -2,7 +2,7 @@
 
 `linkctl caps all` is the authoritative runtime view of the fixed-mount camera's semantic capabilities. Each item reports its state, backend, evidence, readable/writable flags, profile identity and checksum when applicable, live value when readable, persistence, and stream/restart dependency. The command also works in U-disk mode, where it reports camera controls as unavailable without trying to open a video node.
 
-The following outcomes are established for the currently recorded landscape descriptor `1d0fa40a5787adc39223e26a5262f3d5e1ba0421e17442487157905cbd2a066c` and USB revision `0200`:
+The following outcomes are established for the recorded Standard descriptor `1d0fa40a5787adc39223e26a5262f3d5e1ba0421e17442487157905cbd2a066c`, Low resolution descriptor `f8ec69e87774e9831bef86c498625373ba5fbb9d22bbc558185d88fb271a1bc2`, and USB revision `0200`:
 
 | Capability group | Command surface | Current outcome |
 | --- | --- | --- |
@@ -15,7 +15,7 @@ The following outcomes are established for the currently recorded landscape desc
 | DeskView | `mode deskview on/off/status/vertical-correction` | Camera-native mode and vertical correction are verified for firmware `v0.2.9.8_build3`. Host calibration, perspective correction, and virtual-camera output remain separate. |
 | Gestures | `gesture status/enable/disable/set` | Global and per-gesture controls are verified for firmware `v0.2.9.8_build3`. |
 | Native portrait | `portrait status/native` | Discovered, including correction switches; re-enumeration mapping pending. |
-| Compatibility | `mode compatibility status/set` | Discovered, low-resolution and YUY2 switches unmapped. |
+| Compatibility | `mode compatibility status/set` | Standard and restart-dependent Low resolution/360p modes are verified for firmware `v0.2.9.8_build3`; the separate YUY2 switch remains unmapped. |
 | Firmware | `firmware info` | Verified read-only landscape mapping: XU GUID `faf1672d-b71b-4793-8c91-7b1c9b7f95f8`, selector 3, 234-byte payload, UTF-8 field at offset 97. Observed version: `v0.2.9.8_build3`. |
 | Hardware, mode, error, indicator | `firmware info`, `device state` | Read-only semantic sources unmapped. USB `bcdDevice` is not reported as firmware. |
 | Physical privacy shutter | `privacy status` | Hardware-only; no verified position readback. Host and hardware audio mute remain independently reported. |
@@ -107,6 +107,18 @@ The reviewed `gestures.pcap` Controller capture (SHA-256 `92c80aded28ca497db1872
 Each per-gesture command uses a masked read-modify-write, preserving both the other gesture switches and the currently unassigned `0x01` bit. `gesture enable` sets all three verified bits and `gesture disable` clears them in one masked write; a partial configuration is reported as its enabled gesture combination. The verified profile follows the captured running-preview transfer sequence with two length queries before each write and delayed exact readback.
 
 Linux hardware validation verified the aggregate all-off/all-on transition and three complete off/on cycles for each individual switch. Exact status readback showed the two untargeted switches remained on throughout every individual off state. The camera was restored to Palm, V-sign, and L-sign all on. Reconnect and power-cycle persistence remain unverified.
+
+## Low-resolution compatibility mapping
+
+The reviewed `low-res.pcap` Controller capture (SHA-256 `1932784a09198ee5d8c5967f1ee6ae5c17306d24c970dc18e7c75ce2bac6a6ab`) maps Low resolution to bit `0x2000` of the two-byte little-endian selector 27 value. With the other captured settings preserved, Standard read as `d5 01` and Low resolution as `d5 21`. Two complete enable/disable cycles repeated those values and showed the camera begin disconnecting about 180 milliseconds after every changed write; there is no separate restart command.
+
+The restart changes the full USB descriptor fingerprint. Standard mode uses `1d0fa40a5787adc39223e26a5262f3d5e1ba0421e17442487157905cbd2a066c`. Low resolution uses `f8ec69e87774e9831bef86c498625373ba5fbb9d22bbc558185d88fb271a1bc2` and adds 640×360 entries, including the captured 24, 25, and 30 fps intervals. Post-restart selector reads returned `d5 21` after enable and `d5 01` after disable.
+
+`mode compatibility set low-resolution` and `set standard` perform a masked read-modify-write so HDR, flips, and the other selector 27 settings are preserved. A changed value waits up to the larger of the configured timeout and 15 seconds for an observed removal and changed-descriptor re-enumeration, reopens the new video node, requires the exact descriptor and firmware profile, and verifies the requested selector state. Requesting the already active value is a verified no-op and does not restart the camera. Automatic rollback is unavailable once the camera has disconnected; the bounded restore operation is an explicit `set standard`, which follows the same verified restart path. The separate YUY2 choice is rejected before a writable XU session is opened because this trace does not map it.
+
+VirtualBox USB filters can automatically recapture the camera when it returns with the changed descriptors. Shut down the VM or disable its automatic camera filter before changing compatibility mode; otherwise the setting can apply while Linux receives no video node with which to verify or restore it. In that case `linkctl` reports that the re-enumeration occurred but the capture/control node remained unavailable.
+
+Linux hardware validation with the VM shut down completed Standard-to-Low resolution in 7.79 seconds and restored Standard in 7.76 seconds. Both commands matched the expected post-restart descriptor and selector state. Low resolution advertised MJPEG, H.264, and YUYV 640×360 at 24, 25, and 30 fps, and a raw MJPEG snapshot produced a valid 640×360 frame. An idempotent Low resolution request completed in 0.34 seconds without changing the USB device number. The final Standard restoration returned to the original descriptor and removed every 640×360/640×480 compatibility-only format.
 
 ## Mapping checkpoint
 

@@ -457,7 +457,9 @@ pub enum DeskviewCommand {
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum CompatibilityCommand {
+    /// Read the active Standard or Low resolution camera mode.
     Status,
+    /// Change compatibility mode. Changed values restart and re-enumerate the camera.
     Set { value: CompatibilityMode },
 }
 
@@ -465,6 +467,7 @@ pub enum CompatibilityCommand {
 pub enum CompatibilityMode {
     Standard,
     LowResolution,
+    /// Reserved until the camera's separate YUY2 switch is verified.
     Yuy2,
 }
 
@@ -1871,6 +1874,9 @@ struct PreparedSemanticWrite<'a> {
     rate_limit_wait_ms: u64,
 }
 
+const MINIMUM_REENUMERATION_TIMEOUT: Duration = Duration::from_secs(15);
+const REENUMERATION_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
 #[derive(Serialize)]
 struct XuRecoveryReport {
     node: String,
@@ -2336,10 +2342,13 @@ fn run_xu_semantic_writes(
         })?;
         let control = authorization.control();
         authorize_control_safety(control.safety, &policy)?;
-        if control.verification != VerificationMethod::Readback {
+        let restart_verification = writes.len() == 1
+            && control.verification == VerificationMethod::Reenumeration
+            && control.stream_requirement == StreamRequirement::Restart;
+        if control.verification != VerificationMethod::Readback && !restart_verification {
             return Err(LinkError::new(
                 ErrorKind::CapabilityUnsupported,
-                "semantic XU writes currently require direct readback verification",
+                "semantic XU writes require direct readback or a restart/re-enumeration profile",
             )
             .with_detail("control", control.name.clone())
             .with_detail("verification", format!("{:?}", control.verification)));
@@ -2348,6 +2357,8 @@ fn run_xu_semantic_writes(
     }
 
     let stream_control = authorized[0].0.control();
+    let restart_write = stream_control.verification == VerificationMethod::Reenumeration
+        && stream_control.stream_requirement == StreamRequirement::Restart;
     if authorized.iter().skip(1).any(|(authorization, _)| {
         let control = authorization.control();
         control.stream_requirement != stream_control.stream_requirement
@@ -2398,7 +2409,54 @@ fn run_xu_semantic_writes(
         });
     }
 
-    if !dry_run {
+    if !dry_run && restart_write {
+        let write = &mut prepared[0];
+        if write.requested == write.previous {
+            write.observed = Some(write.previous.clone());
+            write.verified = true;
+        } else {
+            session
+                .set_profiled(write.address, write.authorization, &write.payload)
+                .map_err(|error| {
+                    error
+                        .with_detail("control", write.authorization.control().name.clone())
+                        .with_detail(
+                            "rollback",
+                            json!({
+                                "attempted": false,
+                                "reason": "the profile marks restart rollback unavailable",
+                            }),
+                        )
+                })?;
+            drop(session);
+            let control = write.authorization.control();
+            let observed = wait_for_reenumerated_semantic_value(
+                config,
+                &stable_id,
+                &device.identity.descriptor_sha256,
+                &entry.profile.profile_id,
+                control,
+            )?;
+            if !semantic_readback_matches(control, &write.requested, &observed) {
+                return Err(LinkError::new(
+                    ErrorKind::ProtocolProfileMismatch,
+                    "restart-dependent XU write failed post-restart verification",
+                )
+                .with_detail("control", control.name.clone())
+                .with_detail("requested", write.requested.clone())
+                .with_detail("observed", observed)
+                .with_detail(
+                    "rollback",
+                    json!({
+                        "attempted": false,
+                        "reason": "the profile marks restart rollback unavailable",
+                    }),
+                ));
+            }
+            write.observed = Some(observed);
+            write.verified = true;
+        }
+    } else if !dry_run {
         for index in 0..prepared.len() {
             let write_result = apply_semantic_write(&session, &prepared[index]);
             match write_result {
@@ -2469,6 +2527,115 @@ fn run_xu_semantic_writes(
     } else {
         emit_xu_semantic_transaction_report(config, command, &device, reports, dry_run)
     }
+}
+
+fn wait_for_reenumerated_semantic_value(
+    config: &Config,
+    stable_id: &str,
+    previous_descriptor_sha256: &str,
+    expected_profile_id: &str,
+    control: &link_profiles::ProfileControl,
+) -> Result<Value, LinkError> {
+    let timeout = config.timeout.get().max(MINIMUM_REENUMERATION_TIMEOUT);
+    let started = Instant::now();
+    let catalog = ProfileCatalog::load(config.profile_dir.as_deref())?;
+    let mut removed = false;
+    let mut reenumerated = false;
+    let mut last_descriptor_sha256 = None;
+    let mut last_error = None;
+    while started.elapsed() < timeout {
+        let devices = discovered_devices()?;
+        let current = devices
+            .iter()
+            .find(|device| device.identity.stable_id() == stable_id);
+        match current {
+            None => removed = true,
+            Some(device) => {
+                last_descriptor_sha256 = Some(device.identity.descriptor_sha256.clone());
+                if removed && device.identity.descriptor_sha256 != previous_descriptor_sha256 {
+                    reenumerated = true;
+                    thread::sleep(Duration::from_millis(control.verification_delay_ms));
+                    match read_reenumerated_semantic_value(
+                        device,
+                        &catalog,
+                        expected_profile_id,
+                        &control.name,
+                    ) {
+                        Ok(observed) => return Ok(observed),
+                        Err(error) => last_error = Some(error.message().to_owned()),
+                    }
+                }
+            }
+        }
+        thread::sleep(REENUMERATION_POLL_INTERVAL);
+    }
+    let message = if reenumerated {
+        "the camera re-enumerated, but no capture/control node became available; the requested setting may be active"
+    } else {
+        "timed out waiting for the camera to restart and re-enumerate"
+    };
+    let mut error = LinkError::new(ErrorKind::Timeout, message)
+        .with_detail("stable_id", stable_id.to_owned())
+        .with_detail("device_removed", removed)
+        .with_detail("device_reenumerated", reenumerated)
+        .with_detail("timeout_ms", timeout.as_millis() as u64);
+    if let Some(hash) = last_descriptor_sha256 {
+        error = error.with_detail("last_descriptor_sha256", hash);
+    }
+    if let Some(reason) = last_error {
+        error = error.with_detail("last_error", reason);
+    }
+    Err(error)
+}
+
+fn read_reenumerated_semantic_value(
+    device: &DiscoveredDevice,
+    catalog: &ProfileCatalog,
+    expected_profile_id: &str,
+    control_name: &str,
+) -> Result<Value, LinkError> {
+    let node = control_node(device, None)?;
+    let inventory = link_uvc_xu::parse_descriptors(&device.descriptors)?;
+    let session = link_uvc_xu::XuSession::open_read(Path::new(&node.path))?;
+    let (entry, firmware) = resolve_firmware_profile(device, &inventory, catalog, &session)?;
+    let entry = entry.ok_or_else(|| {
+        LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "no exact profile matches the restarted camera",
+        )
+        .with_detail("firmware", firmware.unwrap_or_else(|| "unknown".into()))
+    })?;
+    if entry.profile.profile_id != expected_profile_id {
+        return Err(LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "the restarted camera matched a different profile",
+        )
+        .with_detail("expected_profile_id", expected_profile_id.to_owned())
+        .with_detail("observed_profile_id", entry.profile.profile_id.clone()));
+    }
+    let control = entry.profile.control(control_name).ok_or_else(|| {
+        LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "the restarted camera profile is missing the written control",
+        )
+        .with_detail("control", control_name.to_owned())
+    })?;
+    let value = link_uvc_xu::read_value(
+        &session,
+        &inventory,
+        Some(&control.entity_guid),
+        None,
+        control.selector,
+        Some(control.length),
+        Some(&entry.profile),
+    )?;
+    value.decoded.get(control_name).cloned().ok_or_else(|| {
+        LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "the restarted camera profile did not decode the written control",
+        )
+        .with_detail("control", control_name.to_owned())
+    })
 }
 
 fn apply_semantic_write(
@@ -2567,16 +2734,12 @@ fn prepare_xu_stream(
     _dry_run: bool,
 ) -> Result<Option<()>, LinkError> {
     match control.stream_requirement {
-        link_profiles::StreamRequirement::Either | link_profiles::StreamRequirement::Closed => {
-            Ok(None)
-        }
+        link_profiles::StreamRequirement::Either
+        | link_profiles::StreamRequirement::Closed
+        | link_profiles::StreamRequirement::Restart => Ok(None),
         link_profiles::StreamRequirement::Open => Err(LinkError::new(
             ErrorKind::CapabilityUnsupported,
             "profile-required open streams need a GStreamer-enabled build",
-        )),
-        link_profiles::StreamRequirement::Restart => Err(LinkError::new(
-            ErrorKind::CapabilityUnsupported,
-            "profile-required pipeline rebuilds need a GStreamer-enabled build",
         )),
     }
 }
@@ -6154,7 +6317,7 @@ fn native_capabilities_for(
                         persistent: Some(!matches!(control.persistence, Persistence::Volatile)),
                         stream_dependent: Some(!matches!(
                             control.stream_requirement,
-                            StreamRequirement::Either
+                            StreamRequirement::Either | StreamRequirement::Restart
                         )),
                         restart_dependent: control.stream_requirement == StreamRequirement::Restart,
                         destructive: false,
@@ -6228,10 +6391,7 @@ fn prepare_xu_read_stream(
             thread::sleep(Duration::from_millis(1_000));
             Ok(Some(stream))
         }
-        StreamRequirement::Restart => Err(LinkError::new(
-            ErrorKind::CapabilityUnsupported,
-            "profile-required restart reads are not supported",
-        )),
+        StreamRequirement::Restart => Ok(None),
     }
 }
 
@@ -6247,10 +6407,7 @@ fn prepare_xu_read_stream(
             ErrorKind::CapabilityUnsupported,
             "profile-required open-stream reads need a GStreamer-enabled build",
         )),
-        StreamRequirement::Restart => Err(LinkError::new(
-            ErrorKind::CapabilityUnsupported,
-            "profile-required restart reads are not supported",
-        )),
+        StreamRequirement::Restart => Ok(None),
     }
 }
 
@@ -7001,17 +7158,30 @@ fn run_mode(config: &Config, command: ModeCommand, dry_run: bool) -> Result<(), 
             CompatibilityCommand::Status => {
                 run_native_status(config, "mode.compatibility", &["mode.compatibility"])
             }
-            CompatibilityCommand::Set { value } => run_native_vendor_set(
+            CompatibilityCommand::Set {
+                value: CompatibilityMode::Standard,
+            } => run_native_vendor_set(
                 config,
                 "mode.compatibility",
                 "mode.compatibility",
-                match value {
-                    CompatibilityMode::Standard => "standard",
-                    CompatibilityMode::LowResolution => "low-resolution",
-                    CompatibilityMode::Yuy2 => "yuy2",
-                },
+                "standard",
                 dry_run,
             ),
+            CompatibilityCommand::Set {
+                value: CompatibilityMode::LowResolution,
+            } => run_native_vendor_set(
+                config,
+                "mode.compatibility",
+                "mode.compatibility",
+                "low-resolution",
+                dry_run,
+            ),
+            CompatibilityCommand::Set {
+                value: CompatibilityMode::Yuy2,
+            } => Err(native_unmapped_error(
+                "mode.compatibility",
+                "the separate YUY2 compatibility switch has not been verified",
+            )),
         },
     }
 }
@@ -9972,6 +10142,10 @@ mod tests {
             )
             .unwrap(),
             Some(StreamRequirement::Open)
+        );
+        assert_eq!(
+            profile_read_stream_requirement(profile, Some(&["mode.compatibility"])).unwrap(),
+            Some(StreamRequirement::Restart)
         );
     }
 
