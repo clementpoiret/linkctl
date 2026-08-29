@@ -70,6 +70,15 @@
         {
           "type": "object",
           "additionalProperties": false,
+          "required": ["kind", "hex"],
+          "properties": {
+            "kind": {"const": "template"},
+            "hex": {"type": "string", "pattern": "^(?:[0-9A-Fa-f]{2})*$"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
           "required": ["kind", "algorithm"],
           "properties": {
             "kind": {"const": "computed"},
@@ -119,6 +128,9 @@
         "width": {"type": "integer", "minimum": 0, "maximum": 255},
         "byte_order": {"enum": ["little", "big"]},
         "values": {"type": "object", "additionalProperties": {"type": "integer"}},
+        "minimum": {"type": "integer"},
+        "maximum": {"type": "integer"},
+        "step": {"type": "integer", "minimum": 1},
         "fields": {"type": "array", "items": {"$ref": "#/$defs/field"}},
         "read_modify_write": {"type": "boolean"},
         "write_mask": {"type": "integer", "minimum": 1},

@@ -18,6 +18,8 @@ provenance = [
   "Linux hardware validation on the same firmware and descriptor verified three complete on/off cycles for each flip control with exact dd01/d501 and d511/d501 readback, followed by the combined dd01/dd11/d511/d501 sequence proving cross-bit preservation; HDR remained on and both flip controls were restored off (2026-08-29)",
   "Link 2C Pro USBPcap audio pickup-mode capture on firmware v0.2.9.8_build3, SHA-256 71f9a37a70a159ab07e9eba3f42bfc7e920ce649889b9f4832c365ee4a6fb74a; repeated transitions established selector 31 values 0=standard, 1=wide, 2=focus, and 3=original with direct GET_CUR confirmation, ending in focus mode (2026-08-29)",
   "Linux hardware validation on the same firmware and descriptor verified three complete original/focus/wide/standard/focus cycles with exact 03/02/01/00/02 readback while video was closed, plus idempotent focus restoration; mutations completed in 0.52-0.66 seconds and the final focus state was restored (2026-08-29)",
+  "Link 2C Pro USBPcap DeskView capture on firmware v0.2.9.8_build3, SHA-256 d134801e2564ac699bc3c59629faa55cc812ab564d96c61d8d0ae38b2c031b78; repeated mode writes established selector 2 value 6 as DeskView and value 0 as off, while direct GET_CUR samples mapped the signed little-endian field at offset 52 to vertical correction using raw=-10*setting for 10, 45, and 80 (2026-08-29)",
+  "Linux hardware validation on the same firmware and descriptor verified three complete DeskView on/10/80/45/off cycles with exact semantic readback under the trace-matched stream, plus an idempotent off restoration; mode mutations completed in 4.81-5.33 seconds, correction mutations in 2.81-2.84 seconds, and the camera finished off at correction 45 (2026-08-29)",
 ]
 
 [[match]]
@@ -287,6 +289,57 @@ verification_delay_ms = 250
 persistence = "volatile"
 rollback = "readback"
 trace_ids = ["misc-options-1-audio-modes-71f9a37a70a1"]
+safety = "normal"
+
+[[controls]]
+name = "mode.deskview"
+entity_guid = "faf1672d-b71b-4793-8c91-7b1c9b7f95f8"
+selector = 2
+length = 61
+readable = true
+writable = true
+codec = "enum"
+offset = 0
+width = 1
+values = { off = 0, on = 6 }
+tail_policy = { kind = "fixed", hex = "00000000000000000000000000000000000000000000000000000000000000000000000000ffffffff1a0e00001a0e000000003efe00000000000000" }
+verification = "readback"
+stream_requirement = "open"
+stream_format = { fourcc = "MJPG", width = 1920, height = 1080, fps_numerator = 30, fps_denominator = 1 }
+stream_warmup_delay_ms = 1000
+write_prelude = "get-length-twice"
+minimum_write_interval_ms = 250
+verification_delay_ms = 2250
+persistence = "volatile"
+rollback = "readback"
+trace_ids = ["misc-options-1-deskview-d134801e2564"]
+safety = "normal"
+
+[[controls]]
+name = "mode.deskview.vertical-correction"
+entity_guid = "faf1672d-b71b-4793-8c91-7b1c9b7f95f8"
+selector = 2
+length = 61
+readable = true
+writable = true
+codec = "signed"
+offset = 52
+width = 2
+byte_order = "little"
+minimum = -800
+maximum = -100
+step = 10
+tail_policy = { kind = "template", hex = "0600000000000000000000000000000000000000000000000000000000000000000000000000ff7fff7f000000000000000078003efe02000000000000" }
+verification = "readback"
+stream_requirement = "open"
+stream_format = { fourcc = "MJPG", width = 1920, height = 1080, fps_numerator = 30, fps_denominator = 1 }
+stream_warmup_delay_ms = 1000
+write_prelude = "get-length-twice"
+minimum_write_interval_ms = 250
+verification_delay_ms = 250
+persistence = "volatile"
+rollback = "readback"
+trace_ids = ["misc-options-1-deskview-d134801e2564"]
 safety = "normal"
 
 [[controls]]

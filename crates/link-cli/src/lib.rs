@@ -430,9 +430,28 @@ pub enum ModeCommand {
         #[command(subcommand)]
         command: ToggleStatusCommand,
     },
+    Deskview {
+        #[command(subcommand)]
+        command: DeskviewCommand,
+    },
     Compatibility {
         #[command(subcommand)]
         command: CompatibilityCommand,
+    },
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum DeskviewCommand {
+    /// Enable the camera-native DeskView transform at its default correction.
+    On,
+    /// Disable the camera-native DeskView transform.
+    Off,
+    /// Read the live camera-native DeskView state and correction.
+    Status,
+    /// Enable DeskView and set its whole-number vertical correction.
+    VerticalCorrection {
+        #[arg(value_parser = clap::value_parser!(u8).range(10..=80))]
+        value: u8,
     },
 }
 
@@ -1400,6 +1419,12 @@ fn command_identifier(command: Option<&Command>) -> &'static str {
         Some(Command::Mode { command }) => match command {
             ModeCommand::Normal => "mode.normal",
             ModeCommand::Whiteboard { .. } => "mode.whiteboard",
+            ModeCommand::Deskview { command } => match command {
+                DeskviewCommand::On | DeskviewCommand::Off | DeskviewCommand::Status => {
+                    "mode.deskview"
+                }
+                DeskviewCommand::VerticalCorrection { .. } => "mode.deskview.vertical-correction",
+            },
             ModeCommand::Compatibility { .. } => "mode.compatibility",
         },
         Some(Command::Gesture { command }) => match command {
@@ -5639,6 +5664,11 @@ fn exposure_compensation_status_value(raw_hundredths: Option<Value>) -> Option<V
     Some(json!(raw_hundredths as f64 / 100.0))
 }
 
+fn deskview_vertical_correction_status_value(raw_tenths: Option<Value>) -> Option<Value> {
+    let raw_tenths = raw_tenths?.as_i64()?;
+    Some(json!(-raw_tenths / 10))
+}
+
 fn control_capabilities(
     device: &DiscoveredDevice,
     controls: Vec<ControlDescriptor>,
@@ -5860,6 +5890,14 @@ const CAMERA_NATIVE_CAPABILITIES: &[(&str, &str)] = &[
         "regular camera Whiteboard Mode has not been mapped for this profile",
     ),
     (
+        "mode.deskview",
+        "camera-native DeskView has not been mapped for this profile",
+    ),
+    (
+        "mode.deskview.vertical-correction",
+        "camera-native DeskView vertical correction has not been mapped for this profile",
+    ),
+    (
         "gesture.enabled",
         "camera gesture recognition has not been mapped for this profile",
     ),
@@ -6053,12 +6091,21 @@ fn native_capabilities_for(
                 || unmapped_capability(&model, verified_at_unix_ms, evidence),
                 |(entry, control)| {
                     let read_verified = entry.semantic_read_verified();
-                    let range = (*name == "image.exposure_compensation").then(|| SemanticRange {
-                        minimum: -3.0,
-                        maximum: 3.0,
-                        step: Some(0.1),
-                        unit: "EV".into(),
-                    });
+                    let range = match *name {
+                        "image.exposure_compensation" => Some(SemanticRange {
+                            minimum: -3.0,
+                            maximum: 3.0,
+                            step: Some(0.1),
+                            unit: "EV".into(),
+                        }),
+                        "mode.deskview.vertical-correction" => Some(SemanticRange {
+                            minimum: 10.0,
+                            maximum: 80.0,
+                            step: Some(1.0),
+                            unit: "setting".into(),
+                        }),
+                        _ => None,
+                    };
                     let current = if control.readable
                         && current_names.is_none_or(|names| names.contains(name))
                     {
@@ -6084,6 +6131,8 @@ fn native_capabilities_for(
                             )
                         } else if *name == "image.exposure_compensation" {
                             exposure_compensation_status_value(read_current(name))
+                        } else if *name == "mode.deskview.vertical-correction" {
+                            deskview_vertical_correction_status_value(read_current(name))
                         } else {
                             read_current(name)
                         }
@@ -6927,6 +6976,26 @@ fn run_mode(config: &Config, command: ModeCommand, dry_run: bool) -> Result<(), 
             ToggleStatusCommand::Off => {
                 run_native_vendor_set(config, "mode.whiteboard", "mode.whiteboard", "off", dry_run)
             }
+        },
+        ModeCommand::Deskview { command } => match command {
+            DeskviewCommand::Status => run_native_status(
+                config,
+                "mode.deskview",
+                &["mode.deskview", "mode.deskview.vertical-correction"],
+            ),
+            DeskviewCommand::On => {
+                run_native_vendor_set(config, "mode.deskview", "mode.deskview", "on", dry_run)
+            }
+            DeskviewCommand::Off => {
+                run_native_vendor_set(config, "mode.deskview", "mode.deskview", "off", dry_run)
+            }
+            DeskviewCommand::VerticalCorrection { value } => run_native_vendor_set(
+                config,
+                "mode.deskview.vertical-correction",
+                "mode.deskview.vertical-correction",
+                &(-i64::from(value) * 10).to_string(),
+                dry_run,
+            ),
         },
         ModeCommand::Compatibility { command } => match command {
             CompatibilityCommand::Status => {
@@ -9693,6 +9762,29 @@ mod tests {
     }
 
     #[test]
+    fn deskview_vertical_correction_enforces_the_verified_range() {
+        let parsed =
+            Cli::try_parse_from(["linkctl", "mode", "deskview", "vertical-correction", "45"])
+                .expect("the captured default must parse");
+        assert!(matches!(
+            parsed.command,
+            Some(super::Command::Mode {
+                command: super::ModeCommand::Deskview {
+                    command: super::DeskviewCommand::VerticalCorrection { value: 45 },
+                },
+            })
+        ));
+        assert!(
+            Cli::try_parse_from(["linkctl", "mode", "deskview", "vertical-correction", "9",])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["linkctl", "mode", "deskview", "vertical-correction", "81",])
+                .is_err()
+        );
+    }
+
+    #[test]
     fn shutter_fractions_and_durations_use_v4l2_units() {
         assert_eq!(shutter_to_v4l2("1/100").unwrap(), 100);
         assert_eq!(shutter_to_v4l2("10ms").unwrap(), 100);
@@ -9871,6 +9963,14 @@ mod tests {
         assert_eq!(
             profile_read_stream_requirement(profile, Some(&["image.exposure_compensation"]),)
                 .unwrap(),
+            Some(StreamRequirement::Open)
+        );
+        assert_eq!(
+            profile_read_stream_requirement(
+                profile,
+                Some(&["mode.deskview", "mode.deskview.vertical-correction"]),
+            )
+            .unwrap(),
             Some(StreamRequirement::Open)
         );
     }

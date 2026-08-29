@@ -99,6 +99,9 @@ pub enum TailPolicy {
     Fixed {
         hex: String,
     },
+    Template {
+        hex: String,
+    },
     Computed {
         algorithm: ComputedTail,
     },
@@ -228,6 +231,12 @@ pub struct ProfileControl {
     pub byte_order: ByteOrder,
     #[serde(default)]
     pub values: BTreeMap<String, i64>,
+    #[serde(default)]
+    pub minimum: Option<i64>,
+    #[serde(default)]
+    pub maximum: Option<i64>,
+    #[serde(default)]
+    pub step: Option<i64>,
     #[serde(default)]
     pub fields: Vec<CodecField>,
     #[serde(default)]
@@ -555,6 +564,26 @@ fn validate_control(
             "enum and bitmask codecs require values",
         ));
     }
+    if control.minimum.is_some() || control.maximum.is_some() || control.step.is_some() {
+        if !matches!(control.codec, CodecKind::Unsigned | CodecKind::Signed) {
+            return Err(profile_error(
+                origin,
+                "numeric bounds require an unsigned or signed scalar codec",
+            ));
+        }
+        let (Some(minimum), Some(maximum)) = (control.minimum, control.maximum) else {
+            return Err(profile_error(
+                origin,
+                "numeric bounds require both minimum and maximum",
+            ));
+        };
+        if minimum > maximum
+            || (control.codec == CodecKind::Unsigned && minimum < 0)
+            || control.step.is_some_and(|step| step <= 0)
+        {
+            return Err(profile_error(origin, "numeric profile bounds are invalid"));
+        }
+    }
     let mut field_names = BTreeMap::new();
     let mut field_ranges = Vec::new();
     for field in &control.fields {
@@ -591,6 +620,14 @@ fn validate_control(
                 "fixed tail length does not match the payload",
             ));
         }
+    }
+    if let TailPolicy::Template { hex } = &control.tail_policy
+        && decode_hex(hex)?.len() != usize::from(control.length)
+    {
+        return Err(profile_error(
+            origin,
+            "fixed template length does not match the payload",
+        ));
     }
     if matches!(control.tail_policy, TailPolicy::Computed { .. })
         && usize::from(control.length) != encoded.saturating_add(1)
@@ -779,6 +816,7 @@ pub fn encode_control(
             value[encoded..].copy_from_slice(&decode_hex(hex)?);
             value
         }
+        TailPolicy::Template { hex } => decode_hex(hex)?,
     };
 
     match control.codec {
@@ -795,6 +833,7 @@ pub fn encode_control(
         | CodecKind::Bitmask => {
             let end = control.offset + usize::from(control.width);
             let mut raw = parse_value(control.codec, input, &control.values)?;
+            validate_numeric_input(control, raw)?;
             if control.read_modify_write {
                 let current = current.ok_or_else(|| {
                     LinkError::new(
@@ -860,6 +899,28 @@ pub fn encode_control(
         payload[length - 1] = checksum;
     }
     Ok(payload)
+}
+
+fn validate_numeric_input(control: &ProfileControl, raw: i64) -> Result<(), LinkError> {
+    let (Some(minimum), Some(maximum)) = (control.minimum, control.maximum) else {
+        return Ok(());
+    };
+    let on_step = control.step.is_none_or(|step| {
+        (i128::from(raw) - i128::from(minimum)).rem_euclid(i128::from(step)) == 0
+    });
+    if (minimum..=maximum).contains(&raw) && on_step {
+        Ok(())
+    } else {
+        Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "numeric profile value is outside the verified range",
+        )
+        .with_detail("control", control.name.clone())
+        .with_detail("value", raw)
+        .with_detail("minimum", minimum)
+        .with_detail("maximum", maximum)
+        .with_detail("step", control.step))
+    }
 }
 
 /// Re-encode a previously decoded semantic value using the control's write-tail policy.
@@ -1665,6 +1726,58 @@ firmware = ["v1.2.3"]
         assert_eq!(
             encode_control(pickup_mode, "focus", Some(&[3])).unwrap(),
             [2]
+        );
+
+        let deskview = matched.profile.control("mode.deskview").unwrap();
+        assert!(deskview.writable);
+        assert_eq!(deskview.selector, 2);
+        assert_eq!(deskview.length, 61);
+        assert_eq!(deskview.stream_requirement, super::StreamRequirement::Open);
+        assert_eq!(deskview.stream_warmup_delay_ms, 1000);
+        assert_eq!(deskview.verification_delay_ms, 2250);
+        assert_eq!(decode_control(deskview, &[6; 61]).unwrap(), json!("on"));
+        assert_eq!(decode_control(deskview, &[0; 61]).unwrap(), json!("off"));
+        let deskview_on = encode_control(deskview, "on", Some(&[0; 61])).unwrap();
+        assert_eq!(deskview_on.len(), 61);
+        assert_eq!(deskview_on[0], 6);
+        assert_eq!(&deskview_on[38..42], &[0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(&deskview_on[42..46], &[0x1a, 0x0e, 0, 0]);
+        assert_eq!(&deskview_on[50..55], &[0, 0, 0x3e, 0xfe, 0]);
+
+        let deskview_correction = matched
+            .profile
+            .control("mode.deskview.vertical-correction")
+            .unwrap();
+        assert!(matches!(
+            &deskview_correction.tail_policy,
+            super::TailPolicy::Template { .. }
+        ));
+        assert_eq!(deskview_correction.offset, 52);
+        assert_eq!(deskview_correction.width, 2);
+        assert_eq!(deskview_correction.verification_delay_ms, 250);
+        let mut correction_readback = vec![0; 61];
+        correction_readback[52..54].copy_from_slice(&[0x3e, 0xfe]);
+        assert_eq!(
+            decode_control(deskview_correction, &correction_readback).unwrap(),
+            json!(-450)
+        );
+        let correction_min =
+            encode_control(deskview_correction, "-100", Some(&correction_readback)).unwrap();
+        assert_eq!(correction_min[0], 6);
+        assert_eq!(&correction_min[38..42], &[0xff, 0x7f, 0xff, 0x7f]);
+        assert_eq!(&correction_min[50..55], &[0x78, 0, 0x9c, 0xff, 2]);
+        let correction_max =
+            encode_control(deskview_correction, "-800", Some(&correction_readback)).unwrap();
+        assert_eq!(&correction_max[50..55], &[0x78, 0, 0xe0, 0xfc, 2]);
+        assert!(encode_control(deskview_correction, "-90", Some(&correction_readback)).is_err());
+        assert!(encode_control(deskview_correction, "-455", Some(&correction_readback)).is_err());
+        assert!(
+            encode_control(
+                deskview_correction,
+                &i64::MIN.to_string(),
+                Some(&correction_readback),
+            )
+            .is_err()
         );
 
         let exposure = matched.profile.control("image.exposure").unwrap();

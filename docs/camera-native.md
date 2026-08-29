@@ -12,6 +12,7 @@ The following outcomes are established for the currently recorded landscape desc
 | Image pipeline | existing `image` commands plus `hdr`, `mirror`, and `flip` | Exposure auto/manual mode, ISO, shutter, exposure compensation, HDR, horizontal mirror, and vertical flip are verified for firmware `v0.2.9.8_build3`. White balance, focus, and anti-flicker are verified through standard UVC controls. Other camera-native image items remain explicitly unmapped. |
 | Pickup mode | `audio mode status/standard/wide/focus/original` | All four camera-native modes are verified for firmware `v0.2.9.8_build3`; host gain/mute/filter controls remain separate. |
 | Regular Whiteboard Mode | `mode whiteboard on/off/status` | Discovered, vendor transport unmapped. |
+| DeskView | `mode deskview on/off/status/vertical-correction` | Camera-native mode and vertical correction are verified for firmware `v0.2.9.8_build3`. Host calibration, perspective correction, and virtual-camera output remain separate. |
 | Gestures | `gesture status/enable/disable/set` | Discovered, global/per-gesture mappings pending. |
 | Native portrait | `portrait status/native` | Discovered, including correction switches; re-enumeration mapping pending. |
 | Compatibility | `mode compatibility status/set` | Discovered, low-resolution and YUY2 switches unmapped. |
@@ -80,6 +81,14 @@ Target-hardware validation verified writes and direct readback for disabled, 50 
 The reviewed `audio-modes.pcap` Controller capture (SHA-256 `71f9a37a70a159ab07e9eba3f42bfc7e920ce649889b9f4832c365ee4a6fb74a`) maps pickup mode to XU GUID `e307e649-4618-a3ff-82fc-2d8b5f216773`, selector 31, as a one-byte enum: Standard `00`, Wide `01`, Focus `02`, and Original `03`. The trace repeated the ordered mode changes and its periodic `GET_CUR` reads confirmed each written value; it finished at Focus.
 
 The verified profile checks the one-byte length twice immediately before each write, requires exact delayed readback, rate-limits mutations, and restores the previous enum after a mismatch. The Controller trace covered writes with preview running, while Linux hardware verification completed three full mode cycles with video closed, so no video stream is required. The measured mutations completed in 0.52–0.66 seconds and Focus was restored at the end. The profile conservatively leaves reconnect and power-cycle persistence undeclared because the observed final value is also the stated default.
+
+## Camera-native DeskView mapping
+
+The reviewed `deskview.pcap` Controller capture (SHA-256 `d134801e2564ac699bc3c59629faa55cc812ab564d96c61d8d0ae38b2c031b78`) maps DeskView to mode value `06` and off to `00` in the first byte of XU GUID `faf1672d-b71b-4793-8c91-7b1c9b7f95f8`, selector 2, length 61. Periodic `GET_CUR` samples confirmed each transition. This is the camera-resident transform selected by `mode deskview`; it does not provide the named calibration, arbitrary corner correction, or virtual-camera publication of the separate host DeskView workflow.
+
+Vertical correction is a signed little-endian value at bytes 52–53 of the same selector. The wire value is negative ten times the whole-number setting: 10 is `-100` (`9c ff`), the default 45 is `-450` (`3e fe`), and 80 is `-800` (`e0 fc`). Each value was written repeatedly and confirmed by later reads. The Controller uses a stable 61-byte write template rather than echoing the selector's volatile status bytes, so the verified profile reproduces that template and changes only the correction field. Setting correction also selects DeskView; values outside 10–80 are rejected before device access.
+
+Linux hardware validation completed three `on → 10 → 80 → 45 → off` cycles with exact semantic readback and an additional idempotent off restoration. Mode commands completed in 4.81–5.33 seconds and correction commands in 2.81–2.84 seconds, including temporary stream startup and verification. The camera was restored to DeskView off with correction 45. Reconnect and power-cycle persistence remain unverified.
 
 ## Mapping checkpoint
 
