@@ -10,7 +10,7 @@ The following outcomes are established for the currently recorded landscape desc
 | Frame translation | `frame status/set/move/center` | Discovered, vendor transport unmapped. No pan/tilt substitution. |
 | Auto Framing | `auto-framing on/off/status/style` | Status, on/off, and Head/Half-body selection are verified for firmware `v0.2.9.8_build3`. No tracking-zone commands are exposed. |
 | Image pipeline | existing `image` commands plus `hdr`, `mirror`, and `flip` | Exposure auto/manual mode, ISO, shutter, exposure compensation, HDR, horizontal mirror, and vertical flip are verified for firmware `v0.2.9.8_build3`. White balance, focus, and anti-flicker are verified through standard UVC controls. Other camera-native image items remain explicitly unmapped. |
-| Pickup mode | `audio mode status/standard/wide/focus/original` | Discovered, transport unmapped. Host gain/mute/filter controls remain separate. |
+| Pickup mode | `audio mode status/standard/wide/focus/original` | All four camera-native modes are verified for firmware `v0.2.9.8_build3`; host gain/mute/filter controls remain separate. |
 | Regular Whiteboard Mode | `mode whiteboard on/off/status` | Discovered, vendor transport unmapped. |
 | Gestures | `gesture status/enable/disable/set` | Discovered, global/per-gesture mappings pending. |
 | Native portrait | `portrait status/native` | Discovered, including correction switches; re-enumeration mapping pending. |
@@ -74,6 +74,12 @@ The reviewed `anti-flicker.pcap` Controller capture (SHA-256 `a8c66ac6086ece2486
 Linux exposes the control as `power_line_frequency`. On the target system its live descriptor advertises disabled (`0`), 50 Hz (`1`), and 60 Hz (`2`), but reports the unadvertised automatic value (`3`) as its default. The V4L2 control layer rejects `3` as out of range, so `linkctl` reports only the three writable live menu choices and rejects `auto` with `capability-unsupported` before opening the control for writing. No raw USB transfer or driver detach is used to bypass that kernel contract.
 
 Target-hardware validation verified writes and direct readback for disabled, 50 Hz, and 60 Hz, followed by restoration to 50 Hz. Mutations completed in 0.22–0.33 seconds. `image status` renders the current enum semantically, while `caps controls` retains the complete live descriptor, including its invalid default, for diagnosis.
+
+## Audio pickup-mode mapping
+
+The reviewed `audio-modes.pcap` Controller capture (SHA-256 `71f9a37a70a159ab07e9eba3f42bfc7e920ce649889b9f4832c365ee4a6fb74a`) maps pickup mode to XU GUID `e307e649-4618-a3ff-82fc-2d8b5f216773`, selector 31, as a one-byte enum: Standard `00`, Wide `01`, Focus `02`, and Original `03`. The trace repeated the ordered mode changes and its periodic `GET_CUR` reads confirmed each written value; it finished at Focus.
+
+The verified profile checks the one-byte length twice immediately before each write, requires exact delayed readback, rate-limits mutations, and restores the previous enum after a mismatch. The Controller trace covered writes with preview running, while Linux hardware verification completed three full mode cycles with video closed, so no video stream is required. The measured mutations completed in 0.52–0.66 seconds and Focus was restored at the end. The profile conservatively leaves reconnect and power-cycle persistence undeclared because the observed final value is also the stated default.
 
 ## Mapping checkpoint
 

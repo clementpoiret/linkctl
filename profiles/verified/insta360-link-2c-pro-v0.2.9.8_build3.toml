@@ -16,6 +16,8 @@ provenance = [
   "Linux hardware validation on the same firmware and descriptor verified three complete -3.0/0.0/+3.0/0.0 EV cycles with 250-millisecond readback, exact +/-0.7 EV intermediates, pre-write rejection of out-of-range, off-step, and non-finite values, snapshot mean-luma movement from 57.4054 to 230.644 across the endpoints, and final restoration to 0.0 EV (2026-08-29)",
   "Link 2C Pro USBPcap horizontal-mirror and vertical-flip capture on firmware v0.2.9.8_build3, SHA-256 2d36337eb00d67a7aa5bb838d26f2301f1abebbfca50a2d1e85ffe38fed450db; repeated transitions established selector 27 masks 0x0008 and 0x1000 respectively, with direct GET_CUR confirmation and both controls restored off (2026-08-29)",
   "Linux hardware validation on the same firmware and descriptor verified three complete on/off cycles for each flip control with exact dd01/d501 and d511/d501 readback, followed by the combined dd01/dd11/d511/d501 sequence proving cross-bit preservation; HDR remained on and both flip controls were restored off (2026-08-29)",
+  "Link 2C Pro USBPcap audio pickup-mode capture on firmware v0.2.9.8_build3, SHA-256 71f9a37a70a159ab07e9eba3f42bfc7e920ce649889b9f4832c365ee4a6fb74a; repeated transitions established selector 31 values 0=standard, 1=wide, 2=focus, and 3=original with direct GET_CUR confirmation, ending in focus mode (2026-08-29)",
+  "Linux hardware validation on the same firmware and descriptor verified three complete original/focus/wide/standard/focus cycles with exact 03/02/01/00/02 readback while video was closed, plus idempotent focus restoration; mutations completed in 0.52-0.66 seconds and the final focus state was restored (2026-08-29)",
 ]
 
 [[match]]
@@ -264,6 +266,27 @@ verification_delay_ms = 250
 persistence = "volatile"
 rollback = "readback"
 trace_ids = ["image-pipeline-1-exposure-compensation-4579fac93178"]
+safety = "normal"
+
+[[controls]]
+name = "audio.pickup-mode"
+entity_guid = "e307e649-4618-a3ff-82fc-2d8b5f216773"
+selector = 31
+length = 1
+readable = true
+writable = true
+codec = "enum"
+offset = 0
+width = 1
+values = { standard = 0, wide = 1, focus = 2, original = 3 }
+verification = "readback"
+stream_requirement = "either"
+write_prelude = "get-length-twice"
+minimum_write_interval_ms = 250
+verification_delay_ms = 250
+persistence = "volatile"
+rollback = "readback"
+trace_ids = ["misc-options-1-audio-modes-71f9a37a70a1"]
 safety = "normal"
 
 [[controls]]

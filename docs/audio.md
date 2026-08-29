@@ -22,7 +22,9 @@ linkctl --device link2cpro-… audio mode focus
 linkctl --device link2cpro-… audio mode original
 ```
 
-These commands do not substitute a PipeWire filter for a camera mode. Until an exact transport and firmware-specific mapping are verified, status reports `discovered-unmapped` and mutations fail without issuing a device write.
+On the verified Link 2C Pro firmware profile, these commands use XU GUID `e307e649-4618-a3ff-82fc-2d8b5f216773`, selector 31, as a one-byte enum: Standard is `0`, Wide is `1`, Focus is `2`, and Original is `3`. The Controller capture repeated the `Original → Focus → Wide → Standard` sequence and ended in Focus, with later `GET_CUR` samples confirming every written value.
+
+Linux verification completed three `Original → Focus → Wide → Standard → Focus` cycles with the video stream closed. Each command reads the previous value, performs the Controller's double-`GET_LEN` prelude, writes the enum, waits 250 milliseconds, verifies direct readback, and restores the previous mode on mismatch. Mutations completed in 0.52–0.66 seconds. Status and mutations remain camera-native and do not substitute a PipeWire filter. Reconnect and power-cycle persistence remain unverified because Focus is both the capture's final value and the observed default.
 
 ## Gain and mute
 

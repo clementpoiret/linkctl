@@ -1639,6 +1639,34 @@ firmware = ["v1.2.3"]
             [0xdd, 0x01]
         );
 
+        let pickup_mode = matched.profile.control("audio.pickup-mode").unwrap();
+        assert!(pickup_mode.writable);
+        assert_eq!(pickup_mode.selector, 31);
+        assert_eq!(pickup_mode.length, 1);
+        assert_eq!(
+            pickup_mode.stream_requirement,
+            super::StreamRequirement::Either
+        );
+        assert_eq!(pickup_mode.verification_delay_ms, 250);
+        assert_eq!(
+            pickup_mode.write_prelude,
+            super::WritePrelude::GetLengthTwice
+        );
+        assert_eq!(
+            decode_control(pickup_mode, &[0]).unwrap(),
+            json!("standard")
+        );
+        assert_eq!(decode_control(pickup_mode, &[1]).unwrap(), json!("wide"));
+        assert_eq!(decode_control(pickup_mode, &[2]).unwrap(), json!("focus"));
+        assert_eq!(
+            decode_control(pickup_mode, &[3]).unwrap(),
+            json!("original")
+        );
+        assert_eq!(
+            encode_control(pickup_mode, "focus", Some(&[3])).unwrap(),
+            [2]
+        );
+
         let exposure = matched.profile.control("image.exposure").unwrap();
         assert_eq!(exposure.selector, 30);
         assert_eq!(exposure.length, 1);
