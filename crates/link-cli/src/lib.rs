@@ -485,8 +485,6 @@ pub enum CompatibilityCommand {
 pub enum CompatibilityMode {
     Standard,
     LowResolution,
-    /// Reserved until the camera's separate YUY2 switch is verified.
-    Yuy2,
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -6769,7 +6767,7 @@ const CAMERA_NATIVE_CAPABILITIES: &[(&str, &str)] = &[
     ),
     (
         "mode.compatibility",
-        "low-resolution/YUY2 compatibility has not been mapped for this profile",
+        "low-resolution compatibility has not been mapped for this profile",
     ),
     (
         "firmware.version",
@@ -7902,12 +7900,6 @@ fn run_mode(config: &Config, command: ModeCommand, dry_run: bool) -> Result<(), 
                     dry_run,
                 )
             }
-            CompatibilityCommand::Set {
-                value: CompatibilityMode::Yuy2,
-            } => Err(native_unmapped_error(
-                "mode.compatibility",
-                "the separate YUY2 compatibility switch has not been verified",
-            )),
         },
     }
 }

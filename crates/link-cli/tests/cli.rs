@@ -418,6 +418,12 @@ fn camera_native_help_exposes_only_fixed_mount_semantics() {
     assert!(stdout.contains("head"));
     assert!(stdout.contains("half-body"));
     assert!(!stdout.contains("full-body"));
+
+    let compatibility = run(&["mode", "compatibility", "set", "--help"]);
+    assert!(compatibility.status.success());
+    let stdout = String::from_utf8(compatibility.stdout).expect("UTF-8 help");
+    assert!(stdout.contains("standard"));
+    assert!(stdout.contains("low-resolution"));
 }
 
 #[test]
