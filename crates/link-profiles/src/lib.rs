@@ -1452,7 +1452,8 @@ firmware = ["v1.2.3"]
         let control = matched.profile.control("auto-framing.enabled").unwrap();
         assert!(control.writable);
         assert_eq!(control.stream_requirement, super::StreamRequirement::Open);
-        assert_eq!(control.stream_warmup_delay_ms, 13_000);
+        assert_eq!(control.stream_warmup_delay_ms, 1_000);
+        assert_eq!(control.verification_delay_ms, 500);
         assert_eq!(control.write_prelude, super::WritePrelude::GetLengthTwice);
         assert_eq!(
             control.stream_format.as_ref().unwrap().video_tuple(),
@@ -1479,6 +1480,8 @@ firmware = ["v1.2.3"]
             .control("auto-framing.smart-composition")
             .unwrap();
         assert!(smart_composition.writable);
+        assert_eq!(smart_composition.stream_warmup_delay_ms, 1_000);
+        assert_eq!(smart_composition.verification_delay_ms, 500);
         assert_eq!(
             decode_control(smart_composition, &[0xd4, 0x01]).unwrap(),
             json!("off")
@@ -1490,6 +1493,8 @@ firmware = ["v1.2.3"]
 
         let style = matched.profile.control("auto-framing.style").unwrap();
         assert!(style.writable);
+        assert_eq!(style.stream_warmup_delay_ms, 1_000);
+        assert_eq!(style.verification_delay_ms, 500);
         assert_eq!(decode_control(style, &[0x01]).unwrap(), json!("head"));
         assert_eq!(decode_control(style, &[0x02]).unwrap(), json!("half-body"));
 

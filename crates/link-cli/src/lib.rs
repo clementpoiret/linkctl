@@ -5721,6 +5721,14 @@ fn native_capabilities(
     config: &Config,
     device: &DiscoveredDevice,
 ) -> Result<AllCapabilities, LinkError> {
+    native_capabilities_for(config, device, None)
+}
+
+fn native_capabilities_for(
+    config: &Config,
+    device: &DiscoveredDevice,
+    current_names: Option<&[&str]>,
+) -> Result<AllCapabilities, LinkError> {
     let verified_at_unix_ms = now_unix_ms()?;
     let model = device.model();
     if device.mode() != DeviceMode::Camera {
@@ -5755,6 +5763,7 @@ fn native_capabilities(
     let node = control_node(device, config.default_device.as_deref())?;
     let backend = link_v4l2::production::ControlDevice::open_read(&node.path)?;
     let controls = backend.controls()?;
+    drop(backend);
     let mut capabilities = control_capabilities(device, controls.clone())?.semantic;
 
     if let Some(control) = controls
@@ -5808,6 +5817,25 @@ fn native_capabilities(
     let inventory = link_uvc_xu::parse_descriptors(&device.descriptors)?;
     let session = link_uvc_xu::XuSession::open_read(Path::new(&node.path))?;
     let (profile, firmware) = resolve_firmware_profile(device, &inventory, &catalog, &session)?;
+    drop(session);
+    let read_requirement = profile
+        .map(|entry| profile_read_stream_requirement(&entry.profile, current_names))
+        .transpose()?
+        .flatten();
+    #[cfg(feature = "gstreamer")]
+    let _media_lease = if read_requirement == Some(StreamRequirement::Open) {
+        Some(link_media::MediaLease::acquire(
+            &device.identity.stable_id(),
+            "native-status-read",
+        )?)
+    } else {
+        None
+    };
+    let _read_stream = read_requirement
+        .map(|requirement| prepare_xu_read_stream(requirement, &node.path, config.timeout.get()))
+        .transpose()?
+        .flatten();
+    let session = link_uvc_xu::XuSession::open_read(Path::new(&node.path))?;
     for (name, evidence) in CAMERA_NATIVE_CAPABILITIES {
         if capabilities
             .get(*name)
@@ -5855,7 +5883,9 @@ fn native_capabilities(
                         }),
                         range: None,
                         values: profile_values(control),
-                        current: if control.readable {
+                        current: if control.readable
+                            && current_names.is_none_or(|names| names.contains(name))
+                        {
                             link_uvc_xu::read_value(
                                 &session,
                                 &inventory,
@@ -5883,6 +5913,71 @@ fn native_capabilities(
         profile_id: profile.map(|entry| entry.profile.profile_id.clone()),
         profile_checksum: profile.map(|entry| entry.checksum.clone()),
     })
+}
+
+fn profile_read_stream_requirement(
+    profile: &link_profiles::VendorProfile,
+    current_names: Option<&[&str]>,
+) -> Result<Option<StreamRequirement>, LinkError> {
+    let mut requirement = None;
+    for control in profile.controls.iter().filter(|control| {
+        control.readable
+            && current_names.is_none_or(|names| names.contains(&control.name.as_str()))
+            && control.stream_requirement != StreamRequirement::Either
+    }) {
+        if requirement.is_some_and(|current| current != control.stream_requirement) {
+            return Err(LinkError::new(
+                ErrorKind::ProtocolProfileMismatch,
+                "requested vendor reads require incompatible stream states",
+            )
+            .with_detail("control", control.name.clone()));
+        }
+        requirement = Some(control.stream_requirement);
+    }
+    Ok(requirement)
+}
+
+#[cfg(feature = "gstreamer")]
+fn prepare_xu_read_stream(
+    requirement: StreamRequirement,
+    node: &str,
+    timeout: Duration,
+) -> Result<Option<link_media::ProbeStream>, LinkError> {
+    match requirement {
+        StreamRequirement::Either | StreamRequirement::Closed => Ok(None),
+        StreamRequirement::Open => {
+            let current = link_v4l2::video::VideoDevice::open_read(node)?
+                .status()?
+                .tuple;
+            let stream = link_media::ProbeStream::open_with_format(node, timeout, Some(&current))?;
+            // Link 2C Pro selector 2 exposes its active value after the first frames arrive.
+            thread::sleep(Duration::from_millis(1_000));
+            Ok(Some(stream))
+        }
+        StreamRequirement::Restart => Err(LinkError::new(
+            ErrorKind::CapabilityUnsupported,
+            "profile-required restart reads are not supported",
+        )),
+    }
+}
+
+#[cfg(not(feature = "gstreamer"))]
+fn prepare_xu_read_stream(
+    requirement: StreamRequirement,
+    _node: &str,
+    _timeout: Duration,
+) -> Result<Option<()>, LinkError> {
+    match requirement {
+        StreamRequirement::Either | StreamRequirement::Closed => Ok(None),
+        StreamRequirement::Open => Err(LinkError::new(
+            ErrorKind::CapabilityUnsupported,
+            "profile-required open-stream reads need a GStreamer-enabled build",
+        )),
+        StreamRequirement::Restart => Err(LinkError::new(
+            ErrorKind::CapabilityUnsupported,
+            "profile-required restart reads are not supported",
+        )),
+    }
 }
 
 fn insert_physical_shutter(
@@ -6301,7 +6396,7 @@ fn run_native_status(
     let devices = selected_devices(config, true)?;
     let mut results = Vec::with_capacity(devices.len());
     for device in &devices {
-        let all = native_capabilities(config, device)?;
+        let all = native_capabilities_for(config, device, Some(names))?;
         let capabilities = names
             .iter()
             .filter_map(|name| {
@@ -6428,7 +6523,7 @@ fn run_native_vendor_transaction(
 }
 
 fn read_native_vendor_value(config: &Config, control_name: &str) -> Result<Value, LinkError> {
-    let (device, _, inventory, catalog, session) = selected_xu_context(config, false)?;
+    let (device, node, inventory, catalog, session) = selected_xu_context(config, false)?;
     let (_, firmware) = resolve_firmware_profile(&device, &inventory, &catalog, &session)?;
     let (entry, control) =
         native_profile_control(&catalog, &device, firmware.as_deref(), control_name)?;
@@ -6439,6 +6534,19 @@ fn read_native_vendor_value(config: &Config, control_name: &str) -> Result<Value
         )
         .with_detail("capability", control_name.to_owned()));
     }
+    drop(session);
+    #[cfg(feature = "gstreamer")]
+    let _media_lease = if control.stream_requirement == StreamRequirement::Open {
+        Some(link_media::MediaLease::acquire(
+            &device.identity.stable_id(),
+            "native-value-read",
+        )?)
+    } else {
+        None
+    };
+    let _read_stream =
+        prepare_xu_read_stream(control.stream_requirement, &node.path, config.timeout.get())?;
+    let session = link_uvc_xu::XuSession::open_read(Path::new(&node.path))?;
     let value = link_uvc_xu::read_value(
         &session,
         &inventory,
@@ -6765,10 +6873,15 @@ struct DeviceStateResult {
 }
 
 fn run_device_state(config: &Config) -> Result<(), LinkError> {
+    const NAMES: &[&str] = &[
+        "device.mode-state",
+        "device.error-state",
+        "device.indicator-state",
+    ];
     let devices = selected_devices(config, true)?;
     let mut results = Vec::with_capacity(devices.len());
     for device in &devices {
-        let mut capabilities = native_capabilities(config, device)?.semantic;
+        let mut capabilities = native_capabilities_for(config, device, Some(NAMES))?.semantic;
         let mode = capabilities
             .remove("device.mode-state")
             .expect("declared capability");
@@ -8174,10 +8287,15 @@ fn run_image(
 }
 
 fn run_image_status(config: &Config) -> Result<(), LinkError> {
+    let names = CAMERA_NATIVE_CAPABILITIES
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| name.starts_with("image."))
+        .collect::<Vec<_>>();
     let devices = selected_devices(config, true)?;
     let mut results = Vec::new();
     for device in &devices {
-        let all = native_capabilities(config, device)?;
+        let all = native_capabilities_for(config, device, Some(&names))?;
         let capabilities = all
             .semantic
             .into_iter()
@@ -9146,13 +9264,15 @@ fn parse_format_hint(value: &str) -> OutputFormat {
 mod tests {
     use clap::CommandFactory;
     use link_core::preset::PresetRequirements;
+    use link_profiles::{ProfileCatalog, StreamRequirement};
     use serde_json::Value;
 
     use super::{
         Cli, ErrorKind, LinkError, TRANSACTION_SCHEMA_VERSION, TransactionOutcome, TransactionPlan,
         TransactionReport, TransactionStepKind, TransactionStepPlan, TransactionStepReport,
-        TransactionStepStatus, parse_fps, parse_size, parse_zoom_factor, record_rollback_result,
-        rollback_order_for, shutter_to_v4l2, validate_preset_requirements,
+        TransactionStepStatus, parse_fps, parse_size, parse_zoom_factor,
+        profile_read_stream_requirement, record_rollback_result, rollback_order_for,
+        shutter_to_v4l2, validate_preset_requirements,
     };
 
     #[test]
@@ -9199,6 +9319,29 @@ mod tests {
         let error = validate_preset_requirements(&requirements, "another model", 0x2e1a, 0x4c05)
             .expect_err("model mismatch must fail");
         assert_eq!(error.kind(), ErrorKind::ProtocolProfileMismatch);
+    }
+
+    #[test]
+    fn auto_framing_status_selects_the_profile_open_stream_requirement() {
+        let catalog = ProfileCatalog::load(None).unwrap();
+        let profile = &catalog
+            .profiles()
+            .iter()
+            .find(|entry| entry.profile.profile_id == "insta360-link-2c-pro-v0.2.9.8-build3")
+            .unwrap()
+            .profile;
+        assert_eq!(
+            profile_read_stream_requirement(
+                profile,
+                Some(&["auto-framing.enabled", "auto-framing.style"]),
+            )
+            .unwrap(),
+            Some(StreamRequirement::Open)
+        );
+        assert_eq!(
+            profile_read_stream_requirement(profile, Some(&["firmware.version"])).unwrap(),
+            None
+        );
     }
 
     #[test]

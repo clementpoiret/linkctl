@@ -7,6 +7,7 @@ provenance = [
   "Linux UVCIOC_CTRL_QUERY validation on the same firmware and descriptor verified off-to-on and on-to-off readback using the trace-matched MJPG 1920x1080 at 30 fps stream, 13-second warm-up, two-GET_LEN write prelude, and exact SET_CUR templates (2026-08-29)",
   "Link 2C Pro USBPcap Smart Composition off/on/off and Head/Half-body capture on firmware v0.2.9.8_build3, SHA-256 3c82873d464267a09efd29fd60c31b757ac13093ddc17cf8c692fc8720f80d14 (2026-08-29)",
   "Linux UVCIOC_CTRL_QUERY validation on the same firmware and descriptor verified Smart Composition off-to-on-to-off and framing style Head-to-Half-body-to-Head readback; the public style transaction verified both selectors under one trace-matched stream (2026-08-29)",
+  "Follow-up Linux timing sweeps on the same firmware and descriptor verified four-second, two-second, and one-second stream warm-ups, then a 500-millisecond delayed readback; three complete Auto Framing and Head/Half-body transition cycles passed with the selected one-second warm-up and 500-millisecond verification delay (2026-08-29)",
 ]
 
 [[match]]
@@ -47,10 +48,10 @@ tail_policy = { kind = "fixed", hex = "00000000000000000000000000000000000000000
 verification = "readback"
 stream_requirement = "open"
 stream_format = { fourcc = "MJPG", width = 1920, height = 1080, fps_numerator = 30, fps_denominator = 1 }
-stream_warmup_delay_ms = 13000
+stream_warmup_delay_ms = 1000
 write_prelude = "get-length-twice"
 minimum_write_interval_ms = 250
-verification_delay_ms = 1250
+verification_delay_ms = 500
 persistence = "volatile"
 rollback = "readback"
 trace_ids = ["auto-framing-1-ef427d7ab977"]
@@ -71,10 +72,10 @@ values = { off = 468, on = 469 }
 verification = "readback"
 stream_requirement = "open"
 stream_format = { fourcc = "MJPG", width = 1920, height = 1080, fps_numerator = 30, fps_denominator = 1 }
-stream_warmup_delay_ms = 13000
+stream_warmup_delay_ms = 1000
 write_prelude = "get-length-twice"
 minimum_write_interval_ms = 250
-verification_delay_ms = 2000
+verification_delay_ms = 500
 persistence = "volatile"
 rollback = "readback"
 trace_ids = ["smart-composition-3c82873d4642"]
@@ -94,10 +95,10 @@ values = { head = 1, half-body = 2 }
 verification = "readback"
 stream_requirement = "open"
 stream_format = { fourcc = "MJPG", width = 1920, height = 1080, fps_numerator = 30, fps_denominator = 1 }
-stream_warmup_delay_ms = 13000
+stream_warmup_delay_ms = 1000
 write_prelude = "get-length-twice"
 minimum_write_interval_ms = 250
-verification_delay_ms = 2000
+verification_delay_ms = 500
 persistence = "volatile"
 rollback = "readback"
 trace_ids = ["smart-composition-3c82873d4642"]
