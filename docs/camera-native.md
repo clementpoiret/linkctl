@@ -9,7 +9,7 @@ The following outcomes are established for the currently recorded landscape desc
 | Digital zoom | `zoom get/set/step/ramp/reset` | Verified standard V4L2 `zoom_absolute`, 1.00x–4.00x in 0.01x steps; write/readback/restore verified on hardware. |
 | Frame translation | `frame status/set/move/center` | Discovered, vendor transport unmapped. No pan/tilt substitution. |
 | Auto Framing | `auto-framing on/off/status/style` | Status, on/off, and Head/Half-body selection are verified for firmware `v0.2.9.8_build3`. No tracking-zone commands are exposed. |
-| Image pipeline | existing `image` commands plus `hdr`, `mirror`, and `flip` | Exposure auto/manual mode, ISO, shutter, exposure compensation, and HDR are verified for firmware `v0.2.9.8_build3`. White balance and focus are verified through standard UVC controls. Other camera-native image items remain explicitly unmapped. |
+| Image pipeline | existing `image` commands plus `hdr`, `mirror`, and `flip` | Exposure auto/manual mode, ISO, shutter, exposure compensation, and HDR are verified for firmware `v0.2.9.8_build3`. White balance, focus, and anti-flicker are verified through standard UVC controls. Other camera-native image items remain explicitly unmapped. |
 | Pickup mode | `audio mode status/standard/wide/focus/original` | Discovered, transport unmapped. Host gain/mute/filter controls remain separate. |
 | Regular Whiteboard Mode | `mode whiteboard on/off/status` | Discovered, vendor transport unmapped. |
 | Gestures | `gesture status/enable/disable/set` | Discovered, global/per-gesture mappings pending. |
@@ -60,6 +60,14 @@ Linux exposes these as `white_balance_automatic` and `white_balance_temperature`
 The reviewed `auto-focus.pcap` Controller capture (SHA-256 `da1bf61472b3ed002b4dcf3497b1c07dff52885ac404178453fd41afb0a1b670`) confirms that focus also bypasses the vendor profile. It uses UVC Camera Terminal entity 1: selector 8 is the one-byte autofocus control (`00` manual, `01` automatic), and selector 6 is the two-byte little-endian absolute-focus control. The Controller repeated three automatic/manual cycles, exercised the absolute endpoints, and finished with autofocus enabled. Manual transitions disabled autofocus before writing the absolute value.
 
 Linux exposes these controls as `focus_automatic_continuous` and `focus_absolute`. The target descriptor reports raw absolute focus from 0 through 100 in steps of one. `image focus manual` presents that as a reversible normalized 0.0–1.0 position, disables autofocus first, re-queries the formerly inactive absolute control, and verifies both writes. `image status` reports the live mode and normalized position together while retaining the raw descriptor and current value in JSON output. Target-hardware validation completed three `0.0 → 1.0 → auto` cycles, verified the intermediate `0.37` as raw `37`, and rejected out-of-range and non-finite values before writing. Mutations completed in 0.06–0.36 seconds, and the original raw `100` plus autofocus-enabled state were restored. No firmware-specific XU mapping is involved.
+
+## Anti-flicker mapping
+
+The reviewed `anti-flicker.pcap` Controller capture (SHA-256 `a8c66ac6086ece24866dadeee506a07a0c50a48458688cba27610392c077e2ef`) confirms that anti-flicker uses UVC Processing Unit entity 5, selector 5, as a one-byte enum. The repeated Controller transitions identify raw `1` as 50 Hz, raw `2` as 60 Hz, and raw `3` as automatic. The session ended at 50 Hz.
+
+Linux exposes the control as `power_line_frequency`. On the target system its live descriptor advertises disabled (`0`), 50 Hz (`1`), and 60 Hz (`2`), but reports the unadvertised automatic value (`3`) as its default. The V4L2 control layer rejects `3` as out of range, so `linkctl` reports only the three writable live menu choices and rejects `auto` with `capability-unsupported` before opening the control for writing. No raw USB transfer or driver detach is used to bypass that kernel contract.
+
+Target-hardware validation verified writes and direct readback for disabled, 50 Hz, and 60 Hz, followed by restoration to 50 Hz. Mutations completed in 0.22–0.33 seconds. `image status` renders the current enum semantically, while `caps controls` retains the complete live descriptor, including its invalid default, for diagnosis.
 
 ## Mapping checkpoint
 

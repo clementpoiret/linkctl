@@ -5590,6 +5590,32 @@ fn focus_status_value(
     Some(Value::Object(status))
 }
 
+fn anti_flicker_status_value(raw: Option<i64>) -> Option<Value> {
+    raw.map(|raw| match raw {
+        0 => json!("disabled"),
+        1 => json!("50hz"),
+        2 => json!("60hz"),
+        3 => json!("auto"),
+        _ => json!(raw),
+    })
+}
+
+fn anti_flicker_values(control: Option<&ControlDescriptor>) -> Vec<String> {
+    control.map_or_else(Vec::new, |control| {
+        control
+            .menu
+            .iter()
+            .filter_map(|entry| match entry.index {
+                0 => Some("disabled".into()),
+                1 => Some("50hz".into()),
+                2 => Some("60hz".into()),
+                3 => Some("auto".into()),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
 fn exposure_status_value(
     mode: Option<Value>,
     iso: Option<Value>,
@@ -5743,6 +5769,8 @@ fn control_capabilities(
                         .into_iter()
                         .flatten()
                         .collect()
+                    } else if capability == "image.anti_flicker" {
+                        anti_flicker_values(control.as_ref())
                     } else {
                         Vec::new()
                     },
@@ -5756,6 +5784,10 @@ fn control_capabilities(
                             focus_automatic.and_then(|control| control.current),
                             focus_absolute.and_then(|control| control.current),
                             focus_absolute.map(|control| (control.minimum, control.maximum)),
+                        )
+                    } else if capability == "image.anti_flicker" {
+                        anti_flicker_status_value(
+                            control.as_ref().and_then(|control| control.current),
                         )
                     } else {
                         control
@@ -8241,6 +8273,31 @@ fn run_standard_exposure_compensation(
     )
 }
 
+fn run_standard_anti_flicker(
+    config: &Config,
+    value: AntiFlickerChoice,
+    dry_run: bool,
+    yes: bool,
+) -> Result<(), LinkError> {
+    let raw = match value {
+        AntiFlickerChoice::Disabled => 0,
+        AntiFlickerChoice::FiftyHz => 1,
+        AntiFlickerChoice::SixtyHz => 2,
+        AntiFlickerChoice::Auto => 3,
+    };
+    run_semantic_builder(config, dry_run, yes, "image.anti-flicker", move |backend| {
+        let descriptor = backend.resolve("power_line_frequency")?;
+        if !descriptor.menu.iter().any(|entry| entry.index == raw) {
+            return Err(LinkError::new(
+                ErrorKind::CapabilityUnsupported,
+                "the requested anti-flicker mode is not advertised by the device",
+            )
+            .with_detail("requested", raw));
+        }
+        Ok(vec![raw_request(&descriptor.id.to_string(), raw)])
+    })
+}
+
 fn run_native_exposure(
     config: &Config,
     command: ExposureCommand,
@@ -8467,23 +8524,7 @@ fn run_image(
             yes,
         ),
         ImageCommand::AntiFlicker { value } => {
-            let raw = match value {
-                AntiFlickerChoice::Disabled => 0,
-                AntiFlickerChoice::FiftyHz => 1,
-                AntiFlickerChoice::SixtyHz => 2,
-                AntiFlickerChoice::Auto => 3,
-            };
-            run_semantic_builder(config, dry_run, yes, "image.anti-flicker", move |backend| {
-                let descriptor = backend.resolve("power_line_frequency")?;
-                if !descriptor.menu.iter().any(|entry| entry.index == raw) {
-                    return Err(LinkError::new(
-                        ErrorKind::CapabilityUnsupported,
-                        "the requested anti-flicker mode is not advertised by the device",
-                    )
-                    .with_detail("requested", raw));
-                }
-                Ok(vec![raw_request(&descriptor.id.to_string(), raw)])
-            })
+            run_standard_anti_flicker(config, value, dry_run, yes)
         }
         ImageCommand::Hdr { value } => {
             let vendor_value = if matches!(value, ToggleChoice::On) {
@@ -9625,7 +9666,7 @@ mod tests {
     use super::{
         Cli, ErrorKind, LinkError, TRANSACTION_SCHEMA_VERSION, TransactionOutcome, TransactionPlan,
         TransactionReport, TransactionStepKind, TransactionStepPlan, TransactionStepReport,
-        TransactionStepStatus, exposure_compensation_status_value,
+        TransactionStepStatus, anti_flicker_status_value, exposure_compensation_status_value,
         exposure_compensation_to_vendor_hundredths, exposure_status_value, focus_status_value,
         parse_fps, parse_size, parse_zoom_factor, profile_read_stream_requirement,
         record_rollback_result, rollback_order_for, semantic_readback_matches, shutter_to_v4l2,
@@ -9753,6 +9794,16 @@ mod tests {
             Some(serde_json::json!({"mode": "manual", "position": 0.25}))
         );
         assert_eq!(focus_status_value(None, None, Some((0, 100))), None);
+    }
+
+    #[test]
+    fn anti_flicker_status_reports_semantic_modes() {
+        assert_eq!(anti_flicker_status_value(Some(0)), Some(json!("disabled")));
+        assert_eq!(anti_flicker_status_value(Some(1)), Some(json!("50hz")));
+        assert_eq!(anti_flicker_status_value(Some(2)), Some(json!("60hz")));
+        assert_eq!(anti_flicker_status_value(Some(3)), Some(json!("auto")));
+        assert_eq!(anti_flicker_status_value(Some(4)), Some(json!(4)));
+        assert_eq!(anti_flicker_status_value(None), None);
     }
 
     #[test]

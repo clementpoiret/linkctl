@@ -49,6 +49,8 @@ On the Link 2C Pro, the official controller capture confirms that white balance 
 
 Focus uses the standard UVC Camera Terminal controls `focus_automatic_continuous` and `focus_absolute`. The Controller capture confirms that manual focus disables autofocus before writing a direct 0–100 absolute value. The semantic command exposes this as a normalized 0.0–1.0 position derived from the live descriptor. Status reports autofocus/manual mode and normalized position together; JSON retains the underlying raw control descriptor and value. Linux hardware tests verified three endpoint/autofocus cycles, exact `0.37` conversion, rejection before write, and restoration of the original autofocus state.
 
+Anti-flicker uses the standard UVC Processing Unit `power_line_frequency` control. The Controller capture maps raw `1`, `2`, and `3` to 50 Hz, 60 Hz, and automatic respectively. The target Linux descriptor advertises disabled (`0`), 50 Hz (`1`), and 60 Hz (`2`), while inconsistently reporting automatic (`3`) as an out-of-range default. Semantic status and capability output use stable `disabled`, `50hz`, and `60hz` names for the advertised values. Requests for `auto` fail with exit code 4 before writing because the kernel does not expose that captured mode as writable.
+
 ## Digital zoom
 
 The Link 2C Pro exposes standard `zoom_absolute` from 100 through 400 in steps of one. `linkctl` renders those raw units as 1.00x through 4.00x and continues to validate the live descriptor rather than assuming that range for another device:
