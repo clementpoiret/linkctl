@@ -2415,19 +2415,9 @@ fn run_xu_semantic_writes(
             write.observed = Some(write.previous.clone());
             write.verified = true;
         } else {
-            session
+            let set_error = session
                 .set_profiled(write.address, write.authorization, &write.payload)
-                .map_err(|error| {
-                    error
-                        .with_detail("control", write.authorization.control().name.clone())
-                        .with_detail(
-                            "rollback",
-                            json!({
-                                "attempted": false,
-                                "reason": "the profile marks restart rollback unavailable",
-                            }),
-                        )
-                })?;
+                .err();
             drop(session);
             let control = write.authorization.control();
             let observed = wait_for_reenumerated_semantic_value(
@@ -2436,9 +2426,32 @@ fn run_xu_semantic_writes(
                 &device.identity.descriptor_sha256,
                 &entry.profile.profile_id,
                 control,
-            )?;
+            )
+            .map_err(|error| {
+                let error = error
+                    .with_detail("control", control.name.clone())
+                    .with_detail(
+                        "rollback",
+                        json!({
+                            "attempted": false,
+                            "reason": "the profile marks restart rollback unavailable",
+                        }),
+                    );
+                if let Some(set_error) = &set_error {
+                    error.with_detail(
+                        "set_transport_error",
+                        json!({
+                            "code": set_error.kind().code(),
+                            "message": set_error.message(),
+                            "details": set_error.details(),
+                        }),
+                    )
+                } else {
+                    error
+                }
+            })?;
             if !semantic_readback_matches(control, &write.requested, &observed) {
-                return Err(LinkError::new(
+                let error = LinkError::new(
                     ErrorKind::ProtocolProfileMismatch,
                     "restart-dependent XU write failed post-restart verification",
                 )
@@ -2451,7 +2464,19 @@ fn run_xu_semantic_writes(
                         "attempted": false,
                         "reason": "the profile marks restart rollback unavailable",
                     }),
-                ));
+                );
+                return Err(if let Some(set_error) = &set_error {
+                    error.with_detail(
+                        "set_transport_error",
+                        json!({
+                            "code": set_error.kind().code(),
+                            "message": set_error.message(),
+                            "details": set_error.details(),
+                        }),
+                    )
+                } else {
+                    error
+                });
             }
             write.observed = Some(observed);
             write.verified = true;
@@ -6996,6 +7021,23 @@ fn read_native_vendor_value(config: &Config, control_name: &str) -> Result<Value
     })
 }
 
+fn require_native_vendor_value(
+    config: &Config,
+    control_name: &str,
+    expected: &str,
+    message: &'static str,
+) -> Result<(), LinkError> {
+    let observed = read_native_vendor_value(config, control_name)?;
+    if observed == json!(expected) {
+        Ok(())
+    } else {
+        Err(LinkError::new(ErrorKind::CapabilityUnsupported, message)
+            .with_detail("control", control_name.to_owned())
+            .with_detail("required", expected.to_owned())
+            .with_detail("observed", observed))
+    }
+}
+
 fn native_unmapped_error(capability: &str, evidence: &str) -> LinkError {
     LinkError::new(
         ErrorKind::CapabilityUnsupported,
@@ -7169,13 +7211,21 @@ fn run_mode(config: &Config, command: ModeCommand, dry_run: bool) -> Result<(), 
             ),
             CompatibilityCommand::Set {
                 value: CompatibilityMode::LowResolution,
-            } => run_native_vendor_set(
-                config,
-                "mode.compatibility",
-                "mode.compatibility",
-                "low-resolution",
-                dry_run,
-            ),
+            } => {
+                require_native_vendor_value(
+                    config,
+                    "portrait.native",
+                    "off",
+                    "low-resolution compatibility cannot be enabled while native portrait is active because their combined USB descriptor has not been verified",
+                )?;
+                run_native_vendor_set(
+                    config,
+                    "mode.compatibility",
+                    "mode.compatibility",
+                    "low-resolution",
+                    dry_run,
+                )
+            }
             CompatibilityCommand::Set {
                 value: CompatibilityMode::Yuy2,
             } => Err(native_unmapped_error(
@@ -7251,6 +7301,12 @@ fn run_portrait(config: &Config, command: PortraitCommand, dry_run: bool) -> Res
                     )
                     .with_detail("state", "discovered-unmapped"));
                 }
+                require_native_vendor_value(
+                    config,
+                    "mode.compatibility",
+                    "standard",
+                    "native portrait cannot be enabled while low-resolution compatibility is active because their combined USB descriptor has not been verified",
+                )?;
                 run_native_vendor_set(config, "portrait.native", "portrait.native", "on", dry_run)
             }
         },
@@ -10145,6 +10201,10 @@ mod tests {
         );
         assert_eq!(
             profile_read_stream_requirement(profile, Some(&["mode.compatibility"])).unwrap(),
+            Some(StreamRequirement::Restart)
+        );
+        assert_eq!(
+            profile_read_stream_requirement(profile, Some(&["portrait.native"])).unwrap(),
             Some(StreamRequirement::Restart)
         );
     }

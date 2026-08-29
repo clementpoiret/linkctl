@@ -4,14 +4,6 @@ model = "Insta360 Link 2C Pro"
 status = "read-only"
 
 [[match]]
-mode = "camera"
-usb_vid = 0x2e1a
-usb_pid = 0x4c05
-bcd_device_min = 0x0200
-bcd_device_max = 0x0200
-descriptor_sha256 = "7a60c8dd0f5e3d83e6c1c1fb245d96e02cc4ea6fdea8c10cc5a2e3b1094a2cc8"
-
-[[match]]
 mode = "u-disk"
 usb_vid = 0x070a
 usb_pid = 0x4026

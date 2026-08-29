@@ -26,6 +26,8 @@ provenance = [
   "Linux hardware validation on the same firmware and descriptor verified three complete regular Whiteboard on/off cycles with exact semantic readback under the trace-matched stream; a 1.25-second off readback observed the selector's transient 255 state and successfully rolled back, while 2.25-second readback passed every cycle, preserved all gesture switches, and left Whiteboard off (2026-08-29)",
   "Link 2C Pro USBPcap low-resolution capture on firmware v0.2.9.8_build3, SHA-256 1932784a09198ee5d8c5967f1ee6ae5c17306d24c970dc18e7c75ce2bac6a6ab; two complete enable/disable cycles established selector 27 mask 0x2000, an automatic camera restart after every changed write, and exact post-restart descriptor fingerprints 1d0fa40a5787adc39223e26a5262f3d5e1ba0421e17442487157905cbd2a066c for Standard and f8ec69e87774e9831bef86c498625373ba5fbb9d22bbc558185d88fb271a1bc2 for Low resolution; the latter adds 640x360 capture formats (2026-08-29)",
   "Linux hardware validation on the same firmware verified a 7.79-second Standard-to-Low-resolution restart and 7.76-second restoration, exact post-restart profile/status matches in both directions, MJPG/H264/YUYV 640x360 advertisement at 24/25/30 fps, and capture of a valid 640x360 MJPEG frame; an idempotent Low-resolution request completed in 0.34 seconds without changing the USB device number, and the camera finished in Standard mode with the original descriptor and no low-resolution-only formats (2026-08-29)",
+  "Link 2C Pro USBPcap portrait-resolution capture on firmware v0.2.9.8_build3, SHA-256 a6aed99817d0ca7a248a4339058ddeea9d1f0cc39ab5ced1767cd227111b14ed; two complete enable/disable cycles established selector 27 mask 0x0020, an automatic camera restart after every changed write, and exact post-restart descriptor fingerprints 1d0fa40a5787adc39223e26a5262f3d5e1ba0421e17442487157905cbd2a066c for landscape and 7a60c8dd0f5e3d83e6c1c1fb245d96e02cc4ea6fdea8c10cc5a2e3b1094a2cc8 for portrait; the latter adds native portrait sizes including 1088x1920, 736x1280, 2176x3840, and 1080x1920 (2026-08-29)",
+  "Linux hardware validation on the same firmware verified a 7.83-second landscape-to-portrait restart and 7.67-second restoration, exact post-restart profile/status matches in both directions, the captured codec and frame-rate limits for all four portrait sizes, and capture of a valid 1080x1920 MJPEG frame; an idempotent portrait request completed in 0.35 seconds without changing the USB device number, the unverified portrait-plus-low-resolution combination was rejected before writing, and the camera finished in landscape mode with the original descriptor and no portrait-only formats (2026-08-29)",
 ]
 
 [[match]]
@@ -44,6 +46,15 @@ usb_pid = 0x4c05
 bcd_device_min = 0x0200
 bcd_device_max = 0x0200
 descriptor_sha256 = "f8ec69e87774e9831bef86c498625373ba5fbb9d22bbc558185d88fb271a1bc2"
+firmware = ["v0.2.9.8_build3"]
+
+[[match]]
+mode = "camera"
+usb_vid = 0x2e1a
+usb_pid = 0x4c05
+bcd_device_min = 0x0200
+bcd_device_max = 0x0200
+descriptor_sha256 = "7a60c8dd0f5e3d83e6c1c1fb245d96e02cc4ea6fdea8c10cc5a2e3b1094a2cc8"
 firmware = ["v0.2.9.8_build3"]
 
 [[controls]]
@@ -215,6 +226,31 @@ verification_delay_ms = 250
 persistence = "reconnect"
 rollback = "none"
 trace_ids = ["misc-options-1-low-res-1932784a0919"]
+safety = "normal"
+
+[[controls]]
+name = "portrait.native"
+entity_guid = "faf1672d-b71b-4793-8c91-7b1c9b7f95f8"
+selector = 27
+length = 2
+readable = true
+writable = true
+codec = "enum"
+offset = 0
+width = 2
+byte_order = "little"
+values = { off = 0, on = 32 }
+read_modify_write = true
+write_mask = 32
+tail_policy = { kind = "preserve" }
+verification = "reenumeration"
+stream_requirement = "restart"
+write_prelude = "get-length-twice"
+minimum_write_interval_ms = 250
+verification_delay_ms = 250
+persistence = "reconnect"
+rollback = "none"
+trace_ids = ["misc-options-1-portrait-a6aed99817d0"]
 safety = "normal"
 
 [[controls]]

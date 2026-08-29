@@ -1454,7 +1454,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(portrait.profile.profile_id, "insta360-link-2c-pro");
-        assert!(portrait.profile.controls.is_empty());
+        assert!(portrait.profile.control("firmware.version").is_some());
 
         let mut u_disk =
             identity("8c9226df8b126f700d738b42f38c0163549a37a19753832527ce27742d3d7f2e");
@@ -1731,6 +1731,37 @@ firmware = ["v1.2.3"]
             [0xdd, 0x11]
         );
 
+        let portrait = matched.profile.control("portrait.native").unwrap();
+        assert!(portrait.writable);
+        assert!(portrait.read_modify_write);
+        assert_eq!(portrait.selector, 27);
+        assert_eq!(portrait.length, 2);
+        assert_eq!(portrait.write_mask, Some(0x0020));
+        assert_eq!(
+            portrait.stream_requirement,
+            super::StreamRequirement::Restart
+        );
+        assert_eq!(
+            portrait.verification,
+            super::VerificationMethod::Reenumeration
+        );
+        assert_eq!(
+            decode_control(portrait, &[0xd5, 0x01]).unwrap(),
+            json!("off")
+        );
+        assert_eq!(
+            decode_control(portrait, &[0xf5, 0x01]).unwrap(),
+            json!("on")
+        );
+        assert_eq!(
+            encode_control(portrait, "on", Some(&[0xdd, 0x11])).unwrap(),
+            [0xfd, 0x11]
+        );
+        assert_eq!(
+            encode_control(portrait, "off", Some(&[0xfd, 0x11])).unwrap(),
+            [0xdd, 0x11]
+        );
+
         let gestures = matched.profile.control("gesture.enabled").unwrap();
         assert!(gestures.writable);
         assert!(gestures.read_modify_write);
@@ -1995,6 +2026,17 @@ firmware = ["v1.2.3"]
             "insta360-link-2c-pro-v0.2.9.8-build3"
         );
         assert!(low_resolution_verified.semantic_write_authorized());
+
+        let portrait = identity("7a60c8dd0f5e3d83e6c1c1fb245d96e02cc4ea6fdea8c10cc5a2e3b1094a2cc8");
+        let portrait_verified = catalog
+            .matching(&portrait, DeviceMode::Camera, Some("v0.2.9.8_build3"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            portrait_verified.profile.profile_id,
+            "insta360-link-2c-pro-v0.2.9.8-build3"
+        );
+        assert!(portrait_verified.semantic_write_authorized());
     }
 
     #[test]

@@ -2,7 +2,10 @@ schema_version = 1
 profile_id = "insta360-link-2c-pro"
 model = "Insta360 Link 2C Pro"
 status = "read-only"
-provenance = ["Link 2C Pro standard and low-resolution hardware readback, 2026-08-29"]
+provenance = [
+  "Link 2C Pro standard and low-resolution hardware readback, 2026-08-29",
+  "Link 2C Pro portrait USBPcap firmware readback, SHA-256 a6aed99817d0ca7a248a4339058ddeea9d1f0cc39ab5ced1767cd227111b14ed, 2026-08-29",
+]
 
 [[match]]
 mode = "camera"
@@ -19,6 +22,14 @@ usb_pid = 0x4c05
 bcd_device_min = 0x0200
 bcd_device_max = 0x0200
 descriptor_sha256 = "f8ec69e87774e9831bef86c498625373ba5fbb9d22bbc558185d88fb271a1bc2"
+
+[[match]]
+mode = "camera"
+usb_vid = 0x2e1a
+usb_pid = 0x4c05
+bcd_device_min = 0x0200
+bcd_device_max = 0x0200
+descriptor_sha256 = "7a60c8dd0f5e3d83e6c1c1fb245d96e02cc4ea6fdea8c10cc5a2e3b1094a2cc8"
 
 [[controls]]
 name = "firmware.version"

@@ -2,7 +2,7 @@
 
 `linkctl caps all` is the authoritative runtime view of the fixed-mount camera's semantic capabilities. Each item reports its state, backend, evidence, readable/writable flags, profile identity and checksum when applicable, live value when readable, persistence, and stream/restart dependency. The command also works in U-disk mode, where it reports camera controls as unavailable without trying to open a video node.
 
-The following outcomes are established for the recorded Standard descriptor `1d0fa40a5787adc39223e26a5262f3d5e1ba0421e17442487157905cbd2a066c`, Low resolution descriptor `f8ec69e87774e9831bef86c498625373ba5fbb9d22bbc558185d88fb271a1bc2`, and USB revision `0200`:
+The following outcomes are established for the recorded landscape descriptor `1d0fa40a5787adc39223e26a5262f3d5e1ba0421e17442487157905cbd2a066c`, Low resolution descriptor `f8ec69e87774e9831bef86c498625373ba5fbb9d22bbc558185d88fb271a1bc2`, native portrait descriptor `7a60c8dd0f5e3d83e6c1c1fb245d96e02cc4ea6fdea8c10cc5a2e3b1094a2cc8`, and USB revision `0200`:
 
 | Capability group | Command surface | Current outcome |
 | --- | --- | --- |
@@ -14,9 +14,9 @@ The following outcomes are established for the recorded Standard descriptor `1d0
 | Regular Whiteboard Mode | `mode whiteboard on/off/status` | Camera-resident mode is verified for firmware `v0.2.9.8_build3`; Smart Whiteboard remains a separate host pipeline. |
 | DeskView | `mode deskview on/off/status/vertical-correction` | Camera-native mode and vertical correction are verified for firmware `v0.2.9.8_build3`. Host calibration, perspective correction, and virtual-camera output remain separate. |
 | Gestures | `gesture status/enable/disable/set` | Global and per-gesture controls are verified for firmware `v0.2.9.8_build3`. |
-| Native portrait | `portrait status/native` | Discovered, including correction switches; re-enumeration mapping pending. |
+| Native portrait | `portrait status/native` | Restart-dependent native portrait resolution is verified for firmware `v0.2.9.8_build3`; the separate horizontal and vertical correction switches remain unmapped. |
 | Compatibility | `mode compatibility status/set` | Standard and restart-dependent Low resolution/360p modes are verified for firmware `v0.2.9.8_build3`; the separate YUY2 switch remains unmapped. |
-| Firmware | `firmware info` | Verified read-only landscape mapping: XU GUID `faf1672d-b71b-4793-8c91-7b1c9b7f95f8`, selector 3, 234-byte payload, UTF-8 field at offset 97. Observed version: `v0.2.9.8_build3`. |
+| Firmware | `firmware info` | Verified read-only landscape, Low resolution, and portrait mapping: XU GUID `faf1672d-b71b-4793-8c91-7b1c9b7f95f8`, selector 3, 234-byte payload, UTF-8 field at offset 97. Observed version: `v0.2.9.8_build3`. |
 | Hardware, mode, error, indicator | `firmware info`, `device state` | Read-only semantic sources unmapped. USB `bcdDevice` is not reported as firmware. |
 | Physical privacy shutter | `privacy status` | Hardware-only; no verified position readback. Host and hardware audio mute remain independently reported. |
 
@@ -107,6 +107,18 @@ The reviewed `gestures.pcap` Controller capture (SHA-256 `92c80aded28ca497db1872
 Each per-gesture command uses a masked read-modify-write, preserving both the other gesture switches and the currently unassigned `0x01` bit. `gesture enable` sets all three verified bits and `gesture disable` clears them in one masked write; a partial configuration is reported as its enabled gesture combination. The verified profile follows the captured running-preview transfer sequence with two length queries before each write and delayed exact readback.
 
 Linux hardware validation verified the aggregate all-off/all-on transition and three complete off/on cycles for each individual switch. Exact status readback showed the two untargeted switches remained on throughout every individual off state. The camera was restored to Palm, V-sign, and L-sign all on. Reconnect and power-cycle persistence remain unverified.
+
+## Native portrait-resolution mapping
+
+The reviewed `portrait.pcap` Controller capture (SHA-256 `a6aed99817d0ca7a248a4339058ddeea9d1f0cc39ab5ced1767cd227111b14ed`) maps native portrait resolution to bit `0x0020` of the two-byte little-endian selector 27 value. With the other captured settings preserved, landscape read as `d5 01` and portrait as `f5 01`. Two complete enable/disable cycles repeated those values and restarted the camera after every changed write; there is no separate restart request.
+
+The full USB descriptor fingerprint changes from landscape `1d0fa40a5787adc39223e26a5262f3d5e1ba0421e17442487157905cbd2a066c` to portrait `7a60c8dd0f5e3d83e6c1c1fb245d96e02cc4ea6fdea8c10cc5a2e3b1094a2cc8`. The portrait personality retains the landscape tuples and adds MJPEG 1088×1920 at 24/25/30/50/60 fps, MJPEG and H.264 736×1280 at 24/25/30/50/60 fps, MJPEG 2176×3840 at 24/25/30 fps, MJPEG 1080×1920 at 24/25/30/50/60 fps, and H.264 1088×1920 and 1080×1920 at 24/25/30 fps. This agrees with the product restriction that portrait 4K and portrait 1080p60 do not support H.264. Official portrait operation still requires physically rotating the camera; this control changes the camera's native resolution personality and does not silently substitute a host-side rotation.
+
+`portrait native enable` and `disable` use masked read-modify-write encoding, preserving HDR, flips, Smart Composition, compatibility mode, and every unknown selector bit. A changed value waits for a different exact descriptor, rematches the firmware-specific profile, and verifies the requested selector state. This camera may disconnect before the kernel completes the triggering `SET_CUR`, producing an expected transport timeout; that timeout is accepted only when the camera subsequently returns with the verified descriptor and exact semantic readback. If re-enumeration or readback fails, the command still fails and includes the transport error in its structured diagnostics. Requesting the active value is a verified no-op without restart.
+
+Native portrait and Low resolution are rejected as a combination before writing because no capture establishes their combined descriptor or format set. The horizontal and vertical correction options remain rejected before writable device access because this capture did not isolate those controls. VirtualBox USB filters can also recapture the camera as it returns, so the VM must remain shut down or its automatic camera filter must be disabled during either restart-dependent operation.
+
+Linux hardware validation completed landscape-to-portrait in 7.83 seconds and restored landscape in 7.67 seconds. Both commands matched the expected descriptor and selector state. All four native portrait sizes and their captured codec/frame-rate limits were advertised, and a raw MJPEG snapshot produced a valid 1080×1920 frame. An idempotent enable completed in 0.35 seconds without changing the USB device number. The final restoration returned to the original landscape descriptor and removed every portrait-only format.
 
 ## Low-resolution compatibility mapping
 

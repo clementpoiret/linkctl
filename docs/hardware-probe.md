@@ -30,7 +30,7 @@ The new directory contains:
 
 Existing destinations are rejected. If bundle creation fails, the partially created directory is removed. Normal bundles omit serials, usernames, home and mount paths, credentials, logs, and media frames. `--include-serial` is deliberately explicit and marks the manifest accordingly.
 
-The report records USB `bcdDevice` separately from firmware and never treats that revision as a firmware version. For the verified landscape descriptor, `firmware info` reads a bounded UTF-8 field from XU selector 3 and currently reports `v0.2.9.8_build3`; the portrait personality remains unverified for this read. Profile selection first uses an exact descriptor/device bootstrap profile, decodes `firmware.version` when that profile supplies it, and then performs a second match in which an exact firmware guard outranks the bootstrap profile. Unknown firmware therefore retains standard and read-only discovery capabilities without authorizing vendor writes.
+The report records USB `bcdDevice` separately from firmware and never treats that revision as a firmware version. For the verified landscape, Low resolution, and portrait descriptors, `firmware info` reads a bounded UTF-8 field from XU selector 3 and currently reports `v0.2.9.8_build3`. Profile selection first uses an exact descriptor/device bootstrap profile, decodes `firmware.version` when that profile supplies it, and then performs a second match in which an exact firmware guard outranks the bootstrap profile. Unknown firmware therefore retains standard and read-only discovery capabilities without authorizing vendor writes.
 
 Build with the `pipewire` feature to include native PipeWire registry correlation. ALSA discovery remains available in every build.
 
