@@ -12,6 +12,8 @@ Read-only `device info`, `caps controls`, and `device probe` accept `--device al
 
 The probe reads USB descriptors, classifies every associated video node, enumerates current/advertised V4L2 formats and standard controls, parses UVC Extension Units, asks advertised selectors only for `GET_LEN` and `GET_INFO`, and correlates ALSA/PipeWire audio sources. The probe does not set controls, negotiate formats, start streams, detach drivers, reset USB devices, or read XU payloads.
 
+For focused XU analysis, `xu inventory` exposes the complete retained VideoControl descriptor graph and `xu get` performs an exact-length selector read. The snapshot/diff workflow and sanitization rules are documented in [Safe UVC Extension Unit research](xu-research.md).
+
 ## Reusable bundles
 
 Pass `--bundle` with a path that does not exist:

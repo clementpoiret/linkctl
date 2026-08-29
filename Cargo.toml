@@ -24,6 +24,7 @@ publish = false
 
 [workspace.dependencies]
 alsa = "0.12.1"
+base64 = "0.22.1"
 clap = { version = "4.6.6", features = ["derive", "env"] }
 clap_complete = "4.6.6"
 ctrlc = "3.5.1"
@@ -35,6 +36,7 @@ rustix = { version = "1.1.4", features = ["event", "fs", "process"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
+tar = "0.4.44"
 tempfile = "3.27.0"
 thiserror = "2.0.20"
 toml = "0.9.8"
@@ -42,6 +44,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 udev = "0.9.3"
 v4l2r = "0.0.8"
+zstd = "0.13.3"
 
 link-audio = { path = "crates/link-audio", version = "=0.1.0" }
 link-core = { path = "crates/link-core", version = "=0.1.0" }

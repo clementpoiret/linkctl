@@ -1,0 +1,30 @@
+schema_version = 1
+profile_id = "sanitized-legacy-52"
+model = "Sanitized legacy research fixture"
+status = "read-only"
+provenance = ["Sanitized shape-only fixture; no vendor payload bytes"]
+
+[[match]]
+mode = "camera"
+usb_vid = 0x1234
+usb_pid = 0x0052
+bcd_device_min = 0x0001
+bcd_device_max = 0x0001
+descriptor_sha256 = "6ca3551914f75ccd365b3112604d942664ef5e7659dc01ddd4c2ff09c77e7708"
+
+[[controls]]
+name = "mode"
+entity_guid = "52525252-5252-5252-5252-525252525252"
+selector = 1
+length = 52
+readable = true
+writable = false
+codec = "structured"
+tail_policy = { kind = "preserve" }
+
+[[controls.fields]]
+name = "value"
+offset = 48
+width = 4
+codec = "unsigned"
+byte_order = "little"

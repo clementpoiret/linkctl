@@ -34,3 +34,16 @@ jobs:
         run: devenv shell -- cargo check --workspace --all-targets --all-features --locked
       - name: Dependency policy
         run: devenv shell -- cargo deny --all-features check
+
+  xu-abi-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v17
+        with:
+          name: devenv
+      - name: Install devenv
+        run: nix profile add nixpkgs#devenv
+      - name: XU ABI and parser tests
+        run: devenv shell -- cargo test -p link-uvc-xu --all-features --locked

@@ -11,6 +11,10 @@ pub enum ProfileState {
     Invalid,
     /// Valid input that is deliberately read-only.
     ReadOnly,
+    /// Valid research input that is never trusted for normal semantic writes.
+    Experimental,
+    /// A compiled-in profile backed by reviewed evidence.
+    Verified,
 }
 
 /// Operations classified by the safety boundary.
@@ -20,8 +24,12 @@ pub enum Operation {
     ReadOnly,
     /// A range-checked standard V4L2 control write.
     StandardControlWrite,
-    /// A raw Extension Unit write.
-    RawXuWrite,
+    /// A raw Extension Unit write with build, acknowledgement, and profile gates.
+    RawXuWrite {
+        feature_enabled: bool,
+        acknowledged: bool,
+        profile: ProfileState,
+    },
     /// A write to a selector with unknown semantics.
     UnknownXuWrite,
     /// A vendor write proposed by a profile.
@@ -55,21 +63,45 @@ impl SafetyPolicy {
     pub fn authorize(&self, operation: Operation) -> Result<(), LinkError> {
         match operation {
             Operation::ReadOnly | Operation::StandardControlWrite => Ok(()),
+            Operation::VendorProfileWrite(ProfileState::Verified) => Ok(()),
             Operation::VendorProfileWrite(profile) => Err(LinkError::new(
                 ErrorKind::ProtocolProfileMismatch,
                 match profile {
                     ProfileState::Untrusted => "untrusted profiles cannot authorize writes",
                     ProfileState::Invalid => "invalid profiles cannot authorize writes",
                     ProfileState::ReadOnly => "read-only profiles cannot authorize writes",
+                    ProfileState::Experimental => {
+                        "experimental profiles cannot authorize semantic writes"
+                    }
+                    ProfileState::Verified => unreachable!("verified profile handled above"),
                 },
             )),
-            Operation::RawXuWrite => {
-                let configured = self.config.allow_raw_xu;
-                Err(LinkError::new(
-                    ErrorKind::UnsafeOperationDenied,
-                    "raw XU support is not available in this build",
-                )
-                .with_detail("configured", configured))
+            Operation::RawXuWrite {
+                feature_enabled,
+                acknowledged,
+                profile,
+            } => {
+                if !feature_enabled {
+                    return Err(unsafe_denial(
+                        "raw XU support requires a research-enabled build",
+                    ));
+                }
+                if !acknowledged {
+                    return Err(unsafe_denial("raw XU access requires --unsafe-xu"));
+                }
+                if !self.config.allow_raw_xu {
+                    return Err(unsafe_denial(
+                        "raw XU access is disabled by safety configuration",
+                    ));
+                }
+                if matches!(profile, ProfileState::Experimental | ProfileState::Verified) {
+                    Ok(())
+                } else {
+                    Err(LinkError::new(
+                        ErrorKind::ProtocolProfileMismatch,
+                        "raw XU access requires an exact experimental or verified profile",
+                    ))
+                }
             }
             Operation::UnknownXuWrite => Err(unsafe_denial("unknown XU writes are prohibited")),
             Operation::DriverDetach => Err(unsafe_denial("detaching uvcvideo is prohibited")),
@@ -109,12 +141,18 @@ mod tests {
             ProfileState::Untrusted,
             ProfileState::Invalid,
             ProfileState::ReadOnly,
+            ProfileState::Experimental,
         ] {
             let error = policy
                 .authorize(Operation::VendorProfileWrite(state))
                 .expect_err("profile writes must be unavailable");
             assert_eq!(error.kind(), ErrorKind::ProtocolProfileMismatch);
         }
+        assert!(
+            policy
+                .authorize(Operation::VendorProfileWrite(ProfileState::Verified))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -124,10 +162,39 @@ mod tests {
             ..SafetyConfig::default()
         };
         let error = SafetyPolicy::new(config)
-            .authorize(Operation::RawXuWrite)
+            .authorize(Operation::RawXuWrite {
+                feature_enabled: false,
+                acknowledged: true,
+                profile: ProfileState::Experimental,
+            })
             .expect_err("raw writes must be unavailable");
 
         assert_eq!(error.kind(), ErrorKind::UnsafeOperationDenied);
-        assert_eq!(error.details()["configured"], true);
+    }
+
+    #[test]
+    fn research_raw_writes_require_every_gate() {
+        let policy = SafetyPolicy::new(SafetyConfig {
+            allow_raw_xu: true,
+            ..SafetyConfig::default()
+        });
+        assert!(
+            policy
+                .authorize(Operation::RawXuWrite {
+                    feature_enabled: true,
+                    acknowledged: true,
+                    profile: ProfileState::Experimental,
+                })
+                .is_ok()
+        );
+        assert!(
+            policy
+                .authorize(Operation::RawXuWrite {
+                    feature_enabled: true,
+                    acknowledged: false,
+                    profile: ProfileState::Experimental,
+                })
+                .is_err()
+        );
     }
 }

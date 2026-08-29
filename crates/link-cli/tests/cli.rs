@@ -1,5 +1,6 @@
 use std::{
     fs,
+    os::unix::fs::PermissionsExt,
     path::Path,
     process::{Command, Output},
 };
@@ -11,6 +12,7 @@ fn run(arguments: &[&str]) -> Output {
         .args(arguments)
         .env_remove("LINKCTL_FORMAT")
         .env_remove("LINKCTL_CONFIG")
+        .env_remove("LINKCTL_UNSAFE_XU")
         .output()
         .expect("linkctl should execute")
 }
@@ -54,6 +56,7 @@ fn help_and_version_advertise_only_implemented_commands() {
     assert!(stdout.contains("capture"));
     assert!(stdout.contains("record"));
     assert!(stdout.contains("preset"));
+    assert!(stdout.contains("xu"));
     assert!(stdout.contains("doctor"));
     assert!(stdout.contains("completion"));
 
@@ -62,6 +65,95 @@ fn help_and_version_advertise_only_implemented_commands() {
 
     let unsafe_help = run(&["--unsafe-xu", "--help"]);
     assert!(unsafe_help.status.success());
+}
+
+#[test]
+fn xu_help_exposes_read_research_write_and_recovery_commands() {
+    let help = run(&["xu", "--help"]);
+    assert!(help.status.success());
+    let stdout = String::from_utf8(help.stdout).expect("UTF-8 help");
+    for command in [
+        "inventory",
+        "get",
+        "snapshot",
+        "diff",
+        "watch",
+        "set",
+        "raw-set",
+        "recover",
+    ] {
+        assert!(stdout.contains(command));
+    }
+
+    let doctor = run(&["doctor", "--help"]);
+    assert!(doctor.status.success());
+    assert!(
+        String::from_utf8(doctor.stdout)
+            .expect("UTF-8 help")
+            .contains("--bundle")
+    );
+}
+
+#[test]
+fn xu_diff_works_offline_with_sanitized_snapshots() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let before = root.join("fixtures/xu-snapshots/sanitized-before.json");
+    let after = root.join("fixtures/xu-snapshots/sanitized-after.json");
+    let output = run(&[
+        "--format",
+        "json",
+        "xu",
+        "diff",
+        &before.to_string_lossy(),
+        &after.to_string_lossy(),
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).expect("JSON diff");
+    assert_eq!(value["command"], "xu.diff");
+    assert_eq!(value["result"]["selectors"][0]["bytes"][0]["offset"], 1);
+    assert_eq!(
+        value["result"]["selectors"][0]["bytes"][0]["changed_bits"],
+        serde_json::json!([0])
+    );
+}
+
+#[test]
+fn doctor_writes_a_private_no_clobber_diagnostic_archive() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let bundle = root.path().join("report.tar.zst");
+    let output = run_with_xdg(
+        &["doctor", "--bundle", &bundle.to_string_lossy()],
+        root.path(),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::metadata(&bundle).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    let decoder = zstd::Decoder::new(fs::File::open(&bundle).unwrap()).unwrap();
+    let mut archive = tar::Archive::new(decoder);
+    let names = archive
+        .entries()
+        .unwrap()
+        .map(|entry| entry.unwrap().path().unwrap().into_owned())
+        .collect::<Vec<_>>();
+    assert!(names.iter().any(|path| path.ends_with("doctor.json")));
+    assert!(names.iter().any(|path| path.ends_with("manifest.json")));
+
+    let duplicate = run_with_xdg(
+        &["doctor", "--bundle", &bundle.to_string_lossy()],
+        root.path(),
+    );
+    assert_eq!(duplicate.status.code(), Some(2));
 }
 
 #[test]
@@ -131,6 +223,8 @@ fn published_json_schemas_are_valid_documents() {
         "docs/schemas/envelope-v1.json",
         "docs/schemas/preset-v1.json",
         "docs/schemas/transaction-v1.json",
+        "docs/schemas/vendor-profile-v1.json",
+        "docs/schemas/xu-snapshot-v1.json",
     ] {
         let path = root.join(relative);
         let bytes = fs::read(&path).unwrap_or_else(|error| {
@@ -277,43 +371,85 @@ fn forced_nonstandard_control_backend_is_reported_as_unsupported() {
 
 #[test]
 fn unsafe_xu_from_the_environment_reaches_the_safety_gate() {
-    let output = run_with_environment(&[], "LINKCTL_UNSAFE_XU", "true");
+    let output = run_with_environment(
+        &[
+            "xu",
+            "raw-set",
+            "--guid",
+            "11111111-1111-1111-1111-111111111111",
+            "--selector",
+            "1",
+            "--hex",
+            "00",
+        ],
+        "LINKCTL_UNSAFE_XU",
+        "true",
+    );
 
     assert_eq!(output.status.code(), Some(9));
     assert!(
         String::from_utf8(output.stderr)
             .expect("UTF-8 error")
-            .contains("raw XU support is not available")
+            .contains("raw XU")
     );
 }
 
 #[test]
 fn unsafe_xu_is_rejected_in_human_output() {
-    let output = run(&["--unsafe-xu"]);
+    let output = run(&[
+        "--unsafe-xu",
+        "xu",
+        "raw-set",
+        "--guid",
+        "11111111-1111-1111-1111-111111111111",
+        "--selector",
+        "1",
+        "--hex",
+        "00",
+    ]);
 
     assert_eq!(output.status.code(), Some(9));
     assert!(output.stdout.is_empty());
     assert!(
         String::from_utf8(output.stderr)
             .expect("UTF-8 error")
-            .contains("raw XU support is not available")
+            .contains("raw XU")
     );
 }
 
 #[test]
 fn unsafe_xu_is_rejected_with_a_schema_conforming_json_error() {
-    let output = run(&["--format", "json", "--unsafe-xu"]);
+    let output = run(&[
+        "--format",
+        "json",
+        "--unsafe-xu",
+        "xu",
+        "raw-set",
+        "--guid",
+        "11111111-1111-1111-1111-111111111111",
+        "--selector",
+        "1",
+        "--hex",
+        "00",
+    ]);
 
     assert_eq!(output.status.code(), Some(9));
     let value: Value = serde_json::from_slice(&output.stdout).expect("JSON error");
     assert_eq!(value["schema_version"], 1);
     assert_eq!(value["ok"], false);
-    assert_eq!(value["command"], "linkctl");
+    assert_eq!(value["command"], "xu.raw-set");
     assert!(value["device"].is_null());
     assert!(value["result"].is_null());
     assert_eq!(value["error"]["code"], "unsafe-operation-denied");
     assert_eq!(value["error"]["exit_code"], 9);
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn unsafe_xu_is_scoped_to_raw_set() {
+    let output = run(&["--unsafe-xu", "xu", "inventory"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("only with xu raw-set"));
 }
 
 #[test]

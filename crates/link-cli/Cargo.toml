@@ -16,6 +16,7 @@ gstreamer = ["dep:link-media", "link-media/gstreamer"]
 pipewire = ["link-audio/pipewire"]
 host-ai = ["dep:link-effects", "link-effects/host-ai"]
 network = ["dep:link-ipc", "dep:link-media", "link-ipc/network", "link-media/network", "gstreamer"]
+research = ["link-uvc-xu/research"]
 sdk = ["dep:link-sdk-bridge", "link-sdk-bridge/sdk"]
 
 [dependencies]
@@ -35,7 +36,9 @@ link-v4l2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tar.workspace = true
 tempfile.workspace = true
+zstd.workspace = true
 
 [lints]
 workspace = true

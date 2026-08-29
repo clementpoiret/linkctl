@@ -223,6 +223,66 @@ pub fn initialize(required_elements: &[&str]) -> Result<(), LinkError> {
     Ok(())
 }
 
+/// A minimal no-output camera stream held in PLAYING for a bounded XU operation.
+pub struct ProbeStream {
+    pipeline: gst::Pipeline,
+}
+
+impl ProbeStream {
+    /// Open the camera and wait for a minimal source pipeline to reach PLAYING.
+    pub fn open(node: &str, timeout: Duration) -> Result<Self, LinkError> {
+        initialize(&["v4l2src", "fakesink"])?;
+        let pipeline = gst::Pipeline::new();
+        let source = gst::ElementFactory::make("v4l2src")
+            .property("device", node)
+            .build()
+            .map_err(build_error)?;
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("sync", false)
+            .build()
+            .map_err(build_error)?;
+        pipeline_add(&pipeline, &[&source, &sink])?;
+        source.link(&sink).map_err(link_error)?;
+        pipeline
+            .set_state(gst::State::Playing)
+            .map_err(state_error)?;
+        let (change, current, pending) =
+            pipeline.state(gst::ClockTime::from_nseconds(duration_ns(timeout)));
+        let result = change.map_err(state_error).and_then(|_| {
+            if current == gst::State::Playing {
+                Ok(())
+            } else {
+                Err(LinkError::new(
+                    ErrorKind::Timeout,
+                    "temporary camera pipeline did not reach Playing",
+                )
+                .with_detail("current", format!("{current:?}"))
+                .with_detail("pending", format!("{pending:?}")))
+            }
+        });
+        if let Err(error) = result {
+            let _ = pipeline.set_state(gst::State::Null);
+            return Err(error);
+        }
+        Ok(Self { pipeline })
+    }
+}
+
+impl Drop for ProbeStream {
+    fn drop(&mut self) {
+        let _ = self.pipeline.set_state(gst::State::Null);
+    }
+}
+
+/// Open a camera briefly and confirm that a minimal source pipeline reaches PLAYING.
+///
+/// This is intentionally limited to rebuilding userspace media state. It does not
+/// reset the USB device or mutate driver state.
+pub fn probe_stream(node: &str, timeout: Duration) -> Result<(), LinkError> {
+    drop(ProbeStream::open(node, timeout)?);
+    Ok(())
+}
+
 /// Capture one or more encoded still images without retaining a running pipeline.
 pub fn snapshot(request: &SnapshotRequest) -> Result<Vec<SnapshotFrame>, LinkError> {
     if request.count == 0 {

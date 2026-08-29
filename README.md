@@ -19,11 +19,14 @@ linkctl --device link2cpro-… snapshot frame.png
 linkctl --device link2cpro-… record start meeting.mkv --video-copy --audio camera
 linkctl --device link2cpro-… preset save interview --include video,image,zoom,audio
 linkctl --device link2cpro-… --dry-run preset apply interview
+linkctl --device link2cpro-… xu inventory
+linkctl --device link2cpro-… xu snapshot baseline.json --samples 5
+linkctl xu diff baseline.json after.json
 ```
 
 Every mutation supports `--dry-run`, validates values, reads the previous value, verifies readback, and attempts rollback after a partial failure. Automatic/manual prerequisites are applied by default; `control set --raw` bypasses only that semantic gating. Pan and tilt remain read-only raw inventory even if a driver advertises them.
 
-Use `device watch --format jsonl` for hotplug events and `control watch --format jsonl` for control changes. `linkctl doctor` performs read-only configuration, permission, profile, control, and recovery-journal checks. See [configuration and presets](docs/presets.md), [audio](docs/audio.md), [video capture and recording](docs/media.md), [standard controls](docs/controls.md), [permissions and udev setup](docs/permissions.md), and the [hardware probe guide](docs/hardware-probe.md).
+Use `device watch --format jsonl` for hotplug events and `control watch --format jsonl` for control changes. `linkctl doctor` performs read-only configuration, permission, profile, control, and recovery-journal checks; `doctor --bundle report.tar.zst` creates a private redacted diagnostic archive. See [configuration and presets](docs/presets.md), [audio](docs/audio.md), [video capture and recording](docs/media.md), [standard controls](docs/controls.md), [safe XU research](docs/xu-research.md), [permissions and udev setup](docs/permissions.md), and the [hardware probe guide](docs/hardware-probe.md).
 
 GStreamer and PipeWire support are enabled in normal builds, with direct ALSA capture as a fallback. H.264 and MJPEG recording paths preserve the camera encoding without decoding; recording audio is opt-in and muxes FLAC into Matroska or AAC into MP4. RTP/UDP output is available when the `network` feature is enabled.
 
@@ -52,9 +55,9 @@ cargo deny --all-features check
 
 ## Safety boundary
 
-Normal builds expose validated standard V4L2 control writes. They do not expose raw Extension Unit writes, driver detach, USB reset, firmware or calibration writes, or mechanical movement commands. Configuration cannot enable code that is absent from the build. A profile is never sufficient evidence for a vendor write until it has been validated against the exact device, descriptor, and firmware under a separately reviewed implementation.
+Normal builds expose validated standard V4L2 control writes and safe Extension Unit reads. The raw XU command remains visible but cannot issue `SET_CUR` unless the binary was built with the non-default `research` feature and every runtime/profile gate passes. Driver detach, USB reset, firmware, calibration, and mechanical writes remain prohibited. Configuration cannot enable code that is absent from the build. A semantic vendor write additionally requires a compiled-in trusted verified profile matched to the exact device, descriptor, and firmware.
 
-Discovery, watches, capability reports, probes, and `doctor` are read-only. They never set a V4L2 format or control and never issue a UVC `SET_CUR` request.
+Discovery, read watches, capability reports, probes, snapshots, diffs, and `doctor` are device-read-only. They never set a V4L2 format or control and never issue a UVC `SET_CUR` request; an explicitly requested probe, snapshot, or diagnostic artifact is the only filesystem output.
 
 Machine output uses schema version 1. JSON and JSON Lines errors always include `schema_version`, `ok`, `command`, `device`, `result`, and `error`.
 

@@ -4,11 +4,15 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fs,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     thread,
     time::Duration,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(feature = "gstreamer")]
+use std::io::Write;
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind as ClapErrorKind};
 use clap_complete::Shell;
@@ -48,12 +52,10 @@ use link_core::{
     },
 };
 use link_linux::DiscoveredDevice;
-use link_profiles::ProfileCatalog;
+use link_profiles::{ProfileCatalog, SafetyClass, VerificationMethod};
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-#[cfg(feature = "gstreamer")]
-use std::io::Write;
 
 /// Root command-line parser. Functional subcommands are added only with their implementation.
 #[derive(Clone, Debug, Parser)]
@@ -108,7 +110,7 @@ pub struct Cli {
     #[arg(long, global = true, env = "LINKCTL_YES")]
     pub yes: bool,
 
-    /// Request raw XU access (unavailable in this build).
+    /// Acknowledge raw XU access for a research-enabled build.
     #[arg(long, global = true, env = "LINKCTL_UNSAFE_XU")]
     pub unsafe_xu: bool,
 
@@ -160,6 +162,11 @@ pub enum Command {
         #[command(subcommand)]
         command: PresetCommand,
     },
+    /// Inspect and research UVC Extension Unit controls safely.
+    Xu {
+        #[command(subcommand)]
+        command: XuCommand,
+    },
     /// Capture one or more JPEG, PNG, or raw compressed frames.
     #[cfg(feature = "gstreamer")]
     Snapshot(SnapshotArgs),
@@ -179,7 +186,7 @@ pub enum Command {
         command: StreamCommand,
     },
     /// Run read-only configuration, permission, and device diagnostics.
-    Doctor,
+    Doctor(DoctorArgs),
     /// Generate shell completion source for implemented commands.
     Completion {
         /// Target shell.
@@ -435,6 +442,70 @@ pub enum PresetCommand {
     Export { name: String, output: PathBuf },
     /// Validate and import a preset without replacing an existing name.
     Import { file: PathBuf },
+}
+
+/// Safe Extension Unit inventory and research operations.
+#[derive(Clone, Debug, Subcommand)]
+pub enum XuCommand {
+    /// Parse the complete VideoControl descriptor graph and query selector capabilities.
+    Inventory {
+        /// Include retained raw descriptors and bytes.
+        #[arg(long)]
+        raw: bool,
+    },
+    /// Read one advertised selector using its exact device-reported length.
+    Get {
+        #[arg(long, conflicts_with = "unit")]
+        guid: Option<String>,
+        #[arg(long, conflicts_with = "guid")]
+        unit: Option<u8>,
+        #[arg(long)]
+        selector: u8,
+        /// Assert, but never override, the GET_LEN result.
+        #[arg(long)]
+        length: Option<u16>,
+    },
+    /// Capture repeated XU and standard-control state into a new JSON file.
+    Snapshot {
+        output: PathBuf,
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(1..=64))]
+        samples: u8,
+        #[arg(long, default_value = "250ms")]
+        interval: DurationValue,
+        #[arg(long)]
+        note: Vec<String>,
+        #[arg(long)]
+        include_volatile: bool,
+    },
+    /// Compare two saved XU snapshots without hardware.
+    Diff { before: PathBuf, after: PathBuf },
+    /// Emit selector changes continuously.
+    Watch {
+        #[arg(long, default_value = "250ms")]
+        interval: DurationValue,
+        #[arg(long)]
+        include_volatile: bool,
+    },
+    /// Apply one semantic control from an exact trusted verified profile.
+    Set { control: String, value: String },
+    /// Apply an exact profile-classified payload in a research-enabled build.
+    RawSet {
+        #[arg(long)]
+        guid: String,
+        #[arg(long)]
+        selector: u8,
+        #[arg(long)]
+        hex: String,
+    },
+    /// Reopen the XU handle and rebuild a bounded no-output probe stream.
+    Recover,
+}
+
+#[derive(Clone, Debug, clap::Args)]
+pub struct DoctorArgs {
+    /// Write a redacted, checksummed tar.zst diagnostic archive.
+    #[arg(long, value_name = "REPORT.tar.zst")]
+    bundle: Option<PathBuf>,
 }
 
 /// Implemented preset capture groups.
@@ -893,14 +964,6 @@ pub fn run(arguments: Vec<OsString>) -> u8 {
         return emit_link_error(config.output, &error);
     }
 
-    if cli.unsafe_xu {
-        let policy = SafetyPolicy::new(config.safety);
-        let error = policy
-            .authorize(Operation::RawXuWrite)
-            .expect_err("raw XU access is unavailable by contract");
-        return emit_link_error(config.output, &error);
-    }
-
     let command_id = command_identifier(cli.command.as_ref());
     let binary_stdout = uses_binary_stdout(cli.command.as_ref());
     let result = match cli.command {
@@ -932,6 +995,7 @@ pub fn run(arguments: Vec<OsString>) -> u8 {
         Some(Command::Video { command }) => run_video(&config, cli.backend, command, cli.dry_run),
         Some(Command::Audio { command }) => run_audio(&config, cli.backend, command, cli.dry_run),
         Some(Command::Preset { command }) => run_preset(&config, cli.backend, command, cli.dry_run),
+        Some(Command::Xu { command }) => run_xu(&config, command, cli.dry_run, cli.unsafe_xu),
         #[cfg(feature = "gstreamer")]
         Some(Command::Snapshot(arguments)) => {
             run_snapshot(&config, cli.backend, arguments, cli.dry_run)
@@ -944,7 +1008,7 @@ pub fn run(arguments: Vec<OsString>) -> u8 {
         Some(Command::Record { command }) => run_record(&config, cli.backend, command, cli.dry_run),
         #[cfg(feature = "network")]
         Some(Command::Stream { command }) => run_stream(&config, cli.backend, command, cli.dry_run),
-        Some(Command::Doctor) => run_doctor(&config),
+        Some(Command::Doctor(arguments)) => run_doctor(&config, arguments.bundle.as_deref()),
         Some(Command::Completion { shell }) => run_completion(&config, shell),
         None => Err(LinkError::new(
             ErrorKind::InvalidInvocation,
@@ -988,6 +1052,10 @@ fn load_selected_device_config(
 fn command_uses_device_defaults(command: Option<&Command>) -> bool {
     match command {
         Some(Command::Control { .. } | Command::Image { .. } | Command::Video { .. }) => true,
+        Some(Command::Xu {
+            command: XuCommand::Diff { .. },
+        }) => false,
+        Some(Command::Xu { .. }) => true,
         Some(Command::Preset {
             command: PresetCommand::Save { .. } | PresetCommand::Apply { .. },
         }) => true,
@@ -1089,6 +1157,16 @@ fn command_identifier(command: Option<&Command>) -> &'static str {
             PresetCommand::Export { .. } => "preset.export",
             PresetCommand::Import { .. } => "preset.import",
         },
+        Some(Command::Xu { command }) => match command {
+            XuCommand::Inventory { .. } => "xu.inventory",
+            XuCommand::Get { .. } => "xu.get",
+            XuCommand::Snapshot { .. } => "xu.snapshot",
+            XuCommand::Diff { .. } => "xu.diff",
+            XuCommand::Watch { .. } => "xu.watch",
+            XuCommand::Set { .. } => "xu.set",
+            XuCommand::RawSet { .. } => "xu.raw-set",
+            XuCommand::Recover => "xu.recover",
+        },
         #[cfg(feature = "gstreamer")]
         Some(Command::Snapshot(_)) => "snapshot",
         #[cfg(feature = "gstreamer")]
@@ -1097,7 +1175,7 @@ fn command_identifier(command: Option<&Command>) -> &'static str {
         Some(Command::Record { .. }) => "record.start",
         #[cfg(feature = "network")]
         Some(Command::Stream { .. }) => "stream.start",
-        Some(Command::Doctor) => "doctor",
+        Some(Command::Doctor(_)) => "doctor",
         Some(Command::Completion { .. }) => "completion",
         None => "linkctl",
     }
@@ -1430,6 +1508,785 @@ fn selected_video_device(
         .ok_or_else(|| LinkError::new(ErrorKind::DeviceNotFound, "no camera was selected"))?;
     let node = control_node(&device, config.default_device.as_deref())?;
     Ok((device, node))
+}
+
+#[derive(Serialize)]
+struct XuInventoryResult {
+    descriptor_sha256: String,
+    profile_id: Option<String>,
+    profile_checksum: Option<String>,
+    inventory: link_uvc_xu::DescriptorInventory,
+}
+
+#[derive(Serialize)]
+struct XuWriteReport {
+    control: Option<String>,
+    guid: String,
+    unit: u8,
+    selector: u8,
+    length: u16,
+    previous: Option<Value>,
+    requested: Value,
+    observed: Option<Value>,
+    verified: bool,
+    dry_run: bool,
+    rate_limit_wait_ms: u64,
+    audit_path: Option<PathBuf>,
+}
+
+#[derive(Serialize)]
+struct XuRecoveryReport {
+    node: String,
+    handles_reopened: bool,
+    selectors_checked: usize,
+    pipeline_rebuilt: bool,
+    pipeline_note: String,
+    dry_run: bool,
+}
+
+fn run_xu(
+    config: &Config,
+    command: XuCommand,
+    dry_run: bool,
+    unsafe_xu: bool,
+) -> Result<(), LinkError> {
+    if unsafe_xu && !matches!(command, XuCommand::RawSet { .. }) {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "--unsafe-xu is valid only with xu raw-set",
+        ));
+    }
+    match command {
+        XuCommand::Inventory { raw } => run_xu_inventory(config, raw),
+        XuCommand::Get {
+            guid,
+            unit,
+            selector,
+            length,
+        } => run_xu_get(config, guid.as_deref(), unit, selector, length),
+        XuCommand::Snapshot {
+            output,
+            samples,
+            interval,
+            note,
+            include_volatile,
+        } => run_xu_snapshot(
+            config,
+            &output,
+            samples,
+            interval.get(),
+            note,
+            include_volatile,
+        ),
+        XuCommand::Diff { before, after } => run_xu_diff(config, &before, &after),
+        XuCommand::Watch {
+            interval,
+            include_volatile,
+        } => run_xu_watch(config, interval.get(), include_volatile),
+        XuCommand::Set { control, value } => run_xu_semantic_set(config, &control, &value, dry_run),
+        XuCommand::RawSet {
+            guid,
+            selector,
+            hex,
+        } => run_xu_raw_set(config, &guid, selector, &hex, dry_run, unsafe_xu),
+        XuCommand::Recover => run_xu_recover(config, dry_run),
+    }
+}
+
+fn run_xu_inventory(config: &Config, raw: bool) -> Result<(), LinkError> {
+    let catalog = ProfileCatalog::load(config.profile_dir.as_deref())?;
+    let devices = selected_devices(config, true)?;
+    let mut results = Vec::with_capacity(devices.len());
+    for device in &devices {
+        let node = control_node(device, config.default_device.as_deref())?;
+        let mut inventory = link_uvc_xu::parse_descriptors(&device.descriptors)?;
+        inventory.extension_units =
+            link_uvc_xu::inventory(Path::new(&node.path), &device.descriptors)?;
+        if !raw {
+            inventory.unknown_descriptors.clear();
+            for entity in &mut inventory.video_control_entities {
+                entity.raw_hex.clear();
+            }
+        }
+        let profile = catalog.matching(&device.identity, device.mode(), None)?;
+        results.push(PerDeviceResult {
+            device: device_summary(device),
+            result: XuInventoryResult {
+                descriptor_sha256: device.identity.descriptor_sha256.clone(),
+                profile_id: profile.map(|entry| entry.profile.profile_id.clone()),
+                profile_checksum: profile.map(|entry| entry.checksum.clone()),
+                inventory,
+            },
+        });
+    }
+    if config.output == OutputFormat::Human {
+        for result in &results {
+            println!("{} ({})", result.device.model, result.device.stable_id);
+            for entity in &result.result.inventory.extension_units {
+                println!(
+                    "  {} unit={} controls={} bitmap={}",
+                    entity.guid, entity.unit_id, entity.num_controls, entity.control_bitmap
+                );
+                for selector in &entity.selectors {
+                    println!(
+                        "    selector={} length={} get={} set={}",
+                        selector.selector,
+                        selector
+                            .length
+                            .map_or_else(|| "?".into(), |value| value.to_string()),
+                        selector
+                            .get_supported
+                            .map_or_else(|| "?".into(), |value| value.to_string()),
+                        selector
+                            .set_supported
+                            .map_or_else(|| "?".into(), |value| value.to_string()),
+                    );
+                }
+            }
+        }
+        Ok(())
+    } else {
+        emit_success(config.output, "xu.inventory", None, &results)
+    }
+}
+
+fn selected_xu_context(
+    config: &Config,
+    writable: bool,
+) -> Result<
+    (
+        DiscoveredDevice,
+        NodeAssociation,
+        link_uvc_xu::DescriptorInventory,
+        ProfileCatalog,
+        link_uvc_xu::XuSession,
+    ),
+    LinkError,
+> {
+    let (device, node) = selected_video_device(config)?;
+    if device.mode() != DeviceMode::Camera {
+        return Err(LinkError::new(
+            ErrorKind::CapabilityUnsupported,
+            "XU commands require the normal camera USB personality",
+        ));
+    }
+    let inventory = link_uvc_xu::parse_descriptors(&device.descriptors)?;
+    let catalog = ProfileCatalog::load(config.profile_dir.as_deref())?;
+    let session = if writable {
+        link_uvc_xu::XuSession::open_write(Path::new(&node.path))?
+    } else {
+        link_uvc_xu::XuSession::open_read(Path::new(&node.path))?
+    };
+    Ok((device, node, inventory, catalog, session))
+}
+
+fn run_xu_get(
+    config: &Config,
+    guid: Option<&str>,
+    unit: Option<u8>,
+    selector: u8,
+    asserted_length: Option<u16>,
+) -> Result<(), LinkError> {
+    if selector == 0 || guid.is_some() == unit.is_some() {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "select exactly one XU GUID or unit and a non-zero selector",
+        ));
+    }
+    let (device, _, inventory, catalog, session) = selected_xu_context(config, false)?;
+    let profile = catalog
+        .matching(&device.identity, device.mode(), None)?
+        .map(|entry| &entry.profile);
+    let value = link_uvc_xu::read_value(
+        &session,
+        &inventory,
+        guid,
+        unit,
+        selector,
+        asserted_length,
+        profile,
+    )?;
+    if config.output == OutputFormat::Human {
+        println!("{}", value.hex);
+        println!("base64: {}", value.base64);
+        for (name, decoded) in &value.decoded {
+            println!("{name}: {decoded}");
+        }
+        Ok(())
+    } else {
+        emit_success(
+            config.output,
+            "xu.get",
+            Some(device_summary(&device)),
+            &value,
+        )
+    }
+}
+
+fn snapshot_standard_controls(
+    node: &NodeAssociation,
+) -> Result<BTreeMap<String, Value>, LinkError> {
+    let backend = link_v4l2::production::ControlDevice::open_read(&node.path)?;
+    Ok(backend
+        .controls()?
+        .into_iter()
+        .filter_map(|control| control.current.map(|value| (control.name, json!(value))))
+        .collect())
+}
+
+fn snapshot_profile_metadata(
+    entry: &link_profiles::CatalogProfile,
+) -> link_uvc_xu::SnapshotProfile {
+    link_uvc_xu::SnapshotProfile {
+        profile_id: entry.profile.profile_id.clone(),
+        checksum: entry.checksum.clone(),
+        status: match entry.profile.status {
+            link_profiles::ProfileStatus::ReadOnly => "read-only",
+            link_profiles::ProfileStatus::Experimental => "experimental",
+            link_profiles::ProfileStatus::Verified => "verified",
+        }
+        .into(),
+    }
+}
+
+fn capture_xu_snapshot(
+    config: &Config,
+    samples: u8,
+    interval: Duration,
+    notes: Vec<String>,
+    include_volatile: bool,
+) -> Result<link_uvc_xu::XuSnapshot, LinkError> {
+    let (device, node, inventory, catalog, session) = selected_xu_context(config, false)?;
+    let profile = catalog.matching(&device.identity, device.mode(), None)?;
+    link_uvc_xu::capture_snapshot(
+        &session,
+        &inventory,
+        link_uvc_xu::SnapshotRequest {
+            captured_unix_ms: now_unix_ms()?,
+            application_version: env!("CARGO_PKG_VERSION"),
+            device: link_uvc_xu::SnapshotDevice {
+                stable_id: device.identity.stable_id(),
+                model: device.model(),
+                usb_vid: device.identity.vendor_id,
+                usb_pid: device.identity.product_id,
+                bcd_device: device.identity.device_revision,
+                descriptor_sha256: device.identity.descriptor_sha256.clone(),
+            },
+            profile_metadata: profile.map(snapshot_profile_metadata),
+            profile: profile.map(|entry| &entry.profile),
+            stream_state: "closed-or-external",
+            notes,
+            standard_controls: snapshot_standard_controls(&node)?,
+            samples,
+            interval,
+            include_volatile,
+        },
+    )
+}
+
+fn run_xu_snapshot(
+    config: &Config,
+    output: &Path,
+    samples: u8,
+    interval: Duration,
+    notes: Vec<String>,
+    include_volatile: bool,
+) -> Result<(), LinkError> {
+    let snapshot = capture_xu_snapshot(config, samples, interval, notes, include_volatile)?;
+    link_uvc_xu::save_snapshot(output, &snapshot)?;
+    let result = json!({
+        "path": output,
+        "selectors": snapshot.selectors.len(),
+        "samples": samples,
+    });
+    if config.output == OutputFormat::Human {
+        println!(
+            "Saved {} selectors to {}",
+            snapshot.selectors.len(),
+            output.display()
+        );
+        Ok(())
+    } else {
+        emit_success(config.output, "xu.snapshot", None, &result)
+    }
+}
+
+fn run_xu_diff(config: &Config, before: &Path, after: &Path) -> Result<(), LinkError> {
+    let before = link_uvc_xu::load_snapshot(before)?;
+    let after = link_uvc_xu::load_snapshot(after)?;
+    let diff = link_uvc_xu::diff_snapshots(&before, &after)?;
+    if config.output == OutputFormat::Human {
+        println!(
+            "same_device={} descriptor_changed={} profile_changed={}",
+            diff.same_device, diff.descriptor_changed, diff.profile_changed
+        );
+        for selector in &diff.selectors {
+            println!(
+                "{} selector={} {} bytes_changed={}",
+                selector.guid,
+                selector.selector,
+                selector.status,
+                selector.bytes.len()
+            );
+            for byte in &selector.bytes {
+                println!(
+                    "  offset={} {:02x}->{:02x} xor={:02x} bits={:?}",
+                    byte.offset, byte.before, byte.after, byte.xor, byte.changed_bits
+                );
+            }
+        }
+        Ok(())
+    } else {
+        emit_success(config.output, "xu.diff", None, &diff)
+    }
+}
+
+fn run_xu_watch(
+    config: &Config,
+    interval: Duration,
+    include_volatile: bool,
+) -> Result<(), LinkError> {
+    ensure_watch_format(config.output)?;
+    let mut previous =
+        capture_xu_snapshot(config, 1, Duration::ZERO, Vec::new(), include_volatile)?;
+    loop {
+        thread::sleep(interval);
+        let current = capture_xu_snapshot(config, 1, Duration::ZERO, Vec::new(), include_volatile)?;
+        let diff = link_uvc_xu::diff_snapshots(&previous, &current)?;
+        if !diff.selectors.is_empty()
+            || diff.standard_controls_before != diff.standard_controls_after
+        {
+            match config.output {
+                OutputFormat::Human => {
+                    println!("{} selector change(s)", diff.selectors.len());
+                }
+                OutputFormat::Jsonl => emit_success(config.output, "xu.watch", None, &diff)?,
+                OutputFormat::Json => unreachable!("watch format validated"),
+            }
+        }
+        previous = current;
+    }
+}
+
+fn authorize_control_safety(class: SafetyClass, policy: &SafetyPolicy) -> Result<(), LinkError> {
+    match class {
+        SafetyClass::Normal => Ok(()),
+        SafetyClass::Firmware | SafetyClass::Boot | SafetyClass::Flash => {
+            policy.authorize(Operation::FirmwareWrite)
+        }
+        SafetyClass::Calibration => policy.authorize(Operation::CalibrationWrite),
+        SafetyClass::Motor => policy.authorize(Operation::MotorWrite),
+    }
+}
+
+fn run_xu_semantic_set(
+    config: &Config,
+    control_name: &str,
+    input: &str,
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    let (device, node, inventory, catalog, session) = selected_xu_context(config, true)?;
+    let stable_id = device.identity.stable_id();
+    let _lease = acquire_operation_lease(config, &stable_id, "xu.set")?;
+    #[cfg(feature = "gstreamer")]
+    let _media_lease = link_media::MediaLease::acquire(&stable_id, "xu.set")?;
+    let entry = catalog
+        .matching(&device.identity, device.mode(), None)?
+        .ok_or_else(|| {
+            LinkError::new(
+                ErrorKind::ProtocolProfileMismatch,
+                "no exact vendor profile matches the selected device",
+            )
+        })?;
+    SafetyPolicy::new(config.safety.clone())
+        .authorize(Operation::VendorProfileWrite(entry.state()))?;
+    if !entry.semantic_write_authorized() {
+        return Err(LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "semantic XU writes require a compiled-in trusted verified profile",
+        ));
+    }
+    let authorization = entry.authorized_control(control_name).ok_or_else(|| {
+        LinkError::new(
+            ErrorKind::CapabilityUnsupported,
+            "semantic XU control is not a writable authorized profile control",
+        )
+    })?;
+    let control = authorization.control();
+    let policy = SafetyPolicy::new(config.safety.clone());
+    authorize_control_safety(control.safety, &policy)?;
+    if control.verification != VerificationMethod::Readback {
+        return Err(LinkError::new(
+            ErrorKind::CapabilityUnsupported,
+            "semantic XU writes currently require direct readback verification",
+        )
+        .with_detail("verification", format!("{:?}", control.verification)));
+    }
+    let _stream = prepare_xu_stream(
+        control.stream_requirement,
+        &node.path,
+        config.timeout.get(),
+        dry_run,
+    )?;
+    let (guid, address) = link_uvc_xu::resolve_address(
+        &inventory,
+        Some(&control.entity_guid),
+        None,
+        control.selector,
+    )?;
+    let baseline = if control.readable || control.read_modify_write {
+        Some(session.get_current(address, Some(control.length))?.1)
+    } else {
+        None
+    };
+    let payload = link_profiles::encode_control(control, input, baseline.as_deref())?;
+    let rate_wait = link_uvc_xu::RateLimiter::from_process()?.enforce(
+        &format!("{stable_id}:{guid}:{}", control.selector),
+        Duration::from_millis(
+            control
+                .minimum_write_interval_ms
+                .max(config.safety.minimum_xu_write_interval_ms),
+        ),
+        config.timeout.get(),
+        dry_run,
+    )?;
+    let requested = link_profiles::decode_control(control, &payload)?;
+    let mut observed = None;
+    let mut verified = dry_run;
+    if !dry_run {
+        session.set_profiled(address, authorization, &payload)?;
+        let readback = session.get_current(address, Some(control.length))?.1;
+        observed = Some(link_profiles::decode_control(control, &readback)?);
+        verified = readback == payload;
+        if !verified {
+            if let Some(previous) = &baseline {
+                let _rollback = session.set_profiled(address, authorization, previous);
+            }
+            return Err(LinkError::new(
+                ErrorKind::ProtocolProfileMismatch,
+                "semantic XU write failed readback verification",
+            ));
+        }
+        complete_xu_stream_requirement(
+            control.stream_requirement,
+            &node.path,
+            config.timeout.get(),
+        )?;
+    }
+    let report = XuWriteReport {
+        control: Some(control.name.clone()),
+        guid,
+        unit: address.unit,
+        selector: address.selector,
+        length: control.length,
+        previous: baseline
+            .as_deref()
+            .map(|payload| link_profiles::decode_control(control, payload))
+            .transpose()?,
+        requested,
+        observed,
+        verified,
+        dry_run,
+        rate_limit_wait_ms: rate_wait.as_millis() as u64,
+        audit_path: None,
+    };
+    emit_xu_write_report(config, "xu.set", &device, &report)
+}
+
+#[cfg(feature = "gstreamer")]
+fn prepare_xu_stream(
+    requirement: link_profiles::StreamRequirement,
+    node: &str,
+    timeout: Duration,
+    dry_run: bool,
+) -> Result<Option<link_media::ProbeStream>, LinkError> {
+    if dry_run || requirement != link_profiles::StreamRequirement::Open {
+        return Ok(None);
+    }
+    link_media::ProbeStream::open(node, timeout).map(Some)
+}
+
+#[cfg(not(feature = "gstreamer"))]
+fn prepare_xu_stream(
+    requirement: link_profiles::StreamRequirement,
+    _node: &str,
+    _timeout: Duration,
+    _dry_run: bool,
+) -> Result<Option<()>, LinkError> {
+    match requirement {
+        link_profiles::StreamRequirement::Either | link_profiles::StreamRequirement::Closed => {
+            Ok(None)
+        }
+        link_profiles::StreamRequirement::Open => Err(LinkError::new(
+            ErrorKind::CapabilityUnsupported,
+            "profile-required open streams need a GStreamer-enabled build",
+        )),
+        link_profiles::StreamRequirement::Restart => Err(LinkError::new(
+            ErrorKind::CapabilityUnsupported,
+            "profile-required pipeline rebuilds need a GStreamer-enabled build",
+        )),
+    }
+}
+
+#[cfg(feature = "gstreamer")]
+fn complete_xu_stream_requirement(
+    requirement: link_profiles::StreamRequirement,
+    node: &str,
+    timeout: Duration,
+) -> Result<(), LinkError> {
+    if requirement == link_profiles::StreamRequirement::Restart {
+        link_media::probe_stream(node, timeout)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "gstreamer"))]
+fn complete_xu_stream_requirement(
+    _requirement: link_profiles::StreamRequirement,
+    _node: &str,
+    _timeout: Duration,
+) -> Result<(), LinkError> {
+    Ok(())
+}
+
+fn run_xu_raw_set(
+    config: &Config,
+    guid: &str,
+    selector: u8,
+    hex: &str,
+    dry_run: bool,
+    unsafe_xu: bool,
+) -> Result<(), LinkError> {
+    SafetyPolicy::new(config.safety.clone()).authorize(Operation::RawXuWrite {
+        feature_enabled: cfg!(feature = "research"),
+        acknowledged: unsafe_xu,
+        profile: link_profiles::ProfileState::Experimental,
+    })?;
+    let payload = link_uvc_xu::parse_hex(hex)?;
+    let (device, node, inventory, catalog, session) = selected_xu_context(config, true)?;
+    let stable_id = device.identity.stable_id();
+    let _lease = acquire_operation_lease(config, &stable_id, "xu.raw-set")?;
+    #[cfg(feature = "gstreamer")]
+    let _media_lease = link_media::MediaLease::acquire(&stable_id, "xu.raw-set")?;
+    let entry = catalog
+        .matching(&device.identity, device.mode(), None)?
+        .ok_or_else(|| {
+            LinkError::new(
+                ErrorKind::ProtocolProfileMismatch,
+                "raw XU writes require a known firmware and exact descriptor profile match",
+            )
+        })?;
+    SafetyPolicy::new(config.safety.clone()).authorize(Operation::RawXuWrite {
+        feature_enabled: cfg!(feature = "research"),
+        acknowledged: unsafe_xu,
+        profile: entry.state(),
+    })?;
+    if !entry.research_write_authorized() {
+        return Err(LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "matching profile does not authorize research writes",
+        ));
+    }
+    let control = entry
+        .profile
+        .controls_for_selector(guid, selector)
+        .into_iter()
+        .find(|control| control.writable && usize::from(control.length) == payload.len())
+        .ok_or_else(|| {
+            LinkError::new(
+                ErrorKind::UnsafeOperationDenied,
+                "raw XU payload is not classified by the exact matching profile",
+            )
+        })?;
+    let policy = SafetyPolicy::new(config.safety.clone());
+    authorize_control_safety(control.safety, &policy)?;
+    let _stream = prepare_xu_stream(
+        control.stream_requirement,
+        &node.path,
+        config.timeout.get(),
+        dry_run,
+    )?;
+    let (resolved_guid, address) =
+        link_uvc_xu::resolve_address(&inventory, Some(guid), None, selector)?;
+    let rate_wait = link_uvc_xu::RateLimiter::from_process()?.enforce(
+        &format!("{stable_id}:{resolved_guid}:{selector}"),
+        Duration::from_millis(
+            control
+                .minimum_write_interval_ms
+                .max(config.safety.minimum_xu_write_interval_ms),
+        ),
+        config.timeout.get(),
+        dry_run,
+    )?;
+    if !dry_run {
+        issue_research_raw_set(&session, address, control.length, &payload)?;
+        complete_xu_stream_requirement(
+            control.stream_requirement,
+            &node.path,
+            config.timeout.get(),
+        )?;
+    }
+    let audit = link_uvc_xu::RawWriteAudit::new(
+        link_uvc_xu::RawWriteContext {
+            stable_id: &stable_id,
+            profile_id: &entry.profile.profile_id,
+            profile_checksum: &entry.checksum,
+            descriptor_sha256: &device.identity.descriptor_sha256,
+            guid: &resolved_guid,
+            selector,
+        },
+        &payload,
+        dry_run,
+        if dry_run { "dry-run" } else { "submitted" },
+    );
+    let audit_path = link_uvc_xu::append_raw_audit(&audit)?;
+    let report = XuWriteReport {
+        control: None,
+        guid: resolved_guid,
+        unit: address.unit,
+        selector,
+        length: control.length,
+        previous: None,
+        requested: json!({"sha256": sha256(&payload), "length": payload.len()}),
+        observed: None,
+        verified: dry_run,
+        dry_run,
+        rate_limit_wait_ms: rate_wait.as_millis() as u64,
+        audit_path: Some(audit_path),
+    };
+    emit_xu_write_report(config, "xu.raw-set", &device, &report)
+}
+
+#[cfg(feature = "research")]
+fn issue_research_raw_set(
+    session: &link_uvc_xu::XuSession,
+    address: link_uvc_xu::XuAddress,
+    length: u16,
+    payload: &[u8],
+) -> Result<(), LinkError> {
+    session.raw_set(address, length, payload).map(|_| ())
+}
+
+#[cfg(not(feature = "research"))]
+fn issue_research_raw_set(
+    _session: &link_uvc_xu::XuSession,
+    _address: link_uvc_xu::XuAddress,
+    _length: u16,
+    _payload: &[u8],
+) -> Result<(), LinkError> {
+    Err(LinkError::new(
+        ErrorKind::UnsafeOperationDenied,
+        "raw XU support requires a research-enabled build",
+    ))
+}
+
+fn emit_xu_write_report(
+    config: &Config,
+    command: &'static str,
+    device: &DiscoveredDevice,
+    report: &XuWriteReport,
+) -> Result<(), LinkError> {
+    if config.output == OutputFormat::Human {
+        println!(
+            "{} {} selector={} length={} verified={}{}",
+            if report.dry_run {
+                "Would write"
+            } else {
+                "Wrote"
+            },
+            report.guid,
+            report.selector,
+            report.length,
+            report.verified,
+            report
+                .audit_path
+                .as_ref()
+                .map_or_else(String::new, |path| format!(" audit={}", path.display())),
+        );
+        Ok(())
+    } else {
+        emit_success(config.output, command, Some(device_summary(device)), report)
+    }
+}
+
+fn run_xu_recover(config: &Config, dry_run: bool) -> Result<(), LinkError> {
+    let (device, node) = selected_video_device(config)?;
+    let stable_id = device.identity.stable_id();
+    let _lease = acquire_operation_lease(config, &stable_id, "xu.recover")?;
+    #[cfg(feature = "gstreamer")]
+    let _media_lease = link_media::MediaLease::acquire(&stable_id, "xu.recover")?;
+    let parsed = link_uvc_xu::parse_descriptors(&device.descriptors)?;
+    if dry_run {
+        let report = XuRecoveryReport {
+            node: node.path,
+            handles_reopened: false,
+            selectors_checked: parsed
+                .extension_units
+                .iter()
+                .map(|entity| entity.selectors.len())
+                .sum(),
+            pipeline_rebuilt: false,
+            pipeline_note: "dry-run: no handle or stream was opened".into(),
+            dry_run: true,
+        };
+        return emit_xu_recovery(config, &device, &report);
+    }
+    let first = link_uvc_xu::inventory(Path::new(&node.path), &device.descriptors)?;
+    let second = link_uvc_xu::inventory(Path::new(&node.path), &device.descriptors)?;
+    if first != second {
+        return Err(LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "XU inventory changed while reopening the control handle",
+        ));
+    }
+    #[cfg(feature = "gstreamer")]
+    let (pipeline_rebuilt, pipeline_note) =
+        match link_media::probe_stream(&node.path, config.timeout.get()) {
+            Ok(()) => (
+                true,
+                "temporary no-output stream reached Playing and returned to Null".into(),
+            ),
+            Err(error) => (
+                false,
+                format!("pipeline rebuild was unavailable: {}", error.message()),
+            ),
+        };
+    #[cfg(not(feature = "gstreamer"))]
+    let (pipeline_rebuilt, pipeline_note) =
+        (false, "this build has no GStreamer pipeline backend".into());
+    let report = XuRecoveryReport {
+        node: node.path,
+        handles_reopened: true,
+        selectors_checked: second.iter().map(|entity| entity.selectors.len()).sum(),
+        pipeline_rebuilt,
+        pipeline_note,
+        dry_run: false,
+    };
+    emit_xu_recovery(config, &device, &report)
+}
+
+fn emit_xu_recovery(
+    config: &Config,
+    device: &DiscoveredDevice,
+    report: &XuRecoveryReport,
+) -> Result<(), LinkError> {
+    if config.output == OutputFormat::Human {
+        println!(
+            "Handle reopened: {}; selectors checked: {}; pipeline rebuilt: {} ({})",
+            report.handles_reopened,
+            report.selectors_checked,
+            report.pipeline_rebuilt,
+            report.pipeline_note
+        );
+        Ok(())
+    } else {
+        emit_success(
+            config.output,
+            "xu.recover",
+            Some(device_summary(device)),
+            report,
+        )
+    }
 }
 
 fn run_video(
@@ -5681,7 +6538,7 @@ fn run_image_reset(config: &Config, dry_run: bool, yes: bool) -> Result<(), Link
     finish_mutation(config, "image.reset", results, failures)
 }
 
-fn run_doctor(config: &Config) -> Result<(), LinkError> {
+fn run_doctor(config: &Config, bundle: Option<&Path>) -> Result<(), LinkError> {
     let mut checks = vec![DoctorCheck {
         name: "configuration".into(),
         status: DoctorStatus::Pass,
@@ -5734,8 +6591,8 @@ fn run_doctor(config: &Config) -> Result<(), LinkError> {
                 DoctorStatus::Warning
             },
             message: profile.profile_id.as_ref().map_or_else(
-                || "no exact read-only profile matched".into(),
-                |profile| format!("matched read-only profile {profile}"),
+                || "no exact vendor profile matched".into(),
+                |profile| format!("matched vendor profile {profile}"),
             ),
             details: serde_json::to_value(profile).unwrap_or_default(),
         });
@@ -5785,15 +6642,281 @@ fn run_doctor(config: &Config) -> Result<(), LinkError> {
         .iter()
         .all(|check| check.status != DoctorStatus::Fail);
     let report = DoctorReport { healthy, checks };
+    if let Some(destination) = bundle {
+        write_doctor_bundle(destination, &report, &devices, &catalog)?;
+    }
     if config.output == OutputFormat::Human {
         for check in &report.checks {
             println!("{:?}\t{}\t{}", check.status, check.name, check.message);
         }
         println!("Healthy: {}", report.healthy);
+        if let Some(destination) = bundle {
+            println!("Bundle: {}", destination.display());
+        }
     } else {
         emit_success(config.output, "doctor", None, &report)?;
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct DoctorBundleManifest {
+    schema_version: u32,
+    files: BTreeMap<String, String>,
+    redaction: BundleRedaction,
+}
+
+fn write_doctor_bundle(
+    destination: &Path,
+    report: &DoctorReport,
+    devices: &[DiscoveredDevice],
+    catalog: &ProfileCatalog,
+) -> Result<(), LinkError> {
+    if !destination
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().ends_with(".tar.zst"))
+    {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "doctor bundle path must end in .tar.zst",
+        ));
+    }
+    let parent = link_linux::validate_bundle_parent(destination)?;
+    let staging = tempfile::tempdir_in(parent).map_err(|error| {
+        doctor_bundle_error(
+            "failed to create diagnostic staging directory",
+            parent,
+            &error,
+        )
+    })?;
+    let mut files = BTreeMap::new();
+
+    let mut redacted_report = report.clone();
+    if let Some(check) = redacted_report
+        .checks
+        .iter_mut()
+        .find(|check| check.name == "preset-transactions")
+    {
+        let count = check
+            .details
+            .get("journals")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        check.details = json!({"count": count});
+    }
+    doctor_write_json(staging.path(), "doctor.json", &redacted_report, &mut files)?;
+    doctor_write_json(
+        staging.path(),
+        "host.json",
+        &json!({
+            "application_version": env!("CARGO_PKG_VERSION"),
+            "architecture": std::env::consts::ARCH,
+            "kernel_release": link_linux::kernel_release(),
+            "module_versions": {
+                "uvcvideo": fs::read_to_string("/sys/module/uvcvideo/version")
+                    .ok()
+                    .map(|value| value.trim().to_owned()),
+            },
+        }),
+        &mut files,
+    )?;
+    doctor_write_json(
+        staging.path(),
+        "runtime.json",
+        &json!({
+            "cli_version": env!("CARGO_PKG_VERSION"),
+            "daemon_version": null,
+            "media_pipeline_graph": null,
+            "test_results": null,
+        }),
+        &mut files,
+    )?;
+    let profiles = catalog
+        .profiles()
+        .iter()
+        .map(|entry| {
+            json!({
+                "profile_id": entry.profile.profile_id,
+                "checksum": entry.checksum,
+                "status": entry.profile.status,
+                "trust": match entry.trust {
+                    link_profiles::ProfileTrust::BuiltIn => "built-in",
+                    link_profiles::ProfileTrust::External => "external",
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    doctor_write_json(staging.path(), "profiles.json", &profiles, &mut files)?;
+
+    for (index, device) in devices.iter().enumerate() {
+        let probe = build_probe(device, catalog, false)
+            .and_then(|probe| serde_json::to_value(probe).map_err(doctor_serialization_error))
+            .unwrap_or_else(|error| {
+                json!({
+                    "error": {
+                        "code": error.kind().code(),
+                        "message": error.message(),
+                        "details": error.details(),
+                    }
+                })
+            });
+        doctor_write_json(
+            staging.path(),
+            &format!("probes/device-{index}.json"),
+            &probe,
+            &mut files,
+        )?;
+    }
+
+    let audit = AppPaths::from_process()?
+        .state
+        .join("audit/xu-writes.jsonl");
+    let mut omitted = vec![
+        "USB serial numbers".into(),
+        "USB string-descriptor values".into(),
+        "raw XU payload bytes".into(),
+        "kernel log (may contain unrelated host identifiers)".into(),
+        "general recent logs (the direct CLI has no persistent general log)".into(),
+        "daemon version (no daemon connection was established)".into(),
+        "media pipeline graph (no persistent daemon pipeline was available)".into(),
+        "test results (not executed by a diagnostic command)".into(),
+    ];
+    if audit.is_file() {
+        let metadata = fs::symlink_metadata(&audit).map_err(|error| {
+            doctor_bundle_error("failed to inspect XU audit log", &audit, &error)
+        })?;
+        if metadata.file_type().is_symlink() {
+            omitted.push("XU audit log (symbolic links are not followed)".into());
+        } else if metadata.len() > 1024 * 1024 {
+            omitted.push("XU audit log (larger than 1 MiB)".into());
+        } else {
+            let bytes = fs::read(&audit).map_err(|error| {
+                doctor_bundle_error("failed to read XU audit log", &audit, &error)
+            })?;
+            doctor_write_file(staging.path(), "audit/xu-writes.jsonl", &bytes, &mut files)?;
+        }
+    } else {
+        omitted.push("XU write audit log (no audit log exists)".into());
+    }
+
+    let manifest = DoctorBundleManifest {
+        schema_version: 1,
+        files,
+        redaction: BundleRedaction {
+            serial_included: false,
+            raw_descriptors_contain_string_values: false,
+            omitted,
+        },
+    };
+    doctor_write_json(
+        staging.path(),
+        "manifest.json",
+        &manifest,
+        &mut BTreeMap::new(),
+    )?;
+
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
+        doctor_bundle_error("failed to create diagnostic archive", parent, &error)
+    })?;
+    temporary
+        .as_file_mut()
+        .set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(|error| {
+            doctor_bundle_error("failed to secure diagnostic archive", destination, &error)
+        })?;
+    {
+        let encoder = zstd::Encoder::new(temporary.as_file_mut(), 3).map_err(|error| {
+            doctor_bundle_error(
+                "failed to initialize diagnostic compression",
+                destination,
+                &error,
+            )
+        })?;
+        let mut archive = tar::Builder::new(encoder);
+        archive
+            .append_dir_all(".", staging.path())
+            .map_err(|error| {
+                doctor_bundle_error("failed to assemble diagnostic archive", destination, &error)
+            })?;
+        let encoder = archive.into_inner().map_err(|error| {
+            doctor_bundle_error("failed to finalize diagnostic archive", destination, &error)
+        })?;
+        encoder.finish().map_err(|error| {
+            doctor_bundle_error(
+                "failed to finish diagnostic compression",
+                destination,
+                &error,
+            )
+        })?;
+    }
+    temporary.as_file().sync_all().map_err(|error| {
+        doctor_bundle_error(
+            "failed to synchronize diagnostic archive",
+            destination,
+            &error,
+        )
+    })?;
+    temporary.persist_noclobber(destination).map_err(|error| {
+        doctor_bundle_error(
+            "failed to finalize diagnostic archive",
+            destination,
+            &error.error,
+        )
+    })?;
+    Ok(())
+}
+
+fn doctor_write_json<T: ?Sized + Serialize>(
+    root: &Path,
+    relative: &str,
+    value: &T,
+    files: &mut BTreeMap<String, String>,
+) -> Result<(), LinkError> {
+    let mut bytes = serde_json::to_vec_pretty(value).map_err(doctor_serialization_error)?;
+    bytes.push(b'\n');
+    doctor_write_file(root, relative, &bytes, files)
+}
+
+fn doctor_write_file(
+    root: &Path,
+    relative: &str,
+    bytes: &[u8],
+    files: &mut BTreeMap<String, String>,
+) -> Result<(), LinkError> {
+    let path = root.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            doctor_bundle_error(
+                "failed to create diagnostic archive directory",
+                parent,
+                &error,
+            )
+        })?;
+    }
+    fs::write(&path, bytes).map_err(|error| {
+        doctor_bundle_error("failed to write diagnostic artifact", &path, &error)
+    })?;
+    files.insert(relative.into(), sha256(bytes));
+    Ok(())
+}
+
+fn doctor_serialization_error(error: serde_json::Error) -> LinkError {
+    LinkError::new(
+        ErrorKind::IoFailure,
+        "failed to serialize diagnostic artifact",
+    )
+    .with_detail("reason", error.to_string())
+}
+
+fn doctor_bundle_error(message: &'static str, path: &Path, error: &std::io::Error) -> LinkError {
+    let kind = if error.kind() == std::io::ErrorKind::PermissionDenied {
+        ErrorKind::PermissionDenied
+    } else {
+        ErrorKind::IoFailure
+    };
+    LinkError::new(kind, message)
+        .with_detail("path", path.display().to_string())
+        .with_detail("reason", error.to_string())
 }
 
 fn run_completion(config: &Config, shell: Shell) -> Result<(), LinkError> {

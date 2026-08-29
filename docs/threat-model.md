@@ -24,7 +24,7 @@ The physical camera, USB bus, kernel driver, local configuration, third-party pr
 | Threat | Required mitigation |
 |---|---|
 | Malformed descriptor, profile, config, or payload causes memory corruption or a crash | Strict length checks, bounded allocation, typed parsing, fuzz/property tests, and isolated unsafe ABI code |
-| A placeholder, mismatched, or unverified profile authorizes a write | No writable authorization type until full schema, descriptor, firmware, trust, and safety validation exists |
+| A placeholder, mismatched, or unverified profile authorizes a write | Strict schema and placeholder rejection, exact descriptor/firmware guards, loader-assigned trust, compiled-in verification for semantic writes, and independent safety classification |
 | Raw or rapid XU writes hang or re-enumerate the camera | Raw writes absent from normal builds, central authorization, exact lengths, conservative rate limits, and finite retries |
 | Driver detach, reset, firmware, flash, or calibration access damages availability | Deny by default; require separately reviewed, narrowly scoped workflows where the product allows them |
 | A non-gimbal device receives mechanical commands | Omit semantic movement commands, deny raw pan/tilt writes even during dry-run, and continuously test both policies |
@@ -42,15 +42,15 @@ The physical camera, USB bus, kernel driver, local configuration, third-party pr
 
 ## Current enforcement
 
-The compiled safety policy admits read-only operations and validated standard V4L2 control writes. It denies raw or unknown XU writes, profile-based vendor writes, driver detach, USB reset, firmware/flash/boot writes, calibration writes, and motor operations. Pan and tilt IDs remain readable inventory but are denied by the write backend. Configuration cannot enable a backend that is not compiled.
+The compiled safety policy admits read-only operations, validated standard V4L2 writes, and semantic XU writes only for compiled-in trusted verified profiles. Unknown XU writes, driver detach, USB reset, firmware/flash/boot writes, calibration writes, and motor operations are denied. The separately compiled research transport additionally requires explicit acknowledgement, configuration opt-in, an exact experimental/verified profile and payload classification, fresh device-reported length/capabilities, conservative pacing, and device/media leases. Pan and tilt IDs remain readable inventory but are denied by the standard write backend. Configuration cannot enable a backend that is not compiled.
 
-Linux discovery and control backends perform bounded device I/O through kernel UVC/V4L2 interfaces. The locally isolated ABI code uses kernel-sized structures and turns typed `errno` failures into stable errors. Mutations read previous values, prefer related-control transactions, verify readback, and report rollback outcomes. Discovery, watches, probes, and `doctor` remain read-only.
+Linux discovery and control backends perform bounded device I/O through kernel UVC/V4L2 interfaces. The locally isolated XU ABI code asserts the kernel structure layout, keeps one file descriptor open per transaction, obtains `GET_INFO` and little-endian `GET_LEN` before payload access, and turns typed `errno` failures into stable errors. Mutations read previous values, prefer related-control transactions, verify readback, and report rollback outcomes. Discovery, read watches, probes, snapshots, diffs, and `doctor` remain device-read-only; explicitly requested artifacts use no-clobber semantics and bounded destinations.
 
 Preset and direct media/control operations share a user-owned cross-process lease. Preset files use atomic no-clobber writes with owner-only directories and files. An apply journal is updated after each verified or rolled-back stage and removed only after success or complete restoration; incomplete journals block another apply and are reported by `doctor`.
 
 Typed GStreamer pipelines now accept video and audio buffers from selected kernel/PipeWire endpoints and write only explicit recording, snapshot, audio-capture, standard-output, playback, or RTP destinations. Pipeline text is never accepted from configuration or the command line. Binary standard output contains only media bytes; diagnostics use stderr. Single-file recordings and audio captures use same-directory temporary files and are renamed only after clean finalization. Monitoring selects an existing playback route and does not create a network listener.
 
-There is no daemon listener, general network listener, native SDK loading, raw XU write path, or profile write loader. Those boundaries require focused threat-model updates before implementation.
+There is no daemon listener, general network listener, or native SDK loading. External profiles are research-only input and cannot authorize semantic writes. Diagnostic archives are owner-only, no-clobber, checksummed, serial-redacted, and enumerate omitted fields; raw payloads are never added to their audit log.
 
 ## Review triggers
 

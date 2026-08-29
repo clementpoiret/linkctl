@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/clementpoiret/linkctl/schemas/xu-snapshot-v1.json",
+  "title": "linkctl XU snapshot v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "captured_unix_ms",
+    "application_version",
+    "device",
+    "profile",
+    "stream_state",
+    "notes",
+    "standard_controls",
+    "selectors"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "captured_unix_ms": {"type": "integer", "minimum": 0},
+    "application_version": {"type": "string", "minLength": 1},
+    "device": {"$ref": "#/$defs/device"},
+    "profile": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/profile"}
+      ]
+    },
+    "stream_state": {"type": "string", "minLength": 1},
+    "notes": {"type": "array", "items": {"type": "string"}},
+    "standard_controls": {"type": "object"},
+    "selectors": {"type": "array", "items": {"$ref": "#/$defs/selector"}}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stable_id",
+        "model",
+        "usb_vid",
+        "usb_pid",
+        "bcd_device",
+        "descriptor_sha256"
+      ],
+      "properties": {
+        "stable_id": {"type": "string", "minLength": 1},
+        "model": {"type": "string", "minLength": 1},
+        "usb_vid": {"type": "integer", "minimum": 0, "maximum": 65535},
+        "usb_pid": {"type": "integer", "minimum": 0, "maximum": 65535},
+        "bcd_device": {"type": "integer", "minimum": 0, "maximum": 65535},
+        "descriptor_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_id", "checksum", "status"],
+      "properties": {
+        "profile_id": {"type": "string", "minLength": 1},
+        "checksum": {"$ref": "#/$defs/sha256"},
+        "status": {"enum": ["read-only", "experimental", "verified"]}
+      }
+    },
+    "selector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "guid",
+        "unit",
+        "selector",
+        "length",
+        "info",
+        "samples_base64",
+        "volatility_mask_base64",
+        "decoded",
+        "issue"
+      ],
+      "properties": {
+        "guid": {
+          "type": "string",
+          "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+        },
+        "unit": {"type": "integer", "minimum": 1, "maximum": 255},
+        "selector": {"type": "integer", "minimum": 1, "maximum": 255},
+        "length": {"type": ["integer", "null"], "minimum": 1, "maximum": 65535},
+        "info": {"type": ["integer", "null"], "minimum": 0, "maximum": 255},
+        "samples_base64": {
+          "type": "array",
+          "items": {"type": "string", "contentEncoding": "base64"}
+        },
+        "volatility_mask_base64": {
+          "type": ["string", "null"],
+          "contentEncoding": "base64"
+        },
+        "decoded": {"type": "object"},
+        "issue": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

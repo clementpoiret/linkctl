@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "captured_unix_ms": 1,
+  "application_version": "fixture",
+  "device": {
+    "stable_id": "sanitized-device",
+    "model": "Sanitized fixture",
+    "usb_vid": 4660,
+    "usb_pid": 22136,
+    "bcd_device": 1,
+    "descriptor_sha256": "e34acca1dac62630fae71078db3176a3ca7b781afd026320516b82dc36a9a8e6"
+  },
+  "profile": null,
+  "stream_state": "closed",
+  "notes": ["Synthetic payload; no hardware identifiers"],
+  "standard_controls": {"brightness": 1},
+  "selectors": [
+    {
+      "guid": "11111111-1111-1111-1111-111111111111",
+      "unit": 1,
+      "selector": 1,
+      "length": 4,
+      "info": 1,
+      "samples_base64": ["AAEAAA=="],
+      "volatility_mask_base64": "AAAAAA==",
+      "decoded": {},
+      "issue": null
+    }
+  ]
+}
