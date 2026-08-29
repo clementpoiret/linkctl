@@ -47,6 +47,8 @@ The same Controller capture contains a separate exposure-curve protocol on selec
 
 On the Link 2C Pro, the official controller capture confirms that white balance uses the standard UVC Processing Unit controls exposed by V4L2, not a vendor Extension Unit. Automatic mode is `white_balance_automatic`; manual temperature is `white_balance_temperature`. The controller writes automatic mode off before setting a manual temperature. Its UI exercised 2000 K, 4800 K, and 10000 K, with 4800 K as its default selection. Linux target-hardware tests verified the same endpoints and three complete manual/automatic cycles, with 1 K steps reported by the live descriptor. `image status` reports the live mode and Kelvin value together, while the capability record derives its accepted range and step from that descriptor.
 
+Focus uses the standard UVC Camera Terminal controls `focus_automatic_continuous` and `focus_absolute`. The Controller capture confirms that manual focus disables autofocus before writing a direct 0–100 absolute value. The semantic command exposes this as a normalized 0.0–1.0 position derived from the live descriptor. Status reports autofocus/manual mode and normalized position together; JSON retains the underlying raw control descriptor and value. Linux hardware tests verified three endpoint/autofocus cycles, exact `0.37` conversion, rejection before write, and restoration of the original autofocus state.
+
 ## Digital zoom
 
 The Link 2C Pro exposes standard `zoom_absolute` from 100 through 400 in steps of one. `linkctl` renders those raw units as 1.00x through 4.00x and continues to validate the live descriptor rather than assuming that range for another device:

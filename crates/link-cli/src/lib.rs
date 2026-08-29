@@ -5566,6 +5566,30 @@ fn white_balance_status_value(automatic: Option<i64>, kelvin: Option<i64>) -> Op
     Some(Value::Object(status))
 }
 
+fn focus_status_value(
+    automatic: Option<i64>,
+    absolute: Option<i64>,
+    range: Option<(i64, i64)>,
+) -> Option<Value> {
+    if automatic.is_none() && absolute.is_none() {
+        return None;
+    }
+    let mut status = serde_json::Map::new();
+    if let Some(automatic) = automatic {
+        status.insert(
+            "mode".into(),
+            json!(if automatic == 0 { "manual" } else { "auto" }),
+        );
+    }
+    if let (Some(absolute), Some((minimum, maximum))) = (absolute, range)
+        && maximum > minimum
+    {
+        let position = (absolute - minimum) as f64 / (maximum - minimum) as f64;
+        status.insert("position".into(), json!(position));
+    }
+    Some(Value::Object(status))
+}
+
 fn exposure_status_value(
     mode: Option<Value>,
     iso: Option<Value>,
@@ -5641,6 +5665,39 @@ fn control_capabilities(
                         .find(|control| control.name == "white_balance_automatic")
                 })
                 .flatten();
+            let focus_absolute = (capability == "image.focus")
+                .then(|| {
+                    controls
+                        .iter()
+                        .find(|control| control.name == "focus_absolute")
+                })
+                .flatten();
+            let focus_automatic = (capability == "image.focus")
+                .then(|| {
+                    controls
+                        .iter()
+                        .find(|control| control.name == "focus_automatic_continuous")
+                })
+                .flatten();
+            let range = white_balance_temperature
+                .map(|control| SemanticRange {
+                    minimum: control.minimum as f64,
+                    maximum: control.maximum as f64,
+                    step: Some(control.step as f64),
+                    unit: "K".into(),
+                })
+                .or_else(|| {
+                    focus_absolute
+                        .filter(|control| control.maximum > control.minimum)
+                        .map(|control| SemanticRange {
+                            minimum: 0.0,
+                            maximum: 1.0,
+                            step: Some(
+                                control.step as f64 / (control.maximum - control.minimum) as f64,
+                            ),
+                            unit: "normalized".into(),
+                        })
+                });
             let available = control.is_some();
             (
                 capability.to_owned(),
@@ -5669,16 +5726,19 @@ fn control_capabilities(
                     source: control.as_ref().map(|control| CapabilitySource::V4l2 {
                         control: control.name.clone(),
                     }),
-                    range: white_balance_temperature.map(|control| SemanticRange {
-                        minimum: control.minimum as f64,
-                        maximum: control.maximum as f64,
-                        step: Some(control.step as f64),
-                        unit: "K".into(),
-                    }),
+                    range,
                     values: if capability == "image.white_balance" {
                         [
                             white_balance_automatic.map(|_| "auto".into()),
                             white_balance_temperature.map(|_| "manual".into()),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .collect()
+                    } else if capability == "image.focus" {
+                        [
+                            focus_automatic.map(|_| "auto".into()),
+                            focus_absolute.map(|_| "manual".into()),
                         ]
                         .into_iter()
                         .flatten()
@@ -5690,6 +5750,12 @@ fn control_capabilities(
                         white_balance_status_value(
                             white_balance_automatic.and_then(|control| control.current),
                             white_balance_temperature.and_then(|control| control.current),
+                        )
+                    } else if capability == "image.focus" {
+                        focus_status_value(
+                            focus_automatic.and_then(|control| control.current),
+                            focus_absolute.and_then(|control| control.current),
+                            focus_absolute.map(|control| (control.minimum, control.maximum)),
                         )
                     } else {
                         control
@@ -9560,9 +9626,9 @@ mod tests {
         Cli, ErrorKind, LinkError, TRANSACTION_SCHEMA_VERSION, TransactionOutcome, TransactionPlan,
         TransactionReport, TransactionStepKind, TransactionStepPlan, TransactionStepReport,
         TransactionStepStatus, exposure_compensation_status_value,
-        exposure_compensation_to_vendor_hundredths, exposure_status_value, parse_fps, parse_size,
-        parse_zoom_factor, profile_read_stream_requirement, record_rollback_result,
-        rollback_order_for, semantic_readback_matches, shutter_to_v4l2,
+        exposure_compensation_to_vendor_hundredths, exposure_status_value, focus_status_value,
+        parse_fps, parse_size, parse_zoom_factor, profile_read_stream_requirement,
+        record_rollback_result, rollback_order_for, semantic_readback_matches, shutter_to_v4l2,
         shutter_to_vendor_denominator, validate_preset_requirements, validate_vendor_iso,
         white_balance_status_value,
     };
@@ -9674,6 +9740,19 @@ mod tests {
             white_balance_status_value(Some(0), Some(2_000)),
             Some(serde_json::json!({"mode": "manual", "kelvin": 2_000}))
         );
+    }
+
+    #[test]
+    fn focus_status_reports_mode_and_normalized_position() {
+        assert_eq!(
+            focus_status_value(Some(1), Some(100), Some((0, 100))),
+            Some(serde_json::json!({"mode": "auto", "position": 1.0}))
+        );
+        assert_eq!(
+            focus_status_value(Some(0), Some(25), Some((0, 100))),
+            Some(serde_json::json!({"mode": "manual", "position": 0.25}))
+        );
+        assert_eq!(focus_status_value(None, None, Some((0, 100))), None);
     }
 
     #[test]

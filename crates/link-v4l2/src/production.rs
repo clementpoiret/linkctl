@@ -1148,6 +1148,14 @@ mod tests {
     }
 
     #[test]
+    fn manual_focus_disables_continuous_autofocus() {
+        assert_eq!(
+            manual_dependencies(bindings::V4L2_CID_FOCUS_ABSOLUTE),
+            [(bindings::V4L2_CID_FOCUS_AUTO, 0)]
+        );
+    }
+
+    #[test]
     fn invalid_driver_defaults_are_detectable_without_writing() {
         let mut control = integer();
         control.control_type = bindings::v4l2_ctrl_type_V4L2_CTRL_TYPE_MENU;

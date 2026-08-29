@@ -9,7 +9,7 @@ The following outcomes are established for the currently recorded landscape desc
 | Digital zoom | `zoom get/set/step/ramp/reset` | Verified standard V4L2 `zoom_absolute`, 1.00x–4.00x in 0.01x steps; write/readback/restore verified on hardware. |
 | Frame translation | `frame status/set/move/center` | Discovered, vendor transport unmapped. No pan/tilt substitution. |
 | Auto Framing | `auto-framing on/off/status/style` | Status, on/off, and Head/Half-body selection are verified for firmware `v0.2.9.8_build3`. No tracking-zone commands are exposed. |
-| Image pipeline | existing `image` commands plus `hdr`, `mirror`, and `flip` | Exposure auto/manual mode, ISO, shutter, exposure compensation, and HDR are verified for firmware `v0.2.9.8_build3`. White balance is verified through standard UVC controls. Other camera-native image items remain explicitly unmapped. |
+| Image pipeline | existing `image` commands plus `hdr`, `mirror`, and `flip` | Exposure auto/manual mode, ISO, shutter, exposure compensation, and HDR are verified for firmware `v0.2.9.8_build3`. White balance and focus are verified through standard UVC controls. Other camera-native image items remain explicitly unmapped. |
 | Pickup mode | `audio mode status/standard/wide/focus/original` | Discovered, transport unmapped. Host gain/mute/filter controls remain separate. |
 | Regular Whiteboard Mode | `mode whiteboard on/off/status` | Discovered, vendor transport unmapped. |
 | Gestures | `gesture status/enable/disable/set` | Discovered, global/per-gesture mappings pending. |
@@ -54,6 +54,12 @@ Selector 16 carries the Controller's exposure curve as three 255-byte writes per
 The reviewed controller capture confirms that white balance bypasses the vendor profile. It uses UVC Processing Unit entity 5: selector 11 is the one-byte automatic-mode control (`00` manual, `01` automatic), and selector 10 is the two-byte little-endian temperature control. The controller repeated every mode transition and each 2000 K, 4800 K, and 10000 K selection; manual selections disabled automatic mode before writing the temperature, and the session ended at 4800 K with automatic mode enabled.
 
 Linux exposes these as `white_balance_automatic` and `white_balance_temperature`. `linkctl` uses their live V4L2 descriptors for access, range validation, readback, and rollback. The target descriptor reports 2000–10000 K in 1 K steps. Manual temperature transactions disable automatic mode first and re-query the temperature descriptor after that prerequisite changes state. Hardware readback verified both endpoints, 4800 K, and three complete manual/automatic cycles; the final transaction restored 4800 K before enabling automatic mode. The measured semantic mutations completed in 0.21–0.36 seconds. No firmware-specific XU mapping is involved.
+
+## Focus mapping
+
+The reviewed `auto-focus.pcap` Controller capture (SHA-256 `da1bf61472b3ed002b4dcf3497b1c07dff52885ac404178453fd41afb0a1b670`) confirms that focus also bypasses the vendor profile. It uses UVC Camera Terminal entity 1: selector 8 is the one-byte autofocus control (`00` manual, `01` automatic), and selector 6 is the two-byte little-endian absolute-focus control. The Controller repeated three automatic/manual cycles, exercised the absolute endpoints, and finished with autofocus enabled. Manual transitions disabled autofocus before writing the absolute value.
+
+Linux exposes these controls as `focus_automatic_continuous` and `focus_absolute`. The target descriptor reports raw absolute focus from 0 through 100 in steps of one. `image focus manual` presents that as a reversible normalized 0.0–1.0 position, disables autofocus first, re-queries the formerly inactive absolute control, and verifies both writes. `image status` reports the live mode and normalized position together while retaining the raw descriptor and current value in JSON output. Target-hardware validation completed three `0.0 → 1.0 → auto` cycles, verified the intermediate `0.37` as raw `37`, and rejected out-of-range and non-finite values before writing. Mutations completed in 0.06–0.36 seconds, and the original raw `100` plus autofocus-enabled state were restored. No firmware-specific XU mapping is involved.
 
 ## Mapping checkpoint
 
