@@ -332,7 +332,11 @@ pub enum ImageCommand {
         command: ExposureCommand,
     },
     /// Set exposure compensation in EV.
-    ExposureCompensation { ev: f64 },
+    ExposureCompensation {
+        /// Compensation from -3.0 through +3.0 EV.
+        #[arg(allow_hyphen_values = true)]
+        ev: f64,
+    },
     /// Use `auto` or a Kelvin value such as `5000K`.
     WhiteBalance { value: String },
     /// Select automatic or normalized manual focus.
@@ -5580,6 +5584,11 @@ fn exposure_status_value(
     }))
 }
 
+fn exposure_compensation_status_value(raw_hundredths: Option<Value>) -> Option<Value> {
+    let raw_hundredths = raw_hundredths?.as_i64()?;
+    Some(json!(raw_hundredths as f64 / 100.0))
+}
+
 fn control_capabilities(
     device: &DiscoveredDevice,
     controls: Vec<ControlDescriptor>,
@@ -5946,6 +5955,12 @@ fn native_capabilities_for(
                 || unmapped_capability(&model, verified_at_unix_ms, evidence),
                 |(entry, control)| {
                     let read_verified = entry.semantic_read_verified();
+                    let range = (*name == "image.exposure_compensation").then(|| SemanticRange {
+                        minimum: -3.0,
+                        maximum: 3.0,
+                        step: Some(0.1),
+                        unit: "EV".into(),
+                    });
                     let current = if control.readable
                         && current_names.is_none_or(|names| names.contains(name))
                     {
@@ -5969,6 +5984,8 @@ fn native_capabilities_for(
                                 read_current("image.exposure.iso"),
                                 read_current("image.exposure.shutter-denominator"),
                             )
+                        } else if *name == "image.exposure_compensation" {
+                            exposure_compensation_status_value(read_current(name))
                         } else {
                             read_current(name)
                         }
@@ -6007,7 +6024,7 @@ fn native_capabilities_for(
                             selector: control.selector,
                             length: control.length,
                         }),
-                        range: None,
+                        range,
                         values: profile_values(control),
                         current,
                         control: None,
@@ -8120,6 +8137,44 @@ fn run_standard_exposure(
     }
 }
 
+fn run_standard_exposure_compensation(
+    config: &Config,
+    ev: f64,
+    dry_run: bool,
+    yes: bool,
+) -> Result<(), LinkError> {
+    run_semantic_builder(
+        config,
+        dry_run,
+        yes,
+        "image.exposure-compensation",
+        move |backend| {
+            let descriptor = backend.resolve("exposure_compensation")?;
+            let thousandths = (ev * 1000.0).round() as i64;
+            let raw = if descriptor.menu.is_empty() {
+                thousandths
+            } else {
+                descriptor
+                    .menu
+                    .iter()
+                    .find(|entry| entry.label.parse::<i64>().ok() == Some(thousandths))
+                    .map(|entry| entry.index)
+                    .ok_or_else(|| {
+                        LinkError::new(
+                            ErrorKind::InvalidInvocation,
+                            "requested exposure compensation is not advertised",
+                        )
+                        .with_detail("ev", ev)
+                    })?
+            };
+            Ok(vec![ControlRequest {
+                selector: descriptor.id.to_string(),
+                value: RequestedValue::Raw(raw),
+            }])
+        },
+    )
+}
+
 fn run_native_exposure(
     config: &Config,
     command: ExposureCommand,
@@ -8157,6 +8212,21 @@ fn run_native_exposure(
     }
 }
 
+fn run_native_exposure_compensation(
+    config: &Config,
+    ev: f64,
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    let raw_hundredths = exposure_compensation_to_vendor_hundredths(ev)?;
+    run_native_vendor_set(
+        config,
+        "image.exposure-compensation",
+        "image.exposure_compensation",
+        &raw_hundredths.to_string(),
+        dry_run,
+    )
+}
+
 fn run_image(
     config: &Config,
     backend_choice: Option<BackendChoice>,
@@ -8186,6 +8256,9 @@ fn run_image(
                 ],
             ),
             ImageCommand::Exposure { command } => run_native_exposure(config, command, dry_run),
+            ImageCommand::ExposureCompensation { ev } => {
+                run_native_exposure_compensation(config, ev, dry_run)
+            }
             ImageCommand::Hdr { value } => run_native_vendor_set(
                 config,
                 "image.hdr",
@@ -8240,36 +8313,18 @@ fn run_image(
                 result => result,
             }
         }
-        ImageCommand::ExposureCompensation { ev } => run_semantic_builder(
-            config,
-            dry_run,
-            yes,
-            "image.exposure-compensation",
-            move |backend| {
-                let descriptor = backend.resolve("exposure_compensation")?;
-                let thousandths = (ev * 1000.0).round() as i64;
-                let raw = if descriptor.menu.is_empty() {
-                    thousandths
-                } else {
-                    descriptor
-                        .menu
-                        .iter()
-                        .find(|entry| entry.label.parse::<i64>().ok() == Some(thousandths))
-                        .map(|entry| entry.index)
-                        .ok_or_else(|| {
-                            LinkError::new(
-                                ErrorKind::InvalidInvocation,
-                                "requested exposure compensation is not advertised",
-                            )
-                            .with_detail("ev", ev)
-                        })?
-                };
-                Ok(vec![ControlRequest {
-                    selector: descriptor.id.to_string(),
-                    value: RequestedValue::Raw(raw),
-                }])
-            },
-        ),
+        ImageCommand::ExposureCompensation { ev } => {
+            let standard = run_standard_exposure_compensation(config, ev, dry_run, yes);
+            match standard {
+                Err(error)
+                    if error.kind() == ErrorKind::CapabilityUnsupported
+                        && matches!(backend_choice, None | Some(BackendChoice::Auto)) =>
+                {
+                    run_native_exposure_compensation(config, ev, dry_run)
+                }
+                result => result,
+            }
+        }
         ImageCommand::WhiteBalance { value } => {
             if value.eq_ignore_ascii_case("auto") {
                 run_semantic_requests(
@@ -8624,6 +8679,30 @@ const VENDOR_ISO_MINIMUM: i64 = 100;
 const VENDOR_ISO_MAXIMUM: i64 = 3_200;
 const VENDOR_SHUTTER_DENOMINATOR_MINIMUM: i64 = 30;
 const VENDOR_SHUTTER_DENOMINATOR_MAXIMUM: i64 = 8_000;
+const VENDOR_EXPOSURE_COMPENSATION_MINIMUM_EV: f64 = -3.0;
+const VENDOR_EXPOSURE_COMPENSATION_MAXIMUM_EV: f64 = 3.0;
+const VENDOR_EXPOSURE_COMPENSATION_STEP_EV: f64 = 0.1;
+
+fn exposure_compensation_to_vendor_hundredths(ev: f64) -> Result<i64, LinkError> {
+    let tenths = ev * 10.0;
+    let rounded_tenths = tenths.round();
+    if ev.is_finite()
+        && (VENDOR_EXPOSURE_COMPENSATION_MINIMUM_EV..=VENDOR_EXPOSURE_COMPENSATION_MAXIMUM_EV)
+            .contains(&ev)
+        && (tenths - rounded_tenths).abs() <= 1e-9
+    {
+        Ok(rounded_tenths as i64 * 10)
+    } else {
+        Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "exposure compensation is outside the verified Controller range or step",
+        )
+        .with_detail("ev", ev)
+        .with_detail("minimum_ev", VENDOR_EXPOSURE_COMPENSATION_MINIMUM_EV)
+        .with_detail("maximum_ev", VENDOR_EXPOSURE_COMPENSATION_MAXIMUM_EV)
+        .with_detail("step_ev", VENDOR_EXPOSURE_COMPENSATION_STEP_EV))
+    }
+}
 
 fn validate_vendor_iso(iso: i64) -> Result<(), LinkError> {
     if (VENDOR_ISO_MINIMUM..=VENDOR_ISO_MAXIMUM).contains(&iso) {
@@ -9472,7 +9551,7 @@ fn parse_format_hint(value: &str) -> OutputFormat {
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
     use link_core::preset::PresetRequirements;
     use link_profiles::{ProfileCatalog, StreamRequirement};
     use serde_json::{Value, json};
@@ -9480,16 +9559,30 @@ mod tests {
     use super::{
         Cli, ErrorKind, LinkError, TRANSACTION_SCHEMA_VERSION, TransactionOutcome, TransactionPlan,
         TransactionReport, TransactionStepKind, TransactionStepPlan, TransactionStepReport,
-        TransactionStepStatus, exposure_status_value, parse_fps, parse_size, parse_zoom_factor,
-        profile_read_stream_requirement, record_rollback_result, rollback_order_for,
-        semantic_readback_matches, shutter_to_v4l2, shutter_to_vendor_denominator,
-        validate_preset_requirements, validate_vendor_iso, white_balance_status_value,
+        TransactionStepStatus, exposure_compensation_status_value,
+        exposure_compensation_to_vendor_hundredths, exposure_status_value, parse_fps, parse_size,
+        parse_zoom_factor, profile_read_stream_requirement, record_rollback_result,
+        rollback_order_for, semantic_readback_matches, shutter_to_v4l2,
+        shutter_to_vendor_denominator, validate_preset_requirements, validate_vendor_iso,
+        white_balance_status_value,
     };
 
     #[test]
     fn command_graph_excludes_mechanical_movement_commands() {
         let prohibited = ["pan", "tilt", "gimbal", "center-gimbal", "motor"];
         assert_command_names_are_absent(&Cli::command(), &prohibited);
+    }
+
+    #[test]
+    fn exposure_compensation_accepts_a_negative_positional_value() {
+        let parsed = Cli::try_parse_from(["linkctl", "image", "exposure-compensation", "-3"])
+            .expect("negative EV must parse without an option separator");
+        assert!(matches!(
+            parsed.command,
+            Some(super::Command::Image {
+                command: super::ImageCommand::ExposureCompensation { ev },
+            }) if ev == -3.0
+        ));
     }
 
     #[test]
@@ -9538,6 +9631,37 @@ mod tests {
             exposure_status_value(Some(json!("auto")), Some(json!(400)), Some(json!(0))),
             None
         );
+    }
+
+    #[test]
+    fn vendor_exposure_compensation_uses_hundredths_and_ui_steps() {
+        assert_eq!(
+            exposure_compensation_to_vendor_hundredths(-3.0).unwrap(),
+            -300
+        );
+        assert_eq!(
+            exposure_compensation_to_vendor_hundredths(-0.7).unwrap(),
+            -70
+        );
+        assert_eq!(exposure_compensation_to_vendor_hundredths(0.7).unwrap(), 70);
+        assert_eq!(
+            exposure_compensation_to_vendor_hundredths(3.0).unwrap(),
+            300
+        );
+        assert!(exposure_compensation_to_vendor_hundredths(-3.1).is_err());
+        assert!(exposure_compensation_to_vendor_hundredths(3.1).is_err());
+        assert!(exposure_compensation_to_vendor_hundredths(0.05).is_err());
+        assert!(exposure_compensation_to_vendor_hundredths(f64::NAN).is_err());
+
+        assert_eq!(
+            exposure_compensation_status_value(Some(json!(-300))),
+            Some(json!(-3.0))
+        );
+        assert_eq!(
+            exposure_compensation_status_value(Some(json!(70))),
+            Some(json!(0.7))
+        );
+        assert_eq!(exposure_compensation_status_value(None), None);
     }
 
     #[test]
@@ -9612,6 +9736,11 @@ mod tests {
         );
         assert_eq!(
             profile_read_stream_requirement(profile, Some(&["image.exposure"])).unwrap(),
+            Some(StreamRequirement::Open)
+        );
+        assert_eq!(
+            profile_read_stream_requirement(profile, Some(&["image.exposure_compensation"]),)
+                .unwrap(),
             Some(StreamRequirement::Open)
         );
     }

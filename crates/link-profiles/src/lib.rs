@@ -1637,6 +1637,31 @@ firmware = ["v1.2.3"]
         );
         assert!(matched.profile.control("image.exposure.curve").is_none());
 
+        let exposure_compensation = matched
+            .profile
+            .control("image.exposure_compensation")
+            .unwrap();
+        assert_eq!(exposure_compensation.selector, 9);
+        assert_eq!(exposure_compensation.length, 2);
+        assert_eq!(
+            exposure_compensation.stream_requirement,
+            super::StreamRequirement::Open
+        );
+        assert_eq!(exposure_compensation.stream_warmup_delay_ms, 1_000);
+        assert_eq!(exposure_compensation.verification_delay_ms, 250);
+        assert_eq!(
+            exposure_compensation.write_prelude,
+            super::WritePrelude::GetLengthTwice
+        );
+        assert_eq!(
+            decode_control(exposure_compensation, &[0xd4, 0xfe]).unwrap(),
+            json!(-300)
+        );
+        assert_eq!(
+            encode_control(exposure_compensation, "300", Some(&[0, 0])).unwrap(),
+            [0x2c, 0x01]
+        );
+
         let mut invalid_tolerance = matched.profile.clone();
         invalid_tolerance
             .controls

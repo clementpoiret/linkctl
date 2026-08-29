@@ -12,6 +12,8 @@ provenance = [
   "Linux UVCIOC_CTRL_QUERY validation on the same firmware and descriptor verified three HDR off-to-on cycles with d101/d501 readback, plus cross-bit preservation through d001/d401 while Smart Composition was off; the original d501 state was restored (2026-08-29)",
   "Link 2C Pro USBPcap exposure-mode capture on firmware v0.2.9.8_build3, SHA-256 9ba319c52b160a42cc7ba34664dcbd97b9106e85f0fb10d8c3ee8f4a7bafe8ad; repeated mode transitions established selector 30 values 1=manual and 2=auto, selector 25 as direct ISO, and selector 29 as the shutter denominator (2026-08-29)",
   "Linux hardware validation on the same firmware and descriptor verified 250-millisecond scalar readback, three complete manual/auto cycles, ISO 100/3200 and shutter 1/8000/requested 1/30 endpoints, intermediate and partial updates, reverse rollback after readback mismatches, and a final ISO 320 plus shutter 1/100 restoration sequence before returning to auto; fractional-rate shutters quantized one denominator lower while exact-rate values matched, and snapshot mean luma changed from 16.0 to 234.945 across the endpoint pair without exposure-curve writes (2026-08-29)",
+  "Link 2C Pro USBPcap exposure-compensation capture on firmware v0.2.9.8_build3, SHA-256 4579fac93178dee2dcd2b7473c965c11458c577185552e33534dad1872b99ab9; three repeated -3.0/0.0/+3.0 EV cycles established selector 9 as a signed little-endian hundredths-of-an-EV value with direct readback (2026-08-29)",
+  "Linux hardware validation on the same firmware and descriptor verified three complete -3.0/0.0/+3.0/0.0 EV cycles with 250-millisecond readback, exact +/-0.7 EV intermediates, pre-write rejection of out-of-range, off-step, and non-finite values, snapshot mean-luma movement from 57.4054 to 230.644 across the endpoints, and final restoration to 0.0 EV (2026-08-29)",
 ]
 
 [[match]]
@@ -183,6 +185,29 @@ readback_tolerance = 1
 persistence = "volatile"
 rollback = "readback"
 trace_ids = ["image-pipeline-1-exposure-mode-9ba319c52b16"]
+safety = "normal"
+
+[[controls]]
+name = "image.exposure_compensation"
+entity_guid = "faf1672d-b71b-4793-8c91-7b1c9b7f95f8"
+selector = 9
+length = 2
+readable = true
+writable = true
+codec = "signed"
+offset = 0
+width = 2
+byte_order = "little"
+verification = "readback"
+stream_requirement = "open"
+stream_format = { fourcc = "MJPG", width = 1920, height = 1080, fps_numerator = 30, fps_denominator = 1 }
+stream_warmup_delay_ms = 1000
+write_prelude = "get-length-twice"
+minimum_write_interval_ms = 250
+verification_delay_ms = 250
+persistence = "volatile"
+rollback = "readback"
+trace_ids = ["image-pipeline-1-exposure-compensation-4579fac93178"]
 safety = "normal"
 
 [[controls]]

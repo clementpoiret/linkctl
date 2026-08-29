@@ -9,7 +9,7 @@ The following outcomes are established for the currently recorded landscape desc
 | Digital zoom | `zoom get/set/step/ramp/reset` | Verified standard V4L2 `zoom_absolute`, 1.00x–4.00x in 0.01x steps; write/readback/restore verified on hardware. |
 | Frame translation | `frame status/set/move/center` | Discovered, vendor transport unmapped. No pan/tilt substitution. |
 | Auto Framing | `auto-framing on/off/status/style` | Status, on/off, and Head/Half-body selection are verified for firmware `v0.2.9.8_build3`. No tracking-zone commands are exposed. |
-| Image pipeline | existing `image` commands plus `hdr`, `mirror`, and `flip` | Exposure auto/manual mode, ISO, shutter, and HDR are verified for firmware `v0.2.9.8_build3`. White balance is verified through standard UVC controls. Other camera-native image items remain explicitly unmapped. |
+| Image pipeline | existing `image` commands plus `hdr`, `mirror`, and `flip` | Exposure auto/manual mode, ISO, shutter, exposure compensation, and HDR are verified for firmware `v0.2.9.8_build3`. White balance is verified through standard UVC controls. Other camera-native image items remain explicitly unmapped. |
 | Pickup mode | `audio mode status/standard/wide/focus/original` | Discovered, transport unmapped. Host gain/mute/filter controls remain separate. |
 | Regular Whiteboard Mode | `mode whiteboard on/off/status` | Discovered, vendor transport unmapped. |
 | Gestures | `gesture status/enable/disable/set` | Discovered, global/per-gesture mappings pending. |
@@ -42,6 +42,8 @@ The two profile controls therefore use masked read-modify-write encoding. `image
 ## Exposure mapping
 
 The reviewed Controller capture maps exposure controls on XU GUID `faf1672d-b71b-4793-8c91-7b1c9b7f95f8`. Selector 30 is a one-byte mode enum (`01` manual, `02` auto), selector 25 is a two-byte little-endian ISO value, and selector 29 is a two-byte little-endian shutter denominator. The trace exercised ISO 100, 320, and 3200 and shutter denominators 30, 100, 200, and 8000. Each scalar has direct `GET_CUR` readback, and writes use the Controller's double-`GET_LEN` prelude while video is open. Hardware tests found one-unit shutter quantization at fractional-rate values (30→29, 60→59, 120→119, and 240→239), while 31, 100, 125, 200, and 8000 read back exactly. The shutter profile therefore permits a numeric readback difference of at most one; every other mapped control still requires exact equality.
+
+Exposure compensation uses selector 9 as a two-byte signed little-endian value in hundredths of an EV. The Controller capture repeated `-300`, `0`, and `+300` three times for its -3.0, 0.0, and +3.0 EV positions. `image exposure-compensation` accepts that range in the UI's 0.1 EV steps, while status converts the direct raw readback back to EV. Automatic backend selection prefers a standard V4L2 exposure-compensation control when one is advertised.
 
 `image exposure manual` writes mode first and then only the supplied ISO or shutter fields. A failure restores attempted controls in reverse order. `image exposure auto` changes only the mode. Automatic backend selection continues to prefer standard V4L2 exposure controls when they exist. The combined status value reports `mode`, `iso`, and a fractional `shutter` string.
 
