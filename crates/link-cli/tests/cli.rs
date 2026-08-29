@@ -1,4 +1,8 @@
-use std::process::{Command, Output};
+use std::{
+    fs,
+    path::Path,
+    process::{Command, Output},
+};
 
 use serde_json::Value;
 
@@ -21,6 +25,19 @@ fn run_with_environment(arguments: &[&str], name: &str, value: &str) -> Output {
         .expect("linkctl should execute")
 }
 
+fn run_with_xdg(arguments: &[&str], root: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_linkctl"))
+        .args(arguments)
+        .env_remove("LINKCTL_FORMAT")
+        .env_remove("LINKCTL_CONFIG")
+        .env_remove("LINKCTL_DEVICE")
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("XDG_RUNTIME_DIR", root.join("runtime"))
+        .output()
+        .expect("linkctl should execute")
+}
+
 #[test]
 fn help_and_version_advertise_only_implemented_commands() {
     let help = run(&["--help"]);
@@ -36,6 +53,7 @@ fn help_and_version_advertise_only_implemented_commands() {
     assert!(stdout.contains("snapshot"));
     assert!(stdout.contains("capture"));
     assert!(stdout.contains("record"));
+    assert!(stdout.contains("preset"));
     assert!(stdout.contains("doctor"));
     assert!(stdout.contains("completion"));
 
@@ -44,6 +62,84 @@ fn help_and_version_advertise_only_implemented_commands() {
 
     let unsafe_help = run(&["--unsafe-xu", "--help"]);
     assert!(unsafe_help.status.success());
+}
+
+#[test]
+fn preset_help_and_local_store_commands_are_hardware_free() {
+    let help = run(&["preset", "--help"]);
+    assert!(help.status.success());
+    let stdout = String::from_utf8(help.stdout).expect("UTF-8 help");
+    for command in [
+        "save", "apply", "list", "show", "delete", "export", "import",
+    ] {
+        assert!(stdout.contains(command));
+    }
+
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let input = directory.path().join("input.toml");
+    fs::write(
+        &input,
+        r#"schema_version = 1
+name = "local-test"
+
+[requirements]
+model = "Insta360 Link 2C Pro"
+fallback = "fail"
+
+[standard_controls]
+brightness = 50
+"#,
+    )
+    .expect("write import fixture");
+    let input = input.to_string_lossy();
+    let imported = run_with_xdg(
+        &["--format", "json", "preset", "import", &input],
+        directory.path(),
+    );
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    let value: Value = serde_json::from_slice(&imported.stdout).expect("JSON import");
+    assert_eq!(value["command"], "preset.import");
+    assert_eq!(value["result"]["name"], "local-test");
+
+    let listed = run_with_xdg(&["--format", "json", "preset", "list"], directory.path());
+    let value: Value = serde_json::from_slice(&listed.stdout).expect("JSON list");
+    assert_eq!(value["result"].as_array().unwrap().len(), 1);
+
+    let exported = run_with_xdg(&["preset", "export", "local-test", "-"], directory.path());
+    assert!(exported.status.success());
+    assert!(String::from_utf8_lossy(&exported.stdout).contains("brightness = 50"));
+    assert!(exported.stderr.is_empty());
+
+    let deleted = run_with_xdg(
+        &["--format", "json", "preset", "delete", "local-test"],
+        directory.path(),
+    );
+    assert!(deleted.status.success());
+    let listed = run_with_xdg(&["--format", "json", "preset", "list"], directory.path());
+    let value: Value = serde_json::from_slice(&listed.stdout).expect("JSON list");
+    assert!(value["result"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn published_json_schemas_are_valid_documents() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for relative in [
+        "docs/schemas/envelope-v1.json",
+        "docs/schemas/preset-v1.json",
+        "docs/schemas/transaction-v1.json",
+    ] {
+        let path = root.join(relative);
+        let bytes = fs::read(&path).unwrap_or_else(|error| {
+            panic!("failed to read {}: {error}", path.display());
+        });
+        serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|error| {
+            panic!("invalid JSON schema {}: {error}", path.display());
+        });
+    }
 }
 
 #[test]

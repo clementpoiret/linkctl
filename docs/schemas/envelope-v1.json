@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/clementpoiret/linkctl/schemas/envelope-v1.json",
+  "title": "linkctl command envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "ok", "command", "device", "result", "error"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "command": {"type": "string", "minLength": 1},
+    "device": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["stable_id", "model"],
+          "properties": {
+            "stable_id": {"type": "string"},
+            "model": {"type": "string"}
+          }
+        }
+      ]
+    },
+    "result": true,
+    "error": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "exit_code", "details"],
+          "properties": {
+            "code": {"type": "string"},
+            "message": {"type": "string"},
+            "exit_code": {"type": "integer", "minimum": 2, "maximum": 14},
+            "details": {"type": "object"}
+          }
+        }
+      ]
+    }
+  }
+}

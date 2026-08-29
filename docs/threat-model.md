@@ -29,6 +29,8 @@ The physical camera, USB bus, kernel driver, local configuration, third-party pr
 | Driver detach, reset, firmware, flash, or calibration access damages availability | Deny by default; require separately reviewed, narrowly scoped workflows where the product allows them |
 | A non-gimbal device receives mechanical commands | Omit semantic movement commands, deny raw pan/tilt writes even during dry-run, and continuously test both policies |
 | A malformed or stale standard-control request changes an unintended value | Resolve against fresh extended-control metadata, validate type/range/step/menu and writability, read before writing, verify readback, and attempt bounded rollback |
+| A malformed or model-incompatible preset partially changes a camera | Strict versioned parsing, exact model/optional USB guards, complete preflight, per-device leases, dependency ordering, verification, reverse rollback, and a crash-visible recovery journal |
+| A preset leaks stream credentials | The current preset schema has no recording/stream target or inline credential field; unknown fields fail and future integrations must use secret references |
 | A multi-device mutation changes cameras unintentionally | Require an explicit `--device all --yes` combination and report each device independently |
 | Machine output or logs leak serials, paths, credentials, microphone levels, or media | Redact identifiers by default, keep logs on stderr, never log secrets or media buffers, and emit only explicitly requested aggregate audio levels |
 | A local process impersonates or controls the daemon | User-owned socket permissions, peer-credential checks, and protocol-version negotiation before requests |
@@ -43,6 +45,8 @@ The physical camera, USB bus, kernel driver, local configuration, third-party pr
 The compiled safety policy admits read-only operations and validated standard V4L2 control writes. It denies raw or unknown XU writes, profile-based vendor writes, driver detach, USB reset, firmware/flash/boot writes, calibration writes, and motor operations. Pan and tilt IDs remain readable inventory but are denied by the write backend. Configuration cannot enable a backend that is not compiled.
 
 Linux discovery and control backends perform bounded device I/O through kernel UVC/V4L2 interfaces. The locally isolated ABI code uses kernel-sized structures and turns typed `errno` failures into stable errors. Mutations read previous values, prefer related-control transactions, verify readback, and report rollback outcomes. Discovery, watches, probes, and `doctor` remain read-only.
+
+Preset and direct media/control operations share a user-owned cross-process lease. Preset files use atomic no-clobber writes with owner-only directories and files. An apply journal is updated after each verified or rolled-back stage and removed only after success or complete restoration; incomplete journals block another apply and are reported by `doctor`.
 
 Typed GStreamer pipelines now accept video and audio buffers from selected kernel/PipeWire endpoints and write only explicit recording, snapshot, audio-capture, standard-output, playback, or RTP destinations. Pipeline text is never accepted from configuration or the command line. Binary standard output contains only media bytes; diagnostics use stderr. Single-file recordings and audio captures use same-directory temporary files and are renamed only after clean finalization. Monitoring selects an existing playback route and does not create a network listener.
 

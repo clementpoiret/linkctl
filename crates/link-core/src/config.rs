@@ -306,6 +306,8 @@ pub struct ConfigPaths {
     pub user: Option<PathBuf>,
     /// Explicit user configuration, which replaces `user` and is required.
     pub explicit: Option<PathBuf>,
+    /// Optional per-device user configuration.
+    pub device: Option<PathBuf>,
 }
 
 impl ConfigPaths {
@@ -325,6 +327,7 @@ impl ConfigPaths {
             system: Some(PathBuf::from("/etc/linkctl/config.toml")),
             user: user_base.map(|base| base.join("linkctl/config.toml")),
             explicit,
+            device: None,
         }
     }
 }
@@ -362,6 +365,34 @@ impl ConfigLoader {
         self
     }
 
+    /// Add the default per-device layer for one resolved stable identifier.
+    pub fn with_device(mut self, stable_id: &str) -> Result<Self, LinkError> {
+        validate_stable_id(stable_id)?;
+        let user_base = self
+            .environment
+            .get("XDG_CONFIG_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                self.environment
+                    .get("HOME")
+                    .filter(|value| !value.is_empty())
+                    .map(|value| PathBuf::from(value).join(".config"))
+            })
+            .ok_or_else(|| {
+                LinkError::new(
+                    ErrorKind::InvalidInvocation,
+                    "cannot resolve per-device configuration directory",
+                )
+            })?;
+        self.paths.device = Some(
+            user_base
+                .join("linkctl/devices")
+                .join(format!("{stable_id}.toml")),
+        );
+        Ok(self)
+    }
+
     /// Build a loader from the current process environment.
     #[must_use]
     pub fn from_process(explicit: Option<PathBuf>, overrides: ConfigOverrides) -> Self {
@@ -387,6 +418,9 @@ impl ConfigLoader {
             apply_required_file(&mut config, path)?;
         } else if let Some(path) = &self.paths.user {
             apply_optional_file(&mut config, path)?;
+        }
+        if let Some(path) = &self.paths.device {
+            apply_optional_device_file(&mut config, path)?;
         }
 
         apply_environment(&mut config, &self.environment)?;
@@ -443,6 +477,14 @@ fn apply_optional_file(config: &mut Config, path: &Path) -> Result<(), LinkError
     }
 }
 
+fn apply_optional_device_file(config: &mut Config, path: &Path) -> Result<(), LinkError> {
+    match fs::read_to_string(path) {
+        Ok(contents) => apply_device_file_contents(config, path, &contents),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(file_error(path, &error)),
+    }
+}
+
 fn apply_required_file(config: &mut Config, path: &Path) -> Result<(), LinkError> {
     let contents = fs::read_to_string(path).map_err(|error| file_error(path, &error))?;
     apply_file_contents(config, path, &contents)
@@ -464,6 +506,44 @@ fn apply_file_contents(config: &mut Config, path: &Path, contents: &str) -> Resu
         .with_detail("supported", u64::from(SCHEMA_VERSION)));
     }
 
+    apply_layer(config, layer);
+    Ok(())
+}
+
+fn apply_device_file_contents(
+    config: &mut Config,
+    path: &Path,
+    contents: &str,
+) -> Result<(), LinkError> {
+    let layer: ConfigLayer = toml::from_str(contents).map_err(|error| {
+        LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "invalid per-device configuration file",
+        )
+        .with_detail("path", path.display().to_string())
+        .with_detail("reason", error.to_string())
+    })?;
+    if layer.schema_version != SCHEMA_VERSION {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "unsupported per-device configuration schema",
+        )
+        .with_detail("path", path.display().to_string())
+        .with_detail("requested", u64::from(layer.schema_version))
+        .with_detail("supported", u64::from(SCHEMA_VERSION)));
+    }
+    if layer.default_device.is_some()
+        || layer.output.is_some()
+        || layer.profile_dir.is_some()
+        || layer.log_level.is_some()
+        || layer.no_color.is_some()
+    {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "per-device configuration contains a process-wide setting",
+        )
+        .with_detail("path", path.display().to_string()));
+    }
     apply_layer(config, layer);
     Ok(())
 }
@@ -659,6 +739,24 @@ fn file_error(path: &Path, error: &io::Error) -> LinkError {
         .with_detail("reason", error.to_string())
 }
 
+fn validate_stable_id(stable_id: &str) -> Result<(), LinkError> {
+    if !stable_id.is_empty()
+        && stable_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        && stable_id != "."
+        && stable_id != ".."
+    {
+        Ok(())
+    } else {
+        Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "invalid stable device identifier for configuration lookup",
+        )
+        .with_detail("stable_id", stable_id.to_owned()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeMap, fs, time::Duration};
@@ -712,6 +810,7 @@ mod tests {
             system: Some(system),
             user: Some(user),
             explicit: None,
+            device: None,
         })
         .with_environment(environment)
         .with_overrides(overrides)
@@ -736,6 +835,7 @@ mod tests {
             system: None,
             user: Some(user),
             explicit: Some(explicit),
+            device: None,
         })
         .load()
         .expect("configuration should load");
@@ -756,6 +856,7 @@ mod tests {
                 system: None,
                 user: None,
                 explicit: Some(path),
+                device: None,
             })
             .load()
             .expect_err("configuration must be rejected");
@@ -770,6 +871,7 @@ mod tests {
             system: None,
             user: None,
             explicit: Some(directory.path().join("missing.toml")),
+            device: None,
         })
         .load()
         .expect_err("missing explicit config must fail");
@@ -787,6 +889,38 @@ mod tests {
             .load()
             .expect_err("unknown variable must fail");
 
+        assert_eq!(error.kind(), ErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn per_device_layer_precedes_environment_and_rejects_process_settings() {
+        let directory = tempdir().expect("temporary directory");
+        let system = directory.path().join("system.toml");
+        let user = directory.path().join("user.toml");
+        let device = directory.path().join("device.toml");
+        fs::write(&system, "schema_version = 1\ntimeout = \"4s\"\n").unwrap();
+        fs::write(&user, "schema_version = 1\ntimeout = \"5s\"\n").unwrap();
+        fs::write(&device, "schema_version = 1\ntimeout = \"6s\"\n").unwrap();
+        let config = ConfigLoader::new(ConfigPaths {
+            system: Some(system),
+            user: Some(user),
+            explicit: None,
+            device: Some(device.clone()),
+        })
+        .with_environment(BTreeMap::from([("LINKCTL_TIMEOUT".into(), "7s".into())]))
+        .load()
+        .unwrap();
+        assert_eq!(config.timeout.get(), Duration::from_secs(7));
+
+        fs::write(&device, "schema_version = 1\noutput = \"json\"\n").unwrap();
+        let error = ConfigLoader::new(ConfigPaths {
+            system: None,
+            user: None,
+            explicit: None,
+            device: Some(device),
+        })
+        .load()
+        .expect_err("process-wide device setting must fail");
         assert_eq!(error.kind(), ErrorKind::InvalidInvocation);
     }
 }

@@ -8,8 +8,11 @@ pub mod error;
 pub mod logging;
 pub mod media;
 pub mod output;
+pub mod paths;
+pub mod preset;
 pub mod probe;
 pub mod safety;
+pub mod transaction;
 
 pub use error::{ErrorKind, LinkError, ProcessExit};
 

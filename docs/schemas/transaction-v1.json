@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/clementpoiret/linkctl/schemas/transaction-v1.json",
+  "title": "linkctl preset transaction report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "plan", "outcome", "steps", "rollback_attempted", "rollback_failures", "journal"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "transaction_id", "preset", "stable_id", "dry_run", "restart_required", "stream_restart_required", "rollback_feasible", "steps"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "transaction_id": {"type": "string", "pattern": "^tx-"},
+        "preset": {"type": "string"},
+        "stable_id": {"type": "string"},
+        "dry_run": {"type": "boolean"},
+        "restart_required": {"type": "boolean"},
+        "stream_restart_required": {"type": "boolean"},
+        "rollback_feasible": {"type": "boolean"},
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["sequence", "kind", "backend", "previous", "requested", "reversible", "no_op"],
+            "properties": {
+              "sequence": {"type": "integer", "minimum": 0},
+              "kind": {"enum": ["video-format", "control-prerequisite", "standard-controls", "audio-gain", "audio-mute"]},
+              "backend": {"type": "string"},
+              "previous": true,
+              "requested": true,
+              "reversible": {"type": "boolean"},
+              "no_op": {"type": "boolean"}
+            }
+          }
+        }
+      }
+    },
+    "outcome": {"enum": ["planned", "in-progress", "completed", "rolled-back", "partial"]},
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sequence", "status", "observed", "error"],
+        "properties": {
+          "sequence": {"type": "integer", "minimum": 0},
+          "status": {"enum": ["pending", "skipped", "applied", "verified", "failed", "rolled-back", "rollback-failed"]},
+          "observed": true,
+          "error": true
+        }
+      }
+    },
+    "rollback_attempted": {"type": "boolean"},
+    "rollback_failures": {"type": "array", "items": {"type": "string"}},
+    "journal": {"type": ["string", "null"]}
+  }
+}

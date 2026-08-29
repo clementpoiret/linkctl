@@ -1,7 +1,7 @@
 //! Parser and shell-facing behavior for the `linkctl` binary.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
@@ -31,11 +31,21 @@ use link_core::{
     logging,
     media::VideoTuple,
     output::{DeviceSummary, Envelope},
+    paths::AppPaths,
+    preset::{
+        PRESET_SCHEMA_VERSION, Preset, PresetAudio, PresetCategory, PresetRequirements,
+        PresetStore, PresetSummary, PresetVideo,
+    },
     probe::{
         DeviceListEntry, DeviceMode, HostReport, NodeAssociation, ProbeIssue, ProbeReport,
         Rational, VideoNodeKind,
     },
     safety::{Operation, SafetyPolicy},
+    transaction::{
+        DeviceLease, JournalStore, RecoveryJournal, TRANSACTION_SCHEMA_VERSION, TransactionOutcome,
+        TransactionPlan, TransactionReport, TransactionStepKind, TransactionStepPlan,
+        TransactionStepReport, TransactionStepStatus, new_transaction_id,
+    },
 };
 use link_linux::DiscoveredDevice;
 use link_profiles::ProfileCatalog;
@@ -144,6 +154,11 @@ pub enum Command {
     Audio {
         #[command(subcommand)]
         command: AudioCommand,
+    },
+    /// Save, inspect, and transactionally apply local camera presets.
+    Preset {
+        #[command(subcommand)]
+        command: PresetCommand,
     },
     /// Capture one or more JPEG, PNG, or raw compressed frames.
     #[cfg(feature = "gstreamer")]
@@ -390,6 +405,58 @@ pub enum AudioCommand {
     /// Monitor a capture source through a playback sink.
     #[cfg(feature = "gstreamer")]
     Monitor(AudioMonitorArgs),
+}
+
+/// Local preset operations.
+#[derive(Clone, Debug, Subcommand)]
+pub enum PresetCommand {
+    /// Capture selected live state into a new local preset.
+    Save {
+        name: String,
+        /// Optional human-readable description.
+        #[arg(long)]
+        description: Option<String>,
+        /// Comma-separated state groups to capture instead of all implemented groups.
+        #[arg(long, value_enum, value_delimiter = ',')]
+        include: Vec<PresetCategoryChoice>,
+        /// Comma-separated state groups removed after inclusion.
+        #[arg(long, value_enum, value_delimiter = ',')]
+        exclude: Vec<PresetCategoryChoice>,
+    },
+    /// Validate and transactionally apply a named preset.
+    Apply { name: String },
+    /// List local presets in deterministic name order.
+    List,
+    /// Show one parsed preset.
+    Show { name: String },
+    /// Delete one explicitly named preset.
+    Delete { name: String },
+    /// Export canonical TOML to a new file, or `-` for standard output.
+    Export { name: String, output: PathBuf },
+    /// Validate and import a preset without replacing an existing name.
+    Import { file: PathBuf },
+}
+
+/// Implemented preset capture groups.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, ValueEnum)]
+pub enum PresetCategoryChoice {
+    Video,
+    Image,
+    Zoom,
+    Controls,
+    Audio,
+}
+
+impl From<PresetCategoryChoice> for PresetCategory {
+    fn from(value: PresetCategoryChoice) -> Self {
+        match value {
+            PresetCategoryChoice::Video => Self::Video,
+            PresetCategoryChoice::Image => Self::Image,
+            PresetCategoryChoice::Zoom => Self::Zoom,
+            PresetCategoryChoice::Controls => Self::Controls,
+            PresetCategoryChoice::Audio => Self::Audio,
+        }
+    }
 }
 
 /// Optional host audio processing presets.
@@ -803,7 +870,12 @@ pub fn run(arguments: Vec<OsString>) -> u8 {
         log_level: cli.log_level.map(Into::into),
         no_color: cli.no_color.then_some(true),
     };
-    let config = match ConfigLoader::from_process(cli.config.clone(), overrides).load() {
+    let loader = ConfigLoader::from_process(cli.config.clone(), overrides);
+    let config = match loader.clone().load() {
+        Ok(config) => config,
+        Err(error) => return emit_link_error(format_hint, &error),
+    };
+    let config = match load_selected_device_config(&loader, config, cli.command.as_ref()) {
         Ok(config) => config,
         Err(error) => return emit_link_error(format_hint, &error),
     };
@@ -859,6 +931,7 @@ pub fn run(arguments: Vec<OsString>) -> u8 {
         }
         Some(Command::Video { command }) => run_video(&config, cli.backend, command, cli.dry_run),
         Some(Command::Audio { command }) => run_audio(&config, cli.backend, command, cli.dry_run),
+        Some(Command::Preset { command }) => run_preset(&config, cli.backend, command, cli.dry_run),
         #[cfg(feature = "gstreamer")]
         Some(Command::Snapshot(arguments)) => {
             run_snapshot(&config, cli.backend, arguments, cli.dry_run)
@@ -887,6 +960,58 @@ pub fn run(arguments: Vec<OsString>) -> u8 {
     }
 }
 
+fn load_selected_device_config(
+    loader: &ConfigLoader,
+    base: Config,
+    command: Option<&Command>,
+) -> Result<Config, LinkError> {
+    if !command_uses_device_defaults(command) || base.default_device.as_deref() == Some("all") {
+        return Ok(base);
+    }
+    let devices = discovered_devices()?;
+    let selected = if let Some(selector) = base.default_device.as_deref() {
+        link_linux::select_devices(&devices, selector)?
+    } else if devices.len() == 1 {
+        vec![&devices[0]]
+    } else {
+        return Ok(base);
+    };
+    match selected.as_slice() {
+        [device] => loader
+            .clone()
+            .with_device(&device.identity.stable_id())?
+            .load(),
+        _ => Ok(base),
+    }
+}
+
+fn command_uses_device_defaults(command: Option<&Command>) -> bool {
+    match command {
+        Some(Command::Control { .. } | Command::Image { .. } | Command::Video { .. }) => true,
+        Some(Command::Preset {
+            command: PresetCommand::Save { .. } | PresetCommand::Apply { .. },
+        }) => true,
+        Some(Command::Audio { command }) => match command {
+            AudioCommand::Devices => false,
+            AudioCommand::Status { source }
+            | AudioCommand::Gain { source, .. }
+            | AudioCommand::Mute { source }
+            | AudioCommand::Unmute { source } => source == "camera",
+            #[cfg(feature = "gstreamer")]
+            AudioCommand::Meter(arguments) => arguments.stream.source == "camera",
+            #[cfg(feature = "gstreamer")]
+            AudioCommand::Capture(arguments) => arguments.stream.source == "camera",
+            #[cfg(feature = "gstreamer")]
+            AudioCommand::Monitor(arguments) => arguments.stream.source == "camera",
+        },
+        #[cfg(feature = "gstreamer")]
+        Some(Command::Snapshot(_) | Command::Capture(_) | Command::Record { .. }) => true,
+        #[cfg(feature = "network")]
+        Some(Command::Stream { .. }) => true,
+        _ => false,
+    }
+}
+
 fn uses_binary_stdout(command: Option<&Command>) -> bool {
     match command {
         #[cfg(feature = "gstreamer")]
@@ -897,6 +1022,9 @@ fn uses_binary_stdout(command: Option<&Command>) -> bool {
         Some(Command::Audio {
             command: AudioCommand::Capture(arguments),
         }) => arguments.stdout,
+        Some(Command::Preset {
+            command: PresetCommand::Export { output, .. },
+        }) => output == Path::new("-"),
         _ => false,
     }
 }
@@ -951,6 +1079,15 @@ fn command_identifier(command: Option<&Command>) -> &'static str {
             AudioCommand::Capture(_) => "audio.capture",
             #[cfg(feature = "gstreamer")]
             AudioCommand::Monitor(_) => "audio.monitor",
+        },
+        Some(Command::Preset { command }) => match command {
+            PresetCommand::Save { .. } => "preset.save",
+            PresetCommand::Apply { .. } => "preset.apply",
+            PresetCommand::List => "preset.list",
+            PresetCommand::Show { .. } => "preset.show",
+            PresetCommand::Delete { .. } => "preset.delete",
+            PresetCommand::Export { .. } => "preset.export",
+            PresetCommand::Import { .. } => "preset.import",
         },
         #[cfg(feature = "gstreamer")]
         Some(Command::Snapshot(_)) => "snapshot",
@@ -1237,6 +1374,19 @@ fn device_summary(device: &DiscoveredDevice) -> DeviceSummary {
     }
 }
 
+fn acquire_operation_lease(
+    config: &Config,
+    key: &str,
+    operation: &str,
+) -> Result<DeviceLease, LinkError> {
+    DeviceLease::acquire(
+        &AppPaths::from_process()?,
+        key,
+        operation,
+        config.timeout.get(),
+    )
+}
+
 fn ensure_standard_backend(
     config: &Config,
     backend: Option<BackendChoice>,
@@ -1370,6 +1520,7 @@ fn run_video(
                 fps: parse_fps(&fps)?,
             }
             .normalized();
+            let _lease = acquire_operation_lease(config, &summary.stable_id, "video.set")?;
             let report = if dry_run {
                 link_v4l2::video::VideoDevice::open_read(&node.path)?.validate(&requested)?
             } else {
@@ -1401,6 +1552,8 @@ fn run_video(
             }
             #[cfg(feature = "gstreamer")]
             {
+                let _transaction_lease =
+                    acquire_operation_lease(config, &summary.stable_id, "video.stats")?;
                 let _lease = link_media::MediaLease::acquire(&summary.stable_id, "video.stats")?;
                 let report = link_media::stats(&link_media::ForegroundRequest {
                     node: PathBuf::from(&node.path),
@@ -1692,6 +1845,11 @@ fn run_audio(
             let (endpoint, _) = selected_audio_source(config, &source)?;
             let gain = parse_audio_gain(&gain, clamp)?;
             let layer = select_audio_control_layer(&endpoint, backend, true)?;
+            let lease_key = endpoint
+                .associated_camera
+                .as_deref()
+                .unwrap_or(&endpoint.id);
+            let _lease = acquire_operation_lease(config, lease_key, "audio.gain")?;
             let report = link_audio::set_gain(&endpoint, layer, gain, dry_run)?;
             emit_audio_set_report(config, "audio.gain", &endpoint, &report)
         }
@@ -1715,6 +1873,15 @@ fn run_audio_mute(
 ) -> Result<(), LinkError> {
     let (endpoint, _) = selected_audio_source(config, source)?;
     let layer = select_audio_control_layer(&endpoint, backend, false)?;
+    let lease_key = endpoint
+        .associated_camera
+        .as_deref()
+        .unwrap_or(&endpoint.id);
+    let _lease = acquire_operation_lease(
+        config,
+        lease_key,
+        if muted { "audio.mute" } else { "audio.unmute" },
+    )?;
     let report = link_audio::set_mute(&endpoint, layer, muted, dry_run)?;
     emit_audio_set_report(
         config,
@@ -1825,6 +1992,1145 @@ fn run_audio_devices(config: &Config) -> Result<(), LinkError> {
         Ok(())
     } else {
         emit_success(config.output, "audio.devices", None, &inventory)
+    }
+}
+
+fn run_preset(
+    config: &Config,
+    backend: Option<BackendChoice>,
+    command: PresetCommand,
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    let store = PresetStore::from_process()?;
+    match command {
+        PresetCommand::Save {
+            name,
+            description,
+            include,
+            exclude,
+        } => run_preset_save(
+            config,
+            backend,
+            &store,
+            name,
+            description,
+            include,
+            exclude,
+            dry_run,
+        ),
+        PresetCommand::Apply { name } => {
+            let preset = store.load(&name)?;
+            run_preset_apply(config, backend, preset, dry_run)
+        }
+        PresetCommand::List => {
+            let presets = store.list()?;
+            if config.output == OutputFormat::Human {
+                if presets.is_empty() {
+                    println!("No presets found in {}", store.directory().display());
+                } else {
+                    println!("NAME\tMODEL\tVIDEO\tCONTROLS\tAUDIO\tDESCRIPTION");
+                    for preset in &presets {
+                        println!(
+                            "{}\t{}\t{}\t{}\t{}\t{}",
+                            preset.name,
+                            preset.model,
+                            preset.has_video,
+                            preset.standard_control_count,
+                            preset.has_audio,
+                            preset.description.as_deref().unwrap_or("-"),
+                        );
+                    }
+                }
+                Ok(())
+            } else {
+                emit_success(config.output, "preset.list", None, &presets)
+            }
+        }
+        PresetCommand::Show { name } => {
+            let preset = store.load(&name)?;
+            if config.output == OutputFormat::Human {
+                print!("{}", preset.to_toml()?);
+                Ok(())
+            } else {
+                emit_success(config.output, "preset.show", None, &preset)
+            }
+        }
+        PresetCommand::Delete { name } => {
+            let preset = store.load(&name)?;
+            let path = store.path_for(&preset.name)?;
+            if !dry_run {
+                store.delete(&name)?;
+            }
+            let result = json!({"name": name, "path": path, "dry_run": dry_run});
+            if config.output == OutputFormat::Human {
+                println!(
+                    "{} {}",
+                    if dry_run { "Would delete" } else { "Deleted" },
+                    path.display()
+                );
+                Ok(())
+            } else {
+                emit_success(config.output, "preset.delete", None, &result)
+            }
+        }
+        PresetCommand::Export { name, output } if output == Path::new("-") => {
+            let preset = store.load(&name)?;
+            print!("{}", preset.to_toml()?);
+            Ok(())
+        }
+        PresetCommand::Export { name, output } => {
+            let preset = store.load(&name)?;
+            if output.exists() {
+                return Err(LinkError::new(
+                    ErrorKind::InvalidInvocation,
+                    "preset export destination already exists",
+                )
+                .with_detail("path", output.display().to_string()));
+            }
+            if !dry_run {
+                store.export(&name, &output)?;
+            }
+            let result = json!({"name": preset.name, "path": output, "dry_run": dry_run});
+            if config.output == OutputFormat::Human {
+                println!(
+                    "{} {}",
+                    if dry_run {
+                        "Would export to"
+                    } else {
+                        "Exported to"
+                    },
+                    output.display()
+                );
+                Ok(())
+            } else {
+                emit_success(config.output, "preset.export", None, &result)
+            }
+        }
+        PresetCommand::Import { file } => {
+            let source = fs::read_to_string(&file).map_err(|error| {
+                LinkError::new(ErrorKind::IoFailure, "failed to read preset import")
+                    .with_detail("path", file.display().to_string())
+                    .with_detail("reason", error.to_string())
+            })?;
+            let preset = Preset::parse(&source, &file.display().to_string())?;
+            let destination = store.path_for(&preset.name)?;
+            if destination.exists() {
+                return Err(LinkError::new(
+                    ErrorKind::InvalidInvocation,
+                    "preset destination already exists",
+                )
+                .with_detail("path", destination.display().to_string()));
+            }
+            let summary = if dry_run {
+                PresetSummary {
+                    name: preset.name.clone(),
+                    description: preset.description.clone(),
+                    model: preset.requirements.model.clone(),
+                    has_video: preset.video.is_some(),
+                    standard_control_count: preset.standard_controls.len(),
+                    has_audio: preset.audio.is_some(),
+                    path: destination,
+                }
+            } else {
+                store.import(&file)?
+            };
+            if config.output == OutputFormat::Human {
+                println!(
+                    "{} {} as {}",
+                    if dry_run { "Would import" } else { "Imported" },
+                    file.display(),
+                    summary.name
+                );
+                Ok(())
+            } else {
+                emit_success(config.output, "preset.import", None, &summary)
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_preset_save(
+    config: &Config,
+    backend: Option<BackendChoice>,
+    store: &PresetStore,
+    name: String,
+    description: Option<String>,
+    include: Vec<PresetCategoryChoice>,
+    exclude: Vec<PresetCategoryChoice>,
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    let mut categories = if include.is_empty() {
+        BTreeSet::from([
+            PresetCategory::Video,
+            PresetCategory::Image,
+            PresetCategory::Zoom,
+            PresetCategory::Controls,
+            PresetCategory::Audio,
+        ])
+    } else {
+        include.into_iter().map(Into::into).collect()
+    };
+    for category in exclude {
+        categories.remove(&category.into());
+    }
+    if categories.is_empty() {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "preset include/exclude selection contains no state groups",
+        ));
+    }
+    if categories
+        .iter()
+        .any(|category| *category != PresetCategory::Audio)
+    {
+        ensure_standard_backend(config, backend)?;
+    }
+    let destination = store.path_for(&name)?;
+    if destination.exists() {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "preset destination already exists",
+        )
+        .with_detail("path", destination.display().to_string()));
+    }
+    let (device, node) = selected_video_device(config)?;
+    let summary = device_summary(&device);
+    let app_paths = AppPaths::from_process()?;
+    let _lease = DeviceLease::acquire(
+        &app_paths,
+        &summary.stable_id,
+        "preset.save",
+        config.timeout.get(),
+    )?;
+
+    let video = categories
+        .contains(&PresetCategory::Video)
+        .then(|| link_v4l2::video::VideoDevice::open_read(&node.path)?.status())
+        .transpose()?
+        .map(|status| PresetVideo::from(status.tuple));
+
+    let mut standard_controls = BTreeMap::new();
+    if categories.iter().any(|category| {
+        matches!(
+            category,
+            PresetCategory::Image | PresetCategory::Zoom | PresetCategory::Controls
+        )
+    }) {
+        for control in link_v4l2::production::ControlDevice::open_read(&node.path)?.controls()? {
+            let Some(category) = preset_control_category(&control) else {
+                continue;
+            };
+            if categories.contains(&category)
+                && control.readable
+                && control.writable
+                && control.available
+                && control.codec_supported
+                && !link_v4l2::production::is_movement_control(control.id)
+                && let Some(current) = control.current
+            {
+                link_v4l2::production::validate_raw_value(&control, current)?;
+                standard_controls.insert(control.name, current);
+            }
+        }
+    }
+
+    let audio = if categories.contains(&PresetCategory::Audio) {
+        let (endpoint, _) = selected_audio_source(config, "camera")?;
+        let layer = select_audio_control_layer(&endpoint, backend, true)
+            .or_else(|_| select_audio_control_layer(&endpoint, backend, false))?;
+        let status = link_audio::status(&endpoint)?;
+        let state = match layer {
+            AudioControlLayer::Hardware => status.hardware,
+            AudioControlLayer::Host => status.host,
+        }
+        .ok_or_else(|| {
+            LinkError::new(
+                ErrorKind::CapabilityUnsupported,
+                "selected audio control layer has no readable state",
+            )
+        })?;
+        if state.gain.is_none() && state.muted.is_none() {
+            return Err(LinkError::new(
+                ErrorKind::CapabilityUnsupported,
+                "selected audio control layer has no preset-compatible state",
+            ));
+        }
+        Some(PresetAudio {
+            source: if endpoint.associated_camera.as_deref() == Some(&summary.stable_id) {
+                "camera".into()
+            } else {
+                endpoint.id
+            },
+            layer,
+            gain_percent: state.gain.map(|gain| gain * 100.0),
+            mute: state.muted,
+        })
+    } else {
+        None
+    };
+
+    let preset = Preset {
+        schema_version: PRESET_SCHEMA_VERSION,
+        name,
+        description: description.filter(|value| !value.trim().is_empty()),
+        requirements: PresetRequirements {
+            model: device.model(),
+            usb_vid: Some(device.identity.vendor_id),
+            usb_pid: Some(device.identity.product_id),
+            fallback: Default::default(),
+        },
+        video,
+        standard_controls,
+        audio,
+    };
+    preset.validate("captured state")?;
+    let saved = if dry_run {
+        PresetSummary {
+            name: preset.name.clone(),
+            description: preset.description.clone(),
+            model: preset.requirements.model.clone(),
+            has_video: preset.video.is_some(),
+            standard_control_count: preset.standard_controls.len(),
+            has_audio: preset.audio.is_some(),
+            path: destination,
+        }
+    } else {
+        store.save(&preset)?
+    };
+    if config.output == OutputFormat::Human {
+        println!(
+            "{} preset {} at {} (video={}, controls={}, audio={})",
+            if dry_run { "Would save" } else { "Saved" },
+            saved.name,
+            saved.path.display(),
+            saved.has_video,
+            saved.standard_control_count,
+            saved.has_audio,
+        );
+        Ok(())
+    } else {
+        emit_success(config.output, "preset.save", Some(summary), &saved)
+    }
+}
+
+fn preset_control_category(control: &ControlDescriptor) -> Option<PresetCategory> {
+    if link_v4l2::production::is_movement_control(control.id) {
+        return None;
+    }
+    if control.name == "zoom_absolute" {
+        return Some(PresetCategory::Zoom);
+    }
+    if matches!(
+        control.name.as_str(),
+        "brightness"
+            | "contrast"
+            | "saturation"
+            | "sharpness"
+            | "backlight_compensation"
+            | "exposure_time_absolute"
+            | "exposure_compensation"
+            | "iso_sensitivity"
+            | "gain"
+            | "white_balance_temperature"
+            | "focus_absolute"
+            | "power_line_frequency"
+            | "wide_dynamic_range"
+            | "hdr_sensor_mode"
+            | "exposure_automatic"
+            | "iso_sensitivity_automatic"
+            | "gain_automatic"
+            | "white_balance_automatic"
+            | "focus_automatic_continuous"
+    ) {
+        Some(PresetCategory::Image)
+    } else {
+        Some(PresetCategory::Controls)
+    }
+}
+
+#[derive(Clone)]
+struct PreparedPresetApply {
+    device: DiscoveredDevice,
+    node: NodeAssociation,
+    plan: TransactionPlan,
+    control_requests: Vec<ControlRequest>,
+    audio_endpoint: Option<AudioEndpoint>,
+}
+
+#[derive(Default)]
+struct AppliedPresetState {
+    video: Option<link_core::media::FormatSetReport>,
+    controls: Option<ControlSetReport>,
+    gain: Option<link_core::audio::AudioSetReport>,
+    mute: Option<link_core::audio::AudioSetReport>,
+}
+
+fn run_preset_apply(
+    config: &Config,
+    backend: Option<BackendChoice>,
+    preset: Preset,
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    let (selected_device, _) = selected_video_device(config)?;
+    let summary = device_summary(&selected_device);
+    let paths = AppPaths::from_process()?;
+    let _lease = DeviceLease::acquire(
+        &paths,
+        &summary.stable_id,
+        "preset.apply",
+        config.timeout.get(),
+    )?;
+    let journals = JournalStore::new(paths.state.join("transactions"));
+    if let Some(existing) = journals.existing(&summary.stable_id)? {
+        return Err(LinkError::new(
+            ErrorKind::PartialSuccess,
+            "an incomplete preset transaction requires recovery review",
+        )
+        .with_detail(
+            "journal",
+            journals.path(&summary.stable_id).display().to_string(),
+        )
+        .with_detail(
+            "transaction",
+            serde_json::to_value(existing).unwrap_or_default(),
+        ));
+    }
+    let prepared = prepare_preset_apply(config, backend, &preset, dry_run)?;
+    let mut report = TransactionReport {
+        schema_version: TRANSACTION_SCHEMA_VERSION,
+        plan: prepared.plan.clone(),
+        outcome: if dry_run {
+            TransactionOutcome::Planned
+        } else {
+            TransactionOutcome::InProgress
+        },
+        steps: prepared
+            .plan
+            .steps
+            .iter()
+            .map(|step| TransactionStepReport {
+                sequence: step.sequence,
+                status: if step.no_op {
+                    TransactionStepStatus::Skipped
+                } else {
+                    TransactionStepStatus::Pending
+                },
+                observed: step.no_op.then(|| step.previous.clone()),
+                error: None,
+            })
+            .collect(),
+        rollback_attempted: false,
+        rollback_failures: Vec::new(),
+        journal: None,
+    };
+    if dry_run {
+        return emit_preset_transaction(config, summary, &report);
+    }
+    if prepared.plan.steps.iter().all(|step| step.no_op) {
+        report.outcome = TransactionOutcome::Completed;
+        return emit_preset_transaction(config, summary, &report);
+    }
+
+    report.journal = Some(journals.path(&summary.stable_id));
+    write_transaction_journal(&journals, &report)?;
+    let mut applied = AppliedPresetState::default();
+    let application = apply_prepared_preset(
+        config,
+        &preset,
+        &prepared,
+        &mut report,
+        &mut applied,
+        &journals,
+    );
+    if let Err((error, sequence)) = application {
+        let failed_stage_is_partial = error.kind() == ErrorKind::PartialSuccess;
+        set_transaction_step(
+            &mut report,
+            sequence,
+            TransactionStepStatus::Failed,
+            None,
+            Some(error_value(&error)),
+        );
+        let rollback_error = rollback_preset(&prepared, &mut report, &applied, &journals);
+        if !failed_stage_is_partial
+            && rollback_error.is_none()
+            && report.rollback_failures.is_empty()
+        {
+            report.outcome = TransactionOutcome::RolledBack;
+            if let Err(journal_error) = journals.remove(&summary.stable_id) {
+                report.outcome = TransactionOutcome::Partial;
+                let _ = write_transaction_journal(&journals, &report);
+                return Err(LinkError::new(
+                    ErrorKind::PartialSuccess,
+                    "preset transaction rolled back but its recovery journal remains",
+                )
+                .with_detail("cause", error_value(&error))
+                .with_detail("journal_error", error_value(&journal_error))
+                .with_detail(
+                    "transaction",
+                    serde_json::to_value(report).unwrap_or_default(),
+                ));
+            }
+            report.journal = None;
+            return Err(LinkError::new(error.kind(), error.message())
+                .with_detail("cause", error_value(&error))
+                .with_detail(
+                    "transaction",
+                    serde_json::to_value(report).unwrap_or_default(),
+                ));
+        }
+        report.outcome = TransactionOutcome::Partial;
+        if failed_stage_is_partial {
+            report.rollback_failures.push("failed-stage-state".into());
+        }
+        if let Some(rollback_error) = rollback_error {
+            report
+                .rollback_failures
+                .push(rollback_error.message().into());
+        }
+        let _ = write_transaction_journal(&journals, &report);
+        return Err(LinkError::new(
+            ErrorKind::PartialSuccess,
+            "preset transaction failed and rollback was incomplete",
+        )
+        .with_detail("cause", error_value(&error))
+        .with_detail(
+            "transaction",
+            serde_json::to_value(report).unwrap_or_default(),
+        ));
+    }
+    report.outcome = TransactionOutcome::Completed;
+    if let Err(error) = journals.remove(&summary.stable_id) {
+        report.outcome = TransactionOutcome::Partial;
+        let _ = write_transaction_journal(&journals, &report);
+        return Err(LinkError::new(
+            ErrorKind::PartialSuccess,
+            "preset was applied but its recovery journal remains",
+        )
+        .with_detail("journal_error", error_value(&error))
+        .with_detail(
+            "transaction",
+            serde_json::to_value(report).unwrap_or_default(),
+        ));
+    }
+    report.journal = None;
+    emit_preset_transaction(config, summary, &report)
+}
+
+fn prepare_preset_apply(
+    config: &Config,
+    backend: Option<BackendChoice>,
+    preset: &Preset,
+    dry_run: bool,
+) -> Result<PreparedPresetApply, LinkError> {
+    preset.validate("preset apply")?;
+    let (device, node) = selected_video_device(config)?;
+    validate_preset_requirements(
+        &preset.requirements,
+        &device.model(),
+        device.identity.vendor_id,
+        device.identity.product_id,
+    )?;
+    if preset.video.is_some() || !preset.standard_controls.is_empty() {
+        ensure_standard_backend(config, backend)?;
+    }
+    let stable_id = device.identity.stable_id();
+    let mut steps = Vec::new();
+    let mut sequence = 0_u32;
+    if let Some(video) = &preset.video {
+        let requested = VideoTuple::from(video);
+        let reader = link_v4l2::video::VideoDevice::open_read(&node.path)?;
+        let previous = reader.status()?.tuple;
+        reader.validate(&requested)?;
+        steps.push(TransactionStepPlan {
+            sequence,
+            kind: TransactionStepKind::VideoFormat,
+            backend: "v4l2".into(),
+            previous: serde_json::to_value(&previous).unwrap_or_default(),
+            requested: serde_json::to_value(&requested).unwrap_or_default(),
+            reversible: true,
+            no_op: previous.equivalent(&requested),
+        });
+        sequence += 1;
+    }
+
+    let control_reader = link_v4l2::production::ControlDevice::open_read(&node.path)?;
+    let mut desired_by_id = BTreeMap::new();
+    let mut descriptors = BTreeMap::new();
+    for (name, value) in &preset.standard_controls {
+        let descriptor = control_reader.resolve(name)?;
+        link_v4l2::production::validate_raw_value(&descriptor, *value)?;
+        desired_by_id.insert(descriptor.id, *value);
+        descriptors.insert(descriptor.id, descriptor);
+    }
+    for descriptor in descriptors.values() {
+        for (parent_id, manual_value) in link_v4l2::production::manual_dependencies(descriptor.id) {
+            if desired_by_id
+                .get(&parent_id)
+                .is_some_and(|desired| *desired != manual_value)
+            {
+                return Err(LinkError::new(
+                    ErrorKind::InvalidInvocation,
+                    "preset contains conflicting automatic/manual control state",
+                )
+                .with_detail("control", descriptor.name.clone())
+                .with_detail("parent_id", u64::from(parent_id)));
+            }
+        }
+    }
+    let mut control_requests = Vec::new();
+    let mut previous_controls = BTreeMap::new();
+    let mut requested_controls = BTreeMap::new();
+    for (id, desired) in desired_by_id {
+        let descriptor = &descriptors[&id];
+        let (_, previous) = control_reader.get(id)?;
+        previous_controls.insert(descriptor.name.clone(), previous.raw);
+        requested_controls.insert(descriptor.name.clone(), desired);
+        if previous.raw != desired {
+            control_requests.push(ControlRequest {
+                selector: id.to_string(),
+                value: RequestedValue::Raw(desired),
+            });
+        }
+    }
+    let mut prerequisite_previous = BTreeMap::new();
+    let mut prerequisite_requested = BTreeMap::new();
+    if !preset.standard_controls.is_empty() {
+        if !control_requests.is_empty() {
+            let preview = execute_requests(
+                &device,
+                config,
+                control_requests.clone(),
+                false,
+                false,
+                false,
+                true,
+                true,
+            )?;
+            for change in preview
+                .changes
+                .into_iter()
+                .filter(|change| change.prerequisite)
+            {
+                let previous = change.previous.ok_or_else(|| {
+                    LinkError::new(
+                        ErrorKind::CapabilityUnsupported,
+                        "preset prerequisite cannot be snapshotted for rollback",
+                    )
+                    .with_detail("control", change.control.name.clone())
+                })?;
+                prerequisite_previous.insert(change.control.name.clone(), previous.raw);
+                prerequisite_requested.insert(change.control.name, change.requested.raw);
+            }
+        }
+        if !prerequisite_requested.is_empty() {
+            steps.push(TransactionStepPlan {
+                sequence,
+                kind: TransactionStepKind::ControlPrerequisite,
+                backend: "v4l2".into(),
+                previous: serde_json::to_value(prerequisite_previous).unwrap_or_default(),
+                requested: serde_json::to_value(prerequisite_requested).unwrap_or_default(),
+                reversible: true,
+                no_op: false,
+            });
+            sequence += 1;
+        }
+        steps.push(TransactionStepPlan {
+            sequence,
+            kind: TransactionStepKind::StandardControls,
+            backend: "v4l2".into(),
+            previous: serde_json::to_value(previous_controls).unwrap_or_default(),
+            requested: serde_json::to_value(requested_controls).unwrap_or_default(),
+            reversible: true,
+            no_op: control_requests.is_empty(),
+        });
+        sequence += 1;
+    }
+
+    let mut audio_endpoint = None;
+    if let Some(audio) = &preset.audio {
+        let (endpoint, _) = selected_audio_source(config, &audio.source)?;
+        let requested_layer = match backend.unwrap_or(BackendChoice::Auto) {
+            BackendChoice::Auto => audio.layer,
+            BackendChoice::Standard => AudioControlLayer::Hardware,
+            BackendChoice::Host => AudioControlLayer::Host,
+            BackendChoice::Vendor => return Err(audio_backend_unsupported("vendor")),
+        };
+        if requested_layer != audio.layer {
+            return Err(LinkError::new(
+                ErrorKind::CapabilityUnsupported,
+                "forced audio backend does not match the preset control layer",
+            ));
+        }
+        let status = link_audio::status(&endpoint)?;
+        let state = match audio.layer {
+            AudioControlLayer::Hardware => status.hardware,
+            AudioControlLayer::Host => status.host,
+        }
+        .ok_or_else(|| {
+            LinkError::new(
+                ErrorKind::CapabilityUnsupported,
+                "preset audio control layer is unavailable",
+            )
+        })?;
+        if let Some(gain_percent) = audio.gain_percent {
+            let previous = state.gain.ok_or_else(|| {
+                LinkError::new(
+                    ErrorKind::CapabilityUnsupported,
+                    "preset audio gain is unavailable",
+                )
+            })?;
+            let requested = gain_percent / 100.0;
+            steps.push(TransactionStepPlan {
+                sequence,
+                kind: TransactionStepKind::AudioGain,
+                backend: format!("{:?}", audio.layer).to_ascii_lowercase(),
+                previous: json!(previous),
+                requested: json!(requested),
+                reversible: true,
+                no_op: (previous - requested).abs() <= f64::EPSILON,
+            });
+            sequence += 1;
+        }
+        if let Some(muted) = audio.mute {
+            let previous = state.muted.ok_or_else(|| {
+                LinkError::new(
+                    ErrorKind::CapabilityUnsupported,
+                    "preset audio mute is unavailable",
+                )
+            })?;
+            steps.push(TransactionStepPlan {
+                sequence,
+                kind: TransactionStepKind::AudioMute,
+                backend: format!("{:?}", audio.layer).to_ascii_lowercase(),
+                previous: json!(previous),
+                requested: json!(muted),
+                reversible: true,
+                no_op: previous == muted,
+            });
+        }
+        audio_endpoint = Some(endpoint);
+    }
+    Ok(PreparedPresetApply {
+        device,
+        node,
+        plan: TransactionPlan {
+            schema_version: TRANSACTION_SCHEMA_VERSION,
+            transaction_id: new_transaction_id(&stable_id, &preset.name),
+            preset: preset.name.clone(),
+            stable_id,
+            dry_run,
+            restart_required: false,
+            stream_restart_required: false,
+            rollback_feasible: steps.iter().all(|step| step.reversible),
+            steps,
+        },
+        control_requests,
+        audio_endpoint,
+    })
+}
+
+fn validate_preset_requirements(
+    requirements: &PresetRequirements,
+    model: &str,
+    usb_vid: u16,
+    usb_pid: u16,
+) -> Result<(), LinkError> {
+    if requirements.model != model
+        || requirements.usb_vid.is_some_and(|value| value != usb_vid)
+        || requirements.usb_pid.is_some_and(|value| value != usb_pid)
+    {
+        return Err(LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "preset does not match the selected device",
+        )
+        .with_detail("preset_model", requirements.model.clone())
+        .with_detail("device_model", model.to_owned())
+        .with_detail("usb_vid", u64::from(usb_vid))
+        .with_detail("usb_pid", u64::from(usb_pid)));
+    }
+    Ok(())
+}
+
+fn apply_prepared_preset(
+    config: &Config,
+    preset: &Preset,
+    prepared: &PreparedPresetApply,
+    report: &mut TransactionReport,
+    applied: &mut AppliedPresetState,
+    journals: &JournalStore,
+) -> Result<(), (LinkError, u32)> {
+    if let Some(step) = plan_step(&prepared.plan, TransactionStepKind::VideoFormat)
+        && !step.no_op
+    {
+        let requested = VideoTuple::from(preset.video.as_ref().expect("video plan requires video"));
+        let result = link_v4l2::video::VideoDevice::open_write(&prepared.node.path)
+            .and_then(|mut device| device.set_format(&requested))
+            .map_err(|error| (error, step.sequence))?;
+        set_transaction_step(
+            report,
+            step.sequence,
+            TransactionStepStatus::Verified,
+            Some(serde_json::to_value(&result.applied).unwrap_or_default()),
+            None,
+        );
+        applied.video = Some(result);
+        write_transaction_journal(journals, report).map_err(|error| (error, step.sequence))?;
+    }
+    if let Some(step) = plan_step(&prepared.plan, TransactionStepKind::StandardControls)
+        && !step.no_op
+    {
+        let result = execute_requests(
+            &prepared.device,
+            config,
+            prepared.control_requests.clone(),
+            false,
+            false,
+            false,
+            true,
+            false,
+        )
+        .map_err(|error| (error, step.sequence))?;
+        if let Some(prerequisite) =
+            plan_step(&prepared.plan, TransactionStepKind::ControlPrerequisite)
+        {
+            let observed = result
+                .changes
+                .iter()
+                .filter(|change| change.prerequisite)
+                .collect::<Vec<_>>();
+            set_transaction_step(
+                report,
+                prerequisite.sequence,
+                TransactionStepStatus::Verified,
+                Some(serde_json::to_value(observed).unwrap_or_default()),
+                None,
+            );
+        }
+        set_transaction_step(
+            report,
+            step.sequence,
+            TransactionStepStatus::Verified,
+            Some(serde_json::to_value(&result).unwrap_or_default()),
+            None,
+        );
+        applied.controls = Some(result);
+        write_transaction_journal(journals, report).map_err(|error| (error, step.sequence))?;
+    }
+    let endpoint = prepared.audio_endpoint.as_ref();
+    if let Some(step) = plan_step(&prepared.plan, TransactionStepKind::AudioGain)
+        && !step.no_op
+    {
+        let audio = preset.audio.as_ref().expect("audio plan requires audio");
+        let gain = audio.gain_percent.expect("gain step requires gain") / 100.0;
+        let result = link_audio::set_gain(
+            endpoint.expect("audio step requires endpoint"),
+            audio.layer,
+            gain,
+            false,
+        )
+        .map_err(|error| (error, step.sequence))?;
+        set_transaction_step(
+            report,
+            step.sequence,
+            TransactionStepStatus::Verified,
+            Some(serde_json::to_value(&result.observed).unwrap_or_default()),
+            None,
+        );
+        applied.gain = Some(result);
+        write_transaction_journal(journals, report).map_err(|error| (error, step.sequence))?;
+    }
+    if let Some(step) = plan_step(&prepared.plan, TransactionStepKind::AudioMute)
+        && !step.no_op
+    {
+        let audio = preset.audio.as_ref().expect("audio plan requires audio");
+        let result = link_audio::set_mute(
+            endpoint.expect("audio step requires endpoint"),
+            audio.layer,
+            audio.mute.expect("mute step requires mute"),
+            false,
+        )
+        .map_err(|error| (error, step.sequence))?;
+        set_transaction_step(
+            report,
+            step.sequence,
+            TransactionStepStatus::Verified,
+            Some(serde_json::to_value(&result.observed).unwrap_or_default()),
+            None,
+        );
+        applied.mute = Some(result);
+        write_transaction_journal(journals, report).map_err(|error| (error, step.sequence))?;
+    }
+    Ok(())
+}
+
+fn rollback_preset(
+    prepared: &PreparedPresetApply,
+    report: &mut TransactionReport,
+    applied: &AppliedPresetState,
+    journals: &JournalStore,
+) -> Option<LinkError> {
+    report.rollback_attempted = true;
+    let mut first_error = None;
+    for kind in rollback_order(applied) {
+        match kind {
+            TransactionStepKind::AudioMute => {
+                let applied = applied.mute.as_ref().expect("rollback order requires mute");
+                let sequence = plan_step(&prepared.plan, kind)
+                    .expect("applied mute has plan")
+                    .sequence;
+                let previous = applied
+                    .previous
+                    .muted
+                    .expect("mute report has previous mute");
+                let result = link_audio::set_mute(
+                    prepared.audio_endpoint.as_ref().expect("mute has endpoint"),
+                    applied.layer,
+                    previous,
+                    false,
+                );
+                record_rollback_result(
+                    report,
+                    sequence,
+                    "audio-mute",
+                    result.map(|_| ()),
+                    &mut first_error,
+                );
+            }
+            TransactionStepKind::AudioGain => {
+                let applied = applied.gain.as_ref().expect("rollback order requires gain");
+                let sequence = plan_step(&prepared.plan, kind)
+                    .expect("applied gain has plan")
+                    .sequence;
+                let previous = applied
+                    .previous
+                    .gain
+                    .expect("gain report has previous gain");
+                let result = link_audio::set_gain(
+                    prepared.audio_endpoint.as_ref().expect("gain has endpoint"),
+                    applied.layer,
+                    previous,
+                    false,
+                );
+                record_rollback_result(
+                    report,
+                    sequence,
+                    "audio-gain",
+                    result.map(|_| ()),
+                    &mut first_error,
+                );
+            }
+            TransactionStepKind::StandardControls => {
+                let applied = applied
+                    .controls
+                    .as_ref()
+                    .expect("rollback order requires controls");
+                let sequence = plan_step(&prepared.plan, kind)
+                    .expect("applied controls have plan")
+                    .sequence;
+                let result = restore_control_report(&prepared.node.path, applied);
+                record_rollback_result(
+                    report,
+                    sequence,
+                    "standard-controls",
+                    result,
+                    &mut first_error,
+                );
+                if let Some(prerequisite) =
+                    plan_step(&prepared.plan, TransactionStepKind::ControlPrerequisite)
+                {
+                    let standard = report
+                        .steps
+                        .iter()
+                        .find(|step| step.sequence == sequence)
+                        .expect("standard control rollback has report");
+                    set_transaction_step(
+                        report,
+                        prerequisite.sequence,
+                        standard.status,
+                        None,
+                        standard.error.clone(),
+                    );
+                }
+            }
+            TransactionStepKind::VideoFormat => {
+                let applied = applied
+                    .video
+                    .as_ref()
+                    .expect("rollback order requires video");
+                let sequence = plan_step(&prepared.plan, kind)
+                    .expect("applied video has plan")
+                    .sequence;
+                let result = link_v4l2::video::VideoDevice::open_write(&prepared.node.path)
+                    .and_then(|mut device| device.set_format(&applied.previous))
+                    .map(|_| ());
+                record_rollback_result(report, sequence, "video-format", result, &mut first_error);
+            }
+            TransactionStepKind::ControlPrerequisite => unreachable!(
+                "control prerequisites are restored with their standard control transaction"
+            ),
+        }
+        if let Err(error) = write_transaction_journal(journals, report) {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error
+}
+
+fn rollback_order(applied: &AppliedPresetState) -> Vec<TransactionStepKind> {
+    rollback_order_for(
+        applied.video.is_some(),
+        applied.controls.is_some(),
+        applied.gain.is_some(),
+        applied.mute.is_some(),
+    )
+}
+
+fn rollback_order_for(
+    video: bool,
+    controls: bool,
+    gain: bool,
+    mute: bool,
+) -> Vec<TransactionStepKind> {
+    [
+        (mute, TransactionStepKind::AudioMute),
+        (gain, TransactionStepKind::AudioGain),
+        (controls, TransactionStepKind::StandardControls),
+        (video, TransactionStepKind::VideoFormat),
+    ]
+    .into_iter()
+    .filter_map(|(applied, kind)| applied.then_some(kind))
+    .collect()
+}
+
+fn restore_control_report(path: &str, applied: &ControlSetReport) -> Result<(), LinkError> {
+    let prepared = applied
+        .changes
+        .iter()
+        .map(|change| PreparedWrite {
+            descriptor: change.control.clone(),
+            value: change.requested.clone(),
+            prerequisite: change.prerequisite,
+        })
+        .collect::<Vec<_>>();
+    let previous = applied
+        .changes
+        .iter()
+        .map(|change| change.previous.clone())
+        .collect::<Vec<_>>();
+    let writer = link_v4l2::production::ControlDevice::open_write(path)?;
+    let rollback = rollback_controls(&writer, &prepared, &previous);
+    if rollback.failed.is_empty() {
+        Ok(())
+    } else {
+        Err(LinkError::new(
+            ErrorKind::PartialSuccess,
+            "failed to restore preset control state",
+        )
+        .with_detail(
+            "failed",
+            serde_json::to_value(rollback.failed).unwrap_or_default(),
+        ))
+    }
+}
+
+fn record_rollback_result(
+    report: &mut TransactionReport,
+    sequence: u32,
+    label: &str,
+    result: Result<(), LinkError>,
+    first_error: &mut Option<LinkError>,
+) {
+    match result {
+        Ok(()) => set_transaction_step(
+            report,
+            sequence,
+            TransactionStepStatus::RolledBack,
+            None,
+            None,
+        ),
+        Err(error) => {
+            report.rollback_failures.push(label.into());
+            set_transaction_step(
+                report,
+                sequence,
+                TransactionStepStatus::RollbackFailed,
+                None,
+                Some(error_value(&error)),
+            );
+            first_error.get_or_insert(error);
+        }
+    }
+}
+
+fn plan_step(plan: &TransactionPlan, kind: TransactionStepKind) -> Option<&TransactionStepPlan> {
+    plan.steps.iter().find(|step| step.kind == kind)
+}
+
+fn set_transaction_step(
+    report: &mut TransactionReport,
+    sequence: u32,
+    status: TransactionStepStatus,
+    observed: Option<Value>,
+    error: Option<Value>,
+) {
+    if let Some(step) = report
+        .steps
+        .iter_mut()
+        .find(|step| step.sequence == sequence)
+    {
+        step.status = status;
+        step.observed = observed;
+        step.error = error;
+    }
+}
+
+fn write_transaction_journal(
+    journals: &JournalStore,
+    report: &TransactionReport,
+) -> Result<(), LinkError> {
+    journals
+        .write(&RecoveryJournal::new(report.clone()))
+        .map(|_| ())
+}
+
+fn error_value(error: &LinkError) -> Value {
+    json!({
+        "code": error.kind().code(),
+        "message": error.message(),
+        "details": error.details(),
+    })
+}
+
+fn emit_preset_transaction(
+    config: &Config,
+    device: DeviceSummary,
+    report: &TransactionReport,
+) -> Result<(), LinkError> {
+    if config.output == OutputFormat::Human {
+        println!(
+            "Preset {} on {}: {:?}",
+            report.plan.preset, device.stable_id, report.outcome
+        );
+        for step in &report.plan.steps {
+            let status = report
+                .steps
+                .iter()
+                .find(|value| value.sequence == step.sequence)
+                .map_or(TransactionStepStatus::Pending, |value| value.status);
+            println!(
+                "  {}. {:?} via {}: {:?}{}",
+                step.sequence + 1,
+                step.kind,
+                step.backend,
+                status,
+                if step.no_op { " (no-op)" } else { "" },
+            );
+        }
+        Ok(())
+    } else {
+        emit_success(config.output, "preset.apply", Some(device), report)
     }
 }
 
@@ -1987,6 +3293,7 @@ fn run_audio_meter(
             "audio meter interval must be greater than zero",
         ));
     }
+    let lease_key = audio_operation_lease_key(config, &arguments.stream.source)?;
     let source = resolved_audio_request(
         config,
         arguments.stream,
@@ -1996,6 +3303,7 @@ fn run_audio_meter(
     if dry_run {
         return emit_audio_dry_run(config, "audio.meter", &source, None);
     }
+    let _lease = acquire_operation_lease(config, &lease_key, "audio.meter")?;
     let report = link_media::audio_meter(
         &link_media::AudioMeterRequest {
             source,
@@ -2051,6 +3359,7 @@ fn run_audio_capture(
         _ => {}
     }
     let encoding = audio_encoding(arguments.audio_format, arguments.output.as_deref())?;
+    let lease_key = audio_operation_lease_key(config, &arguments.stream.source)?;
     let source = resolved_audio_request(
         config,
         arguments.stream,
@@ -2065,6 +3374,7 @@ fn run_audio_capture(
             Some(audio_encoding_label(encoding)),
         );
     }
+    let _lease = acquire_operation_lease(config, &lease_key, "audio.capture")?;
     let report = link_media::audio_capture(&link_media::AudioCaptureRequest {
         source,
         output: arguments.output,
@@ -2089,7 +3399,11 @@ fn run_audio_monitor(
     arguments: AudioMonitorArgs,
     dry_run: bool,
 ) -> Result<(), LinkError> {
-    let (_, inventory) = selected_audio_source(config, &arguments.stream.source)?;
+    let (endpoint, inventory) = selected_audio_source(config, &arguments.stream.source)?;
+    let lease_key = endpoint
+        .associated_camera
+        .clone()
+        .unwrap_or_else(|| endpoint.id.clone());
     let source = resolved_audio_request(
         config,
         arguments.stream,
@@ -2100,6 +3414,7 @@ fn run_audio_monitor(
     if dry_run {
         return emit_audio_dry_run(config, "audio.monitor", &source, None);
     }
+    let _lease = acquire_operation_lease(config, &lease_key, "audio.monitor")?;
     let report = link_media::audio_monitor(&link_media::AudioMonitorRequest {
         source,
         sink,
@@ -2114,6 +3429,12 @@ fn run_audio_monitor(
     } else {
         emit_success(config.output, "audio.monitor", None, &report)
     }
+}
+
+#[cfg(feature = "gstreamer")]
+fn audio_operation_lease_key(config: &Config, source: &str) -> Result<String, LinkError> {
+    let (endpoint, _) = selected_audio_source(config, source)?;
+    Ok(endpoint.associated_camera.unwrap_or(endpoint.id))
 }
 
 #[cfg(feature = "gstreamer")]
@@ -2276,6 +3597,7 @@ fn run_snapshot(
         !stdout && !arguments.no_metadata,
         arguments.overwrite,
     )?;
+    let _transaction_lease = acquire_operation_lease(config, &summary.stable_id, "snapshot")?;
     let _lease = link_media::MediaLease::acquire(&summary.stable_id, "snapshot")?;
     let metadata_template = (!stdout && !arguments.no_metadata)
         .then(|| build_snapshot_metadata(config, &device, &node, &tuple, encoding))
@@ -2530,6 +3852,7 @@ fn run_capture(
     if dry_run {
         return emit_media_dry_run(config, "capture", summary, &node, &tuple);
     }
+    let _transaction_lease = acquire_operation_lease(config, &summary.stable_id, "capture")?;
     let _lease = link_media::MediaLease::acquire(&summary.stable_id, "capture")?;
     let report = link_media::capture_stdout(&link_media::CaptureRequest {
         source: link_media::ForegroundRequest {
@@ -2622,6 +3945,7 @@ fn run_record(
     if dry_run {
         return emit_media_dry_run(config, "record.start", summary, &node, &tuple);
     }
+    let _transaction_lease = acquire_operation_lease(config, &summary.stable_id, "record.start")?;
     let _lease = link_media::MediaLease::acquire(&summary.stable_id, "record.start")?;
     let report = link_media::record(&link_media::RecordRequest {
         source: link_media::ForegroundRequest {
@@ -2717,6 +4041,7 @@ fn run_stream(
     if dry_run {
         return emit_media_dry_run(config, "stream.start", summary, &node, &tuple);
     }
+    let _transaction_lease = acquire_operation_lease(config, &summary.stable_id, "stream.start")?;
     let _lease = link_media::MediaLease::acquire(&summary.stable_id, "stream.start")?;
     let report = link_media::rtp(&link_media::RtpRequest {
         source: link_media::ForegroundRequest {
@@ -2992,6 +4317,8 @@ fn run_control(
             let mut failures = Vec::new();
             for device in &devices {
                 let outcome = (|| {
+                    let stable_id = device.identity.stable_id();
+                    let _lease = acquire_operation_lease(config, &stable_id, "control.reset")?;
                     let node = control_node(device, config.default_device.as_deref())?;
                     let backend = link_v4l2::production::ControlDevice::open_read(&node.path)?;
                     let descriptor = backend.resolve(&control)?;
@@ -3176,16 +4503,21 @@ fn run_control_mutation(
     let mut results = Vec::new();
     let mut failures = Vec::new();
     for device in &devices {
-        match execute_requests(
-            device,
-            config,
-            requests.clone(),
-            raw,
-            clamp,
-            fallback_individual,
-            batched,
-            dry_run,
-        ) {
+        let outcome = (|| {
+            let stable_id = device.identity.stable_id();
+            let _lease = acquire_operation_lease(config, &stable_id, command)?;
+            execute_requests(
+                device,
+                config,
+                requests.clone(),
+                raw,
+                clamp,
+                fallback_individual,
+                batched,
+                dry_run,
+            )
+        })();
+        match outcome {
             Ok(report) => results.push(PerDeviceResult {
                 device: device_summary(device),
                 result: report,
@@ -4175,6 +5507,8 @@ where
     let mut failures = Vec::new();
     for device in &devices {
         let outcome = (|| {
+            let stable_id = device.identity.stable_id();
+            let _lease = acquire_operation_lease(config, &stable_id, command)?;
             let node = control_node(device, config.default_device.as_deref())?;
             let backend = link_v4l2::production::ControlDevice::open_read(&node.path)?;
             let requests = builder(&backend)?;
@@ -4298,6 +5632,8 @@ fn run_image_reset(config: &Config, dry_run: bool, yes: bool) -> Result<(), Link
     ];
     for device in &devices {
         let outcome = (|| {
+            let stable_id = device.identity.stable_id();
+            let _lease = acquire_operation_lease(config, &stable_id, "image.reset")?;
             let node = control_node(device, config.default_device.as_deref())?;
             let backend = link_v4l2::production::ControlDevice::open_read(&node.path)?;
             let mut requests = Vec::new();
@@ -4427,6 +5763,24 @@ fn run_doctor(config: &Config) -> Result<(), LinkError> {
             }
         }
     }
+    let recovery_journals = JournalStore::from_process()?.paths()?;
+    checks.push(DoctorCheck {
+        name: "preset-transactions".into(),
+        status: if recovery_journals.is_empty() {
+            DoctorStatus::Pass
+        } else {
+            DoctorStatus::Warning
+        },
+        message: if recovery_journals.is_empty() {
+            "no incomplete preset transactions were found".into()
+        } else {
+            format!(
+                "found {} incomplete preset transaction journal(s)",
+                recovery_journals.len()
+            )
+        },
+        details: json!({"journals": recovery_journals}),
+    });
     let healthy = checks
         .iter()
         .all(|check| check.status != DoctorStatus::Fail);
@@ -4766,8 +6120,15 @@ fn parse_format_hint(value: &str) -> OutputFormat {
 #[cfg(test)]
 mod tests {
     use clap::CommandFactory;
+    use link_core::preset::PresetRequirements;
+    use serde_json::Value;
 
-    use super::{Cli, parse_fps, parse_size, shutter_to_v4l2};
+    use super::{
+        Cli, ErrorKind, LinkError, TRANSACTION_SCHEMA_VERSION, TransactionOutcome, TransactionPlan,
+        TransactionReport, TransactionStepKind, TransactionStepPlan, TransactionStepReport,
+        TransactionStepStatus, parse_fps, parse_size, record_rollback_result, rollback_order_for,
+        shutter_to_v4l2, validate_preset_requirements,
+    };
 
     #[test]
     fn command_graph_excludes_mechanical_movement_commands() {
@@ -4789,6 +6150,117 @@ mod tests {
         assert_eq!(parse_fps("30000/1001").unwrap().numerator, 30000);
         assert_eq!(parse_fps("29.97").unwrap().denominator, 100);
         assert!(parse_fps("0").is_err());
+    }
+
+    #[test]
+    fn incompatible_preset_requirements_fail_as_a_preflight_error() {
+        let requirements = PresetRequirements {
+            model: "Insta360 Link 2C Pro".into(),
+            usb_vid: Some(0x2e1a),
+            usb_pid: Some(0x4c05),
+            fallback: Default::default(),
+        };
+        validate_preset_requirements(&requirements, "Insta360 Link 2C Pro", 0x2e1a, 0x4c05)
+            .unwrap();
+        let error = validate_preset_requirements(&requirements, "another model", 0x2e1a, 0x4c05)
+            .expect_err("model mismatch must fail");
+        assert_eq!(error.kind(), ErrorKind::ProtocolProfileMismatch);
+    }
+
+    #[test]
+    fn rollback_is_reverse_order_and_continues_after_an_injected_failure() {
+        let kinds = [
+            TransactionStepKind::VideoFormat,
+            TransactionStepKind::StandardControls,
+            TransactionStepKind::AudioGain,
+            TransactionStepKind::AudioMute,
+        ];
+        let plan_steps = kinds
+            .into_iter()
+            .enumerate()
+            .map(|(sequence, kind)| TransactionStepPlan {
+                sequence: sequence as u32,
+                kind,
+                backend: "test".into(),
+                previous: Value::Null,
+                requested: Value::Null,
+                reversible: true,
+                no_op: false,
+            })
+            .collect::<Vec<_>>();
+        let mut report = TransactionReport {
+            schema_version: TRANSACTION_SCHEMA_VERSION,
+            plan: TransactionPlan {
+                schema_version: TRANSACTION_SCHEMA_VERSION,
+                transaction_id: "tx-test".into(),
+                preset: "test".into(),
+                stable_id: "test-device".into(),
+                dry_run: false,
+                restart_required: false,
+                stream_restart_required: false,
+                rollback_feasible: true,
+                steps: plan_steps.clone(),
+            },
+            outcome: TransactionOutcome::Partial,
+            steps: plan_steps
+                .iter()
+                .map(|step| TransactionStepReport {
+                    sequence: step.sequence,
+                    status: TransactionStepStatus::Verified,
+                    observed: None,
+                    error: None,
+                })
+                .collect(),
+            rollback_attempted: true,
+            rollback_failures: Vec::new(),
+            journal: None,
+        };
+        let order = rollback_order_for(true, true, true, true);
+        assert_eq!(
+            order,
+            [
+                TransactionStepKind::AudioMute,
+                TransactionStepKind::AudioGain,
+                TransactionStepKind::StandardControls,
+                TransactionStepKind::VideoFormat,
+            ]
+        );
+
+        let mut first_error = None;
+        for kind in order {
+            let step = plan_steps.iter().find(|step| step.kind == kind).unwrap();
+            let result = if kind == TransactionStepKind::StandardControls {
+                Err(LinkError::new(
+                    ErrorKind::IoFailure,
+                    "injected rollback failure",
+                ))
+            } else {
+                Ok(())
+            };
+            record_rollback_result(
+                &mut report,
+                step.sequence,
+                "test-step",
+                result,
+                &mut first_error,
+            );
+        }
+
+        assert!(first_error.is_some());
+        assert_eq!(report.rollback_failures, ["test-step"]);
+        assert_eq!(
+            report
+                .steps
+                .iter()
+                .map(|step| step.status)
+                .collect::<Vec<_>>(),
+            [
+                TransactionStepStatus::RolledBack,
+                TransactionStepStatus::RollbackFailed,
+                TransactionStepStatus::RolledBack,
+                TransactionStepStatus::RolledBack,
+            ]
+        );
     }
 
     fn assert_command_names_are_absent(command: &clap::Command, prohibited: &[&str]) {

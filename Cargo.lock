@@ -809,6 +809,7 @@ name = "link-core"
 version = "0.1.0"
 dependencies = [
  "humantime",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
