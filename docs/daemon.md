@@ -55,6 +55,8 @@ v4l2-ctl --all --device /dev/video21
 
 `linkctl` requires a `v4l2loopback` build with correct V4L2 output-buffer queue semantics. Affected builds emit GStreamer's `buffer ... was not queued, this indicate a driver bug` message and streaming-I/O consumers then fail with `Failed to allocate a buffer`. This is a kernel-module defect tracked by [v4l2loopback #656](https://github.com/v4l2loopback/v4l2loopback/pull/656), not a recoverable virtual-camera branch error. Use a distribution module that does not exhibit the defect, or a module build containing the upstream fix, before validating OBS or WebRTC. GStreamer's read/write sink mode is not an equivalent workaround with `exclusive_caps=1`: it does not activate the streaming state needed for the node to advertise capture-only capabilities.
 
+See [the current release state and deferred host features](release-state-and-deferred-features.md) for the validated component inventory, first-release boundary, and future implementation guidance.
+
 The global `--device` always selects the physical source. `--output-device` names the loopback sink:
 
 ```sh
