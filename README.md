@@ -13,6 +13,7 @@ linkctl --device link2cpro-… caps controls
 linkctl --device link2cpro-… control list
 linkctl --device link2cpro-… control set brightness 55%
 linkctl --device link2cpro-… image white-balance 5000K
+linkctl --device link2cpro-… image hdr on
 linkctl --device link2cpro-… zoom set 1.5x
 linkctl --device link2cpro-… auto-framing status
 linkctl --device link2cpro-… auto-framing on
@@ -64,7 +65,7 @@ cargo deny --all-features check
 
 Normal builds expose validated standard V4L2 control writes and safe Extension Unit reads. `caps all` reports camera-native items as standard, verified-profile, hardware-only, or explicitly unmapped; unavailable vendor features are never inferred from older Link models. The raw XU command remains visible but cannot issue `SET_CUR` unless the binary was built with the non-default `research` feature and every runtime/profile gate passes. Driver detach, USB reset, firmware, calibration, and mechanical writes remain prohibited. Configuration cannot enable code that is absent from the build. A semantic vendor write additionally requires a compiled-in trusted verified profile matched to the exact device, descriptor, and firmware.
 
-For the recorded landscape descriptor on firmware `v0.2.9.8_build3`, Auto Framing status, on/off mutations, and Head/Half-body styles are provided by a verified profile. Auto Framing's enabled-state selector reports its active value only while video is streaming, so status briefly opens a no-output stream at the current video tuple before reading it. The guarded write path uses the captured 1920×1080 MJPEG stream conditions with a hardware-validated one-second warm-up and 500-millisecond delayed readback, validates selector lengths, and rolls back on mismatch. A style command transactionally enables the camera's Smart Composition prerequisite before setting the style; it does not implicitly enable Auto Framing itself.
+For the recorded landscape descriptor on firmware `v0.2.9.8_build3`, Auto Framing status, on/off mutations, Head/Half-body styles, and HDR are provided by a verified profile. Auto Framing's enabled-state selector reports its active value only while video is streaming, so status briefly opens a no-output stream at the current video tuple before reading it. Guarded writes use the captured 1920×1080 MJPEG stream conditions with a hardware-validated one-second warm-up and 500-millisecond delayed readback, validate selector lengths, and roll back on mismatch. HDR and Smart Composition share a selector, so each command changes only its verified bit in a freshly read value. A style command transactionally enables the camera's Smart Composition prerequisite before setting the style; it does not implicitly enable Auto Framing itself.
 
 Discovery, read watches, capability reports, probes, snapshots, diffs, and `doctor` are device-read-only. They never change a V4L2 format or control and never issue a UVC `SET_CUR` request; stream-dependent reads may briefly hold the current tuple without changing it. An explicitly requested probe, snapshot, or diagnostic artifact is the only filesystem output.
 

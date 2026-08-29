@@ -233,6 +233,8 @@ pub struct ProfileControl {
     #[serde(default)]
     pub read_modify_write: bool,
     #[serde(default)]
+    pub write_mask: Option<i64>,
+    #[serde(default)]
     pub tail_policy: TailPolicy,
     #[serde(default)]
     pub verification: VerificationMethod,
@@ -447,10 +449,54 @@ fn validate_control(
             ));
         }
     }
-    if control.read_modify_write && !control.readable {
+    if control.read_modify_write {
+        if !control.readable {
+            return Err(profile_error(
+                origin,
+                "read-modify-write controls must also be readable",
+            ));
+        }
+        if !matches!(control.codec, CodecKind::Enum | CodecKind::Bitmask) {
+            return Err(profile_error(
+                origin,
+                "masked read-modify-write requires an enum or bitmask codec",
+            ));
+        }
+        let Some(mask) = control.write_mask else {
+            return Err(profile_error(
+                origin,
+                "read-modify-write controls require a positive write mask",
+            ));
+        };
+        let mask_fits_width = match control.width {
+            1 => mask <= i64::from(u8::MAX),
+            2 => mask <= i64::from(u16::MAX),
+            4 => mask <= i64::from(u32::MAX),
+            8 => true,
+            _ => false,
+        };
+        if mask <= 0
+            || !mask_fits_width
+            || control
+                .values
+                .values()
+                .any(|value| *value < 0 || *value & !mask != 0)
+        {
+            return Err(profile_error(
+                origin,
+                "read-modify-write values must fit within the positive write mask",
+            ));
+        }
+        if !matches!(control.tail_policy, TailPolicy::Preserve) {
+            return Err(profile_error(
+                origin,
+                "read-modify-write controls must preserve their baseline payload",
+            ));
+        }
+    } else if control.write_mask.is_some() {
         return Err(profile_error(
             origin,
-            "read-modify-write controls must also be readable",
+            "a write mask requires read-modify-write behavior",
         ));
     }
     if (control.stream_format.is_some() || control.stream_warmup_delay_ms != 0)
@@ -641,6 +687,7 @@ pub fn decode_control(control: &ProfileControl, payload: &[u8]) -> Result<Value,
             &payload[control.offset..control.offset + usize::from(control.width)],
             control.byte_order,
             &control.values,
+            control.write_mask.filter(|_| control.read_modify_write),
         ),
         CodecKind::Rectangle | CodecKind::Structured => {
             let mut result = Map::new();
@@ -653,6 +700,7 @@ pub fn decode_control(control: &ProfileControl, payload: &[u8]) -> Result<Value,
                         &payload[field.offset..end],
                         field.byte_order,
                         &field.values,
+                        None,
                     )?,
                 );
             }
@@ -666,8 +714,10 @@ fn decode_value(
     bytes: &[u8],
     order: ByteOrder,
     values: &BTreeMap<String, i64>,
+    read_mask: Option<i64>,
 ) -> Result<Value, LinkError> {
     let raw = read_integer(bytes, order, codec == CodecKind::Signed)?;
+    let raw = read_mask.map_or(raw, |mask| raw & mask);
     Ok(match codec {
         CodecKind::Boolean => Value::Bool(raw != 0),
         CodecKind::Enum => values
@@ -730,8 +780,26 @@ pub fn encode_control(
         | CodecKind::Signed
         | CodecKind::Enum
         | CodecKind::Bitmask => {
-            let raw = parse_value(control.codec, input, &control.values)?;
             let end = control.offset + usize::from(control.width);
+            let mut raw = parse_value(control.codec, input, &control.values)?;
+            if control.read_modify_write {
+                let current = current.ok_or_else(|| {
+                    LinkError::new(
+                        ErrorKind::ProtocolProfileMismatch,
+                        "read-modify-write requires a readable baseline",
+                    )
+                })?;
+                ensure_payload(control, current)?;
+                let mask = control.write_mask.ok_or_else(|| {
+                    LinkError::new(
+                        ErrorKind::ProtocolProfileMismatch,
+                        "read-modify-write profile is missing its write mask",
+                    )
+                })?;
+                let previous =
+                    read_integer(&current[control.offset..end], control.byte_order, false)?;
+                raw = (previous & !mask) | (raw & mask);
+            }
             write_integer(
                 &mut payload[control.offset..end],
                 raw,
@@ -1435,7 +1503,7 @@ firmware = ["v1.2.3"]
     }
 
     #[test]
-    fn exact_firmware_profile_authorizes_trace_matched_auto_framing() {
+    fn exact_firmware_profile_authorizes_trace_matched_camera_controls() {
         let observed = identity("1d0fa40a5787adc39223e26a5262f3d5e1ba0421e17442487157905cbd2a066c");
         let catalog = ProfileCatalog::load(None).unwrap();
         let matched = catalog
@@ -1482,6 +1550,8 @@ firmware = ["v1.2.3"]
         assert!(smart_composition.writable);
         assert_eq!(smart_composition.stream_warmup_delay_ms, 1_000);
         assert_eq!(smart_composition.verification_delay_ms, 500);
+        assert!(smart_composition.read_modify_write);
+        assert_eq!(smart_composition.write_mask, Some(1));
         assert_eq!(
             decode_control(smart_composition, &[0xd4, 0x01]).unwrap(),
             json!("off")
@@ -1489,6 +1559,33 @@ firmware = ["v1.2.3"]
         assert_eq!(
             decode_control(smart_composition, &[0xd5, 0x01]).unwrap(),
             json!("on")
+        );
+        assert_eq!(
+            encode_control(smart_composition, "off", Some(&[0xd5, 0x01])).unwrap(),
+            [0xd4, 0x01]
+        );
+        assert_eq!(
+            encode_control(smart_composition, "on", Some(&[0xd1, 0x01])).unwrap(),
+            [0xd1, 0x01]
+        );
+
+        let hdr = matched.profile.control("image.hdr").unwrap();
+        assert!(hdr.writable);
+        assert!(hdr.read_modify_write);
+        assert_eq!(hdr.write_mask, Some(4));
+        assert_eq!(hdr.stream_requirement, super::StreamRequirement::Open);
+        assert_eq!(hdr.stream_warmup_delay_ms, 1_000);
+        assert_eq!(hdr.verification_delay_ms, 500);
+        assert_eq!(hdr.write_prelude, super::WritePrelude::GetLengthTwice);
+        assert_eq!(decode_control(hdr, &[0xd1, 0x01]).unwrap(), json!("off"));
+        assert_eq!(decode_control(hdr, &[0xd5, 0x01]).unwrap(), json!("on"));
+        assert_eq!(
+            encode_control(hdr, "off", Some(&[0xd5, 0x01])).unwrap(),
+            [0xd1, 0x01]
+        );
+        assert_eq!(
+            encode_control(hdr, "on", Some(&[0xd0, 0x01])).unwrap(),
+            [0xd4, 0x01]
         );
 
         let style = matched.profile.control("auto-framing.style").unwrap();

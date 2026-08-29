@@ -354,7 +354,7 @@ pub enum ImageCommand {
     BacklightCompensation(ScalarImageValue),
     /// Set power-line frequency behavior.
     AntiFlicker { value: AntiFlickerChoice },
-    /// Set standard wide-dynamic-range/HDR state.
+    /// Set HDR through a standard or verified camera-native control.
     Hdr { value: ToggleChoice },
     /// Set camera-native horizontal mirroring when a verified mapping exists.
     Mirror { value: ToggleChoice },
@@ -9341,6 +9341,10 @@ mod tests {
         assert_eq!(
             profile_read_stream_requirement(profile, Some(&["firmware.version"])).unwrap(),
             None
+        );
+        assert_eq!(
+            profile_read_stream_requirement(profile, Some(&["image.hdr"])).unwrap(),
+            Some(StreamRequirement::Open)
         );
     }
 

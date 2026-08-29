@@ -121,6 +121,7 @@
         "values": {"type": "object", "additionalProperties": {"type": "integer"}},
         "fields": {"type": "array", "items": {"$ref": "#/$defs/field"}},
         "read_modify_write": {"type": "boolean"},
+        "write_mask": {"type": "integer", "minimum": 1},
         "tail_policy": {"$ref": "#/$defs/tail"},
         "verification": {
           "enum": ["readback", "status", "video-observation", "audio-observation", "reenumeration", "manual"]

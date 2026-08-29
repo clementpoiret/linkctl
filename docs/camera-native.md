@@ -9,7 +9,7 @@ The following outcomes are established for the currently recorded landscape desc
 | Digital zoom | `zoom get/set/step/ramp/reset` | Verified standard V4L2 `zoom_absolute`, 1.00x–4.00x in 0.01x steps; write/readback/restore verified on hardware. |
 | Frame translation | `frame status/set/move/center` | Discovered, vendor transport unmapped. No pan/tilt substitution. |
 | Auto Framing | `auto-framing on/off/status/style` | Status, on/off, and Head/Half-body selection are verified for firmware `v0.2.9.8_build3`. No tracking-zone commands are exposed. |
-| Image pipeline | existing `image` commands plus `hdr`, `mirror`, and `flip` | Standard V4L2 controls are used when present; otherwise the camera-native item is explicitly unmapped. |
+| Image pipeline | existing `image` commands plus `hdr`, `mirror`, and `flip` | HDR status and on/off are verified for firmware `v0.2.9.8_build3`; standard V4L2 controls are preferred when present. Other camera-native image items remain explicitly unmapped. |
 | Pickup mode | `audio mode status/standard/wide/focus/original` | Discovered, transport unmapped. Host gain/mute/filter controls remain separate. |
 | Regular Whiteboard Mode | `mode whiteboard on/off/status` | Discovered, vendor transport unmapped. |
 | Gestures | `gesture status/enable/disable/set` | Discovered, global/per-gesture mappings pending. |
@@ -29,9 +29,15 @@ The controller committed MJPEG at 1920×1080 and 30 fps 12.45 seconds before its
 
 Selector 2 returns the inactive value while the camera stream is closed, even when Auto Framing is configured on. Status therefore holds a short no-output stream at the camera's current video tuple while reading stream-dependent controls. A timing sweep observed the active value within one second at both MJPEG 1920×1080 at 30 fps and 1920×1440 at 60 fps, so the read path uses a bounded one-second warm-up. This remains separate from the exact-format write path and preserves the configured video tuple.
 
-Smart Composition and framing style are separate controls on the same XU. Selector 27 is a two-byte little-endian enum: `d4 01` is off and `d5 01` is on. Selector 19 is a one-byte enum: `01` is Head and `02` is Half-body. Each transition repeated in the controller capture and was confirmed by its following `GET_CUR`; Linux target-hardware tests then verified Smart Composition `off → on → off` and style `Head → Half-body → Head`.
+Smart Composition and framing style are separate controls on the same XU. Smart Composition occupies bit 0 of the two-byte little-endian selector 27: `d4 01` is off and `d5 01` is on when HDR remains enabled. Selector 19 is a one-byte enum: `01` is Head and `02` is Half-body. Each transition repeated in the controller capture and was confirmed by its following `GET_CUR`; Linux target-hardware tests then verified Smart Composition `off → on → off` and style `Head → Half-body → Head`.
 
 `auto-framing style head` and `auto-framing style half-body` run as a two-step semantic transaction under one device lease and one warmed stream. The command first enables Smart Composition, then sets the requested style. Both stages use 500-millisecond delayed readback, and failure restores every attempted control in reverse order. Three complete target-hardware cycles verified Auto Framing `off → on` and style `Half-body → Head → Half-body` with the selected timing. The command configures the camera-native style but does not implicitly turn Auto Framing on; use `auto-framing on` separately when framing should become active.
+
+## HDR mapping
+
+HDR shares selector 27 with Smart Composition and occupies bit 2. The reviewed controller capture began at `d5 01` with both settings enabled, then repeated `d1 01` for HDR off and `d5 01` for HDR on three times. Periodic `GET_CUR` responses confirmed each resulting value. Every mutation was preceded by a current-value read and two `GET_LEN` requests, and the video stream remained open throughout.
+
+The two profile controls therefore use masked read-modify-write encoding. `image hdr` changes only bit 2, and Auto Framing style's Smart Composition prerequisite changes only bit 0; both preserve the rest of the freshly read two-byte value. The HDR path uses the trace-matched MJPEG 1920×1080 at 30 fps stream, the hardware-validated one-second warm-up and 500-millisecond readback delay, and semantic rollback on a mismatch. Automatic backend selection still prefers a standard V4L2 HDR control if one is advertised.
 
 ## Mapping checkpoint
 
