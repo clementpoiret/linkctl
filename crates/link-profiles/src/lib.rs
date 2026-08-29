@@ -255,6 +255,8 @@ pub struct ProfileControl {
     #[serde(default)]
     pub verification_delay_ms: u64,
     #[serde(default)]
+    pub readback_tolerance: u64,
+    #[serde(default)]
     pub persistence: Persistence,
     #[serde(default)]
     pub rollback: RollbackPolicy,
@@ -448,6 +450,17 @@ fn validate_control(
                 "profile verification delay exceeds the safety bound",
             ));
         }
+    }
+    if control.readback_tolerance != 0
+        && (!control.readable
+            || !control.writable
+            || control.verification != VerificationMethod::Readback
+            || !matches!(control.codec, CodecKind::Unsigned | CodecKind::Signed))
+    {
+        return Err(profile_error(
+            origin,
+            "readback tolerance requires a readable, writable numeric control",
+        ));
     }
     if control.read_modify_write {
         if !control.readable {
@@ -1587,6 +1600,51 @@ firmware = ["v1.2.3"]
             encode_control(hdr, "on", Some(&[0xd0, 0x01])).unwrap(),
             [0xd4, 0x01]
         );
+
+        let exposure = matched.profile.control("image.exposure").unwrap();
+        assert_eq!(exposure.selector, 30);
+        assert_eq!(exposure.length, 1);
+        assert_eq!(exposure.stream_requirement, super::StreamRequirement::Open);
+        assert_eq!(exposure.stream_warmup_delay_ms, 1_000);
+        assert_eq!(exposure.verification_delay_ms, 250);
+        assert_eq!(exposure.write_prelude, super::WritePrelude::GetLengthTwice);
+        assert_eq!(decode_control(exposure, &[1]).unwrap(), json!("manual"));
+        assert_eq!(decode_control(exposure, &[2]).unwrap(), json!("auto"));
+        assert_eq!(encode_control(exposure, "manual", Some(&[2])).unwrap(), [1]);
+
+        let iso = matched.profile.control("image.exposure.iso").unwrap();
+        assert_eq!(iso.selector, 25);
+        assert_eq!(iso.length, 2);
+        assert_eq!(iso.verification_delay_ms, 250);
+        assert_eq!(decode_control(iso, &[0x40, 0x01]).unwrap(), json!(320));
+        assert_eq!(
+            encode_control(iso, "3200", Some(&[0x40, 0x01])).unwrap(),
+            [0x80, 0x0c]
+        );
+
+        let shutter = matched
+            .profile
+            .control("image.exposure.shutter-denominator")
+            .unwrap();
+        assert_eq!(shutter.selector, 29);
+        assert_eq!(shutter.length, 2);
+        assert_eq!(shutter.verification_delay_ms, 250);
+        assert_eq!(shutter.readback_tolerance, 1);
+        assert_eq!(decode_control(shutter, &[0x64, 0]).unwrap(), json!(100));
+        assert_eq!(
+            encode_control(shutter, "8000", Some(&[0x64, 0])).unwrap(),
+            [0x40, 0x1f]
+        );
+        assert!(matched.profile.control("image.exposure.curve").is_none());
+
+        let mut invalid_tolerance = matched.profile.clone();
+        invalid_tolerance
+            .controls
+            .iter_mut()
+            .find(|control| control.name == "image.exposure")
+            .unwrap()
+            .readback_tolerance = 1;
+        assert!(invalid_tolerance.validate("invalid tolerance").is_err());
 
         let style = matched.profile.control("auto-framing.style").unwrap();
         assert!(style.writable);

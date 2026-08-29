@@ -134,6 +134,7 @@
         "postconditions": {"type": "array", "items": {"type": "string"}},
         "minimum_write_interval_ms": {"type": "integer", "minimum": 0},
         "verification_delay_ms": {"type": "integer", "minimum": 0, "maximum": 60000},
+        "readback_tolerance": {"type": "integer", "minimum": 0},
         "persistence": {"enum": ["volatile", "stream", "reconnect", "power-cycle"]},
         "rollback": {"enum": ["readback", "none"]},
         "trace_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},

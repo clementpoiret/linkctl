@@ -23,7 +23,7 @@ The command uses `VIDIOC_S_EXT_CTRLS`. If the driver rejects the batch, the erro
 
 ## Semantic image controls
 
-`image status` reports every implemented semantic capability, the supplying backend, evidence, raw descriptor, and current value. A command is available only when an unambiguous standard control is currently enumerated. Unsupported controls fail with exit code 4 and capability evidence rather than guessing a vendor mapping.
+`image status` reports every implemented semantic capability, the supplying backend, evidence, raw descriptor, and current value. Standard controls are preferred when present; an exact trusted camera profile may supply a missing semantic control. Unsupported controls fail with exit code 4 and capability evidence rather than guessing a vendor mapping.
 
 ```sh
 linkctl --device link2cpro-… image status
@@ -38,6 +38,10 @@ linkctl --device link2cpro-… image reset
 ```
 
 Manual shutter, ISO, white balance, focus, and gain first switch an advertised automatic parent to its manual state. `control set --raw` skips those prerequisite changes but still enforces type, range, step, menu, writability, and the movement-control deny policy.
+
+The Link 2C Pro exposes automatic exposure, ISO, and shutter through its verified camera profile rather than standard V4L2 controls. `image exposure manual` writes manual mode first, followed by the specified ISO and shutter values under one rollback-capable transaction. ISO accepts the Controller's 100–3200 range. Shutter accepts fractions or durations from 1/8000 through 1/30 and encodes the rounded denominator used by the camera. Fractional-rate shutter values can read back one denominator lower, so the shutter profile permits a one-unit numeric difference and rejects anything larger. Unspecified manual fields are preserved. Status reports the actual mode, ISO, and shutter readback together.
+
+The same Controller capture contains a separate exposure-curve protocol on selector 16. Curve changes use three 255-byte writes and have no observed `GET_CUR`, so they cannot meet the semantic readback and rollback contract and are not exposed.
 
 On the Link 2C Pro, the official controller capture confirms that white balance uses the standard UVC Processing Unit controls exposed by V4L2, not a vendor Extension Unit. Automatic mode is `white_balance_automatic`; manual temperature is `white_balance_temperature`. The controller writes automatic mode off before setting a manual temperature. Its UI exercised 2000 K, 4800 K, and 10000 K, with 4800 K as its default selection. Linux target-hardware tests verified the same endpoints and three complete manual/automatic cycles, with 1 K steps reported by the live descriptor. `image status` reports the live mode and Kelvin value together, while the capability record derives its accepted range and step from that descriptor.
 

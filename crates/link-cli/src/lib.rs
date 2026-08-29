@@ -144,7 +144,7 @@ pub enum Command {
         #[command(subcommand)]
         command: ControlCommand,
     },
-    /// Inspect or change semantic image controls through verified standard controls.
+    /// Inspect or change semantic image controls through verified backends.
     Image {
         #[command(subcommand)]
         command: ImageCommand,
@@ -321,7 +321,7 @@ pub enum ControlCommand {
     },
 }
 
-/// Semantic image operations backed only by verified standard controls.
+/// Semantic image operations backed by verified standard or camera-native controls.
 #[derive(Clone, Debug, Subcommand)]
 pub enum ImageCommand {
     /// Show every semantic image capability and current value.
@@ -2373,12 +2373,18 @@ fn run_xu_semantic_writes(
         for index in 0..prepared.len() {
             let write_result = apply_semantic_write(&session, &prepared[index]);
             match write_result {
-                Ok(observed) if observed == prepared[index].requested => {
+                Ok(observed)
+                    if semantic_readback_matches(
+                        prepared[index].authorization.control(),
+                        &prepared[index].requested,
+                        &observed,
+                    ) =>
+                {
                     prepared[index].observed = Some(observed);
                     prepared[index].verified = true;
                 }
                 Ok(observed) => {
-                    prepared[index].observed = Some(observed);
+                    prepared[index].observed = Some(observed.clone());
                     let rollback = rollback_semantic_writes(&session, &prepared[..=index]);
                     return Err(LinkError::new(
                         ErrorKind::ProtocolProfileMismatch,
@@ -2388,6 +2394,8 @@ fn run_xu_semantic_writes(
                         "control",
                         prepared[index].authorization.control().name.clone(),
                     )
+                    .with_detail("requested", prepared[index].requested.clone())
+                    .with_detail("observed", observed)
                     .with_detail("rollback", rollback));
                 }
                 Err(error) => {
@@ -2445,6 +2453,19 @@ fn apply_semantic_write(
     link_profiles::decode_control(control, &readback)
 }
 
+fn semantic_readback_matches(
+    control: &link_profiles::ProfileControl,
+    requested: &Value,
+    observed: &Value,
+) -> bool {
+    requested == observed
+        || requested.as_i64().is_some_and(|requested| {
+            observed
+                .as_i64()
+                .is_some_and(|observed| requested.abs_diff(observed) <= control.readback_tolerance)
+        })
+}
+
 fn rollback_semantic_writes(
     session: &link_uvc_xu::XuSession,
     writes: &[PreparedSemanticWrite<'_>],
@@ -2466,7 +2487,12 @@ fn rollback_semantic_writes(
                     session.set_profiled(write.address, write.authorization, &payload)?;
                     thread::sleep(Duration::from_millis(control.verification_delay_ms));
                     let readback = session.get_current(write.address, Some(control.length))?.1;
-                    Ok(link_profiles::decode_control(control, &readback)? == write.previous)
+                    let observed = link_profiles::decode_control(control, &readback)?;
+                    Ok(semantic_readback_matches(
+                        control,
+                        &write.previous,
+                        &observed,
+                    ))
                 });
         match restored {
             Ok(restored) => results.push(json!({
@@ -5536,6 +5562,24 @@ fn white_balance_status_value(automatic: Option<i64>, kelvin: Option<i64>) -> Op
     Some(Value::Object(status))
 }
 
+fn exposure_status_value(
+    mode: Option<Value>,
+    iso: Option<Value>,
+    shutter_denominator: Option<Value>,
+) -> Option<Value> {
+    let mode = mode?.as_str()?.to_owned();
+    let iso = iso?.as_i64()?;
+    let shutter_denominator = shutter_denominator?.as_i64()?;
+    if shutter_denominator <= 0 {
+        return None;
+    }
+    Some(json!({
+        "mode": mode,
+        "iso": iso,
+        "shutter": format!("1/{shutter_denominator}"),
+    }))
+}
+
 fn control_capabilities(
     device: &DiscoveredDevice,
     controls: Vec<ControlDescriptor>,
@@ -5902,6 +5946,35 @@ fn native_capabilities_for(
                 || unmapped_capability(&model, verified_at_unix_ms, evidence),
                 |(entry, control)| {
                     let read_verified = entry.semantic_read_verified();
+                    let current = if control.readable
+                        && current_names.is_none_or(|names| names.contains(name))
+                    {
+                        let read_current = |control_name: &str| {
+                            let mapped = entry.profile.control(control_name)?;
+                            link_uvc_xu::read_value(
+                                &session,
+                                &inventory,
+                                Some(&mapped.entity_guid),
+                                None,
+                                mapped.selector,
+                                Some(mapped.length),
+                                Some(&entry.profile),
+                            )
+                            .ok()
+                            .and_then(|value| value.decoded.get(control_name).cloned())
+                        };
+                        if *name == "image.exposure" {
+                            exposure_status_value(
+                                read_current("image.exposure"),
+                                read_current("image.exposure.iso"),
+                                read_current("image.exposure.shutter-denominator"),
+                            )
+                        } else {
+                            read_current(name)
+                        }
+                    } else {
+                        None
+                    };
                     CapabilityRecord {
                         state: if read_verified {
                             CapabilityState::VendorProfile
@@ -5936,23 +6009,7 @@ fn native_capabilities_for(
                         }),
                         range: None,
                         values: profile_values(control),
-                        current: if control.readable
-                            && current_names.is_none_or(|names| names.contains(name))
-                        {
-                            link_uvc_xu::read_value(
-                                &session,
-                                &inventory,
-                                Some(&control.entity_guid),
-                                None,
-                                control.selector,
-                                Some(control.length),
-                                Some(&entry.profile),
-                            )
-                            .ok()
-                            .and_then(|value| value.decoded.get(*name).cloned())
-                        } else {
-                            None
-                        },
+                        current,
                         control: None,
                     }
                 },
@@ -8004,6 +8061,102 @@ struct ImageStatusResult {
     raw_controls: Vec<ControlDescriptor>,
 }
 
+fn run_standard_exposure(
+    config: &Config,
+    command: &ExposureCommand,
+    dry_run: bool,
+    yes: bool,
+) -> Result<(), LinkError> {
+    match command {
+        ExposureCommand::Auto => {
+            run_semantic_builder(config, dry_run, yes, "image.exposure", |backend| {
+                let mut requests = Vec::new();
+                for (name, value) in [
+                    ("exposure_automatic", 0),
+                    ("iso_sensitivity_automatic", 1),
+                    ("gain_automatic", 1),
+                ] {
+                    if backend.resolve(name).is_ok() {
+                        requests.push(ControlRequest {
+                            selector: name.into(),
+                            value: RequestedValue::Raw(value),
+                        });
+                    }
+                }
+                require_semantic_requests("image.exposure", requests)
+            })
+        }
+        ExposureCommand::Manual { shutter, iso } => {
+            if shutter.is_none() && iso.is_none() {
+                return Err(LinkError::new(
+                    ErrorKind::InvalidInvocation,
+                    "manual exposure requires --shutter, --iso, or both",
+                ));
+            }
+            let shutter = shutter.clone();
+            let iso = *iso;
+            run_semantic_builder(config, dry_run, yes, "image.exposure", move |backend| {
+                let mut requests = Vec::new();
+                if let Some(shutter) = &shutter {
+                    let descriptor = backend.resolve("exposure_time_absolute")?;
+                    let raw = shutter_to_v4l2(shutter)?;
+                    validate_semantic_raw(&descriptor, raw)?;
+                    requests.push(ControlRequest {
+                        selector: descriptor.id.to_string(),
+                        value: RequestedValue::Raw(raw),
+                    });
+                }
+                if let Some(iso) = iso {
+                    let descriptor = backend.resolve("iso_sensitivity")?;
+                    validate_semantic_raw(&descriptor, iso)?;
+                    requests.push(ControlRequest {
+                        selector: descriptor.id.to_string(),
+                        value: RequestedValue::Raw(iso),
+                    });
+                }
+                Ok(requests)
+            })
+        }
+    }
+}
+
+fn run_native_exposure(
+    config: &Config,
+    command: ExposureCommand,
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    match command {
+        ExposureCommand::Auto => {
+            run_native_vendor_set(config, "image.exposure", "image.exposure", "auto", dry_run)
+        }
+        ExposureCommand::Manual { shutter, iso } => {
+            if shutter.is_none() && iso.is_none() {
+                return Err(LinkError::new(
+                    ErrorKind::InvalidInvocation,
+                    "manual exposure requires --shutter, --iso, or both",
+                ));
+            }
+            let mut writes = vec![("image.exposure".to_owned(), "manual".to_owned())];
+            if let Some(iso) = iso {
+                validate_vendor_iso(iso)?;
+                writes.push(("image.exposure.iso".into(), iso.to_string()));
+            }
+            if let Some(shutter) = shutter {
+                let denominator = shutter_to_vendor_denominator(&shutter)?;
+                writes.push((
+                    "image.exposure.shutter-denominator".into(),
+                    denominator.to_string(),
+                ));
+            }
+            let borrowed = writes
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str()))
+                .collect::<Vec<_>>();
+            run_native_vendor_transaction(config, "image.exposure", &borrowed, dry_run)
+        }
+    }
+}
+
 fn run_image(
     config: &Config,
     backend_choice: Option<BackendChoice>,
@@ -8032,6 +8185,7 @@ fn run_image(
                     "image.flip",
                 ],
             ),
+            ImageCommand::Exposure { command } => run_native_exposure(config, command, dry_run),
             ImageCommand::Hdr { value } => run_native_vendor_set(
                 config,
                 "image.hdr",
@@ -8074,55 +8228,18 @@ fn run_image(
     ensure_standard_backend(config, backend_choice)?;
     match command {
         ImageCommand::Status => run_image_status(config),
-        ImageCommand::Exposure { command } => match command {
-            ExposureCommand::Auto => {
-                run_semantic_builder(config, dry_run, yes, "image.exposure", |backend| {
-                    let mut requests = Vec::new();
-                    for (name, value) in [
-                        ("exposure_automatic", 0),
-                        ("iso_sensitivity_automatic", 1),
-                        ("gain_automatic", 1),
-                    ] {
-                        if backend.resolve(name).is_ok() {
-                            requests.push(ControlRequest {
-                                selector: name.into(),
-                                value: RequestedValue::Raw(value),
-                            });
-                        }
-                    }
-                    require_semantic_requests("image.exposure", requests)
-                })
-            }
-            ExposureCommand::Manual { shutter, iso } => {
-                if shutter.is_none() && iso.is_none() {
-                    return Err(LinkError::new(
-                        ErrorKind::InvalidInvocation,
-                        "manual exposure requires --shutter, --iso, or both",
-                    ));
+        ImageCommand::Exposure { command } => {
+            let standard = run_standard_exposure(config, &command, dry_run, yes);
+            match standard {
+                Err(error)
+                    if error.kind() == ErrorKind::CapabilityUnsupported
+                        && matches!(backend_choice, None | Some(BackendChoice::Auto)) =>
+                {
+                    run_native_exposure(config, command, dry_run)
                 }
-                run_semantic_builder(config, dry_run, yes, "image.exposure", move |backend| {
-                    let mut requests = Vec::new();
-                    if let Some(shutter) = &shutter {
-                        let descriptor = backend.resolve("exposure_time_absolute")?;
-                        let raw = shutter_to_v4l2(shutter)?;
-                        validate_semantic_raw(&descriptor, raw)?;
-                        requests.push(ControlRequest {
-                            selector: descriptor.id.to_string(),
-                            value: RequestedValue::Raw(raw),
-                        });
-                    }
-                    if let Some(iso) = iso {
-                        let descriptor = backend.resolve("iso_sensitivity")?;
-                        validate_semantic_raw(&descriptor, iso)?;
-                        requests.push(ControlRequest {
-                            selector: descriptor.id.to_string(),
-                            value: RequestedValue::Raw(iso),
-                        });
-                    }
-                    Ok(requests)
-                })
+                result => result,
             }
-        },
+        }
         ImageCommand::ExposureCompensation { ev } => run_semantic_builder(
             config,
             dry_run,
@@ -8503,7 +8620,26 @@ fn validate_semantic_raw(control: &ControlDescriptor, raw: i64) -> Result<(), Li
     }
 }
 
-fn shutter_to_v4l2(input: &str) -> Result<i64, LinkError> {
+const VENDOR_ISO_MINIMUM: i64 = 100;
+const VENDOR_ISO_MAXIMUM: i64 = 3_200;
+const VENDOR_SHUTTER_DENOMINATOR_MINIMUM: i64 = 30;
+const VENDOR_SHUTTER_DENOMINATOR_MAXIMUM: i64 = 8_000;
+
+fn validate_vendor_iso(iso: i64) -> Result<(), LinkError> {
+    if (VENDOR_ISO_MINIMUM..=VENDOR_ISO_MAXIMUM).contains(&iso) {
+        Ok(())
+    } else {
+        Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "ISO is outside the verified Controller range",
+        )
+        .with_detail("iso", iso)
+        .with_detail("minimum", VENDOR_ISO_MINIMUM)
+        .with_detail("maximum", VENDOR_ISO_MAXIMUM))
+    }
+}
+
+fn parse_shutter_seconds(input: &str) -> Result<f64, LinkError> {
     let seconds = if let Some((numerator, denominator)) = input.split_once('/') {
         let numerator = numerator
             .trim()
@@ -8525,7 +8661,28 @@ fn shutter_to_v4l2(input: &str) -> Result<i64, LinkError> {
     if !seconds.is_finite() || seconds <= 0.0 {
         return Err(invalid_shutter(input));
     }
-    Ok((seconds / 0.0001).round() as i64)
+    Ok(seconds)
+}
+
+fn shutter_to_v4l2(input: &str) -> Result<i64, LinkError> {
+    Ok((parse_shutter_seconds(input)? / 0.0001).round() as i64)
+}
+
+fn shutter_to_vendor_denominator(input: &str) -> Result<i64, LinkError> {
+    let denominator = (1.0 / parse_shutter_seconds(input)?).round() as i64;
+    if (VENDOR_SHUTTER_DENOMINATOR_MINIMUM..=VENDOR_SHUTTER_DENOMINATOR_MAXIMUM)
+        .contains(&denominator)
+    {
+        Ok(denominator)
+    } else {
+        Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "shutter is outside the verified Controller range",
+        )
+        .with_detail("value", input.to_owned())
+        .with_detail("fastest", "1/8000")
+        .with_detail("slowest", "1/30"))
+    }
 }
 
 fn invalid_shutter(input: &str) -> LinkError {
@@ -9318,14 +9475,15 @@ mod tests {
     use clap::CommandFactory;
     use link_core::preset::PresetRequirements;
     use link_profiles::{ProfileCatalog, StreamRequirement};
-    use serde_json::Value;
+    use serde_json::{Value, json};
 
     use super::{
         Cli, ErrorKind, LinkError, TRANSACTION_SCHEMA_VERSION, TransactionOutcome, TransactionPlan,
         TransactionReport, TransactionStepKind, TransactionStepPlan, TransactionStepReport,
-        TransactionStepStatus, parse_fps, parse_size, parse_zoom_factor,
+        TransactionStepStatus, exposure_status_value, parse_fps, parse_size, parse_zoom_factor,
         profile_read_stream_requirement, record_rollback_result, rollback_order_for,
-        shutter_to_v4l2, validate_preset_requirements, white_balance_status_value,
+        semantic_readback_matches, shutter_to_v4l2, shutter_to_vendor_denominator,
+        validate_preset_requirements, validate_vendor_iso, white_balance_status_value,
     };
 
     #[test]
@@ -9339,6 +9497,47 @@ mod tests {
         assert_eq!(shutter_to_v4l2("1/100").unwrap(), 100);
         assert_eq!(shutter_to_v4l2("10ms").unwrap(), 100);
         assert!(shutter_to_v4l2("1/0").is_err());
+    }
+
+    #[test]
+    fn vendor_exposure_values_use_controller_units_and_ranges() {
+        assert_eq!(shutter_to_vendor_denominator("1/8000").unwrap(), 8_000);
+        assert_eq!(shutter_to_vendor_denominator("8.333ms").unwrap(), 120);
+        assert_eq!(shutter_to_vendor_denominator("1/30").unwrap(), 30);
+        assert!(shutter_to_vendor_denominator("1/8001").is_err());
+        assert!(shutter_to_vendor_denominator("1/29").is_err());
+        assert!(validate_vendor_iso(100).is_ok());
+        assert!(validate_vendor_iso(3_200).is_ok());
+        assert!(validate_vendor_iso(99).is_err());
+        assert!(validate_vendor_iso(3_201).is_err());
+
+        let catalog = ProfileCatalog::load(None).unwrap();
+        let shutter = catalog
+            .profiles()
+            .iter()
+            .find(|entry| entry.profile.profile_id == "insta360-link-2c-pro-v0.2.9.8-build3")
+            .unwrap()
+            .profile
+            .control("image.exposure.shutter-denominator")
+            .unwrap();
+        assert!(semantic_readback_matches(shutter, &json!(30), &json!(29)));
+        assert!(!semantic_readback_matches(shutter, &json!(30), &json!(28)));
+    }
+
+    #[test]
+    fn vendor_exposure_status_combines_mode_iso_and_shutter() {
+        assert_eq!(
+            exposure_status_value(Some(json!("manual")), Some(json!(320)), Some(json!(100))),
+            Some(json!({"mode": "manual", "iso": 320, "shutter": "1/100"}))
+        );
+        assert_eq!(
+            exposure_status_value(Some(json!("auto")), Some(json!(400)), Some(json!(120))),
+            Some(json!({"mode": "auto", "iso": 400, "shutter": "1/120"}))
+        );
+        assert_eq!(
+            exposure_status_value(Some(json!("auto")), Some(json!(400)), Some(json!(0))),
+            None
+        );
     }
 
     #[test]
@@ -9409,6 +9608,10 @@ mod tests {
         );
         assert_eq!(
             profile_read_stream_requirement(profile, Some(&["image.hdr"])).unwrap(),
+            Some(StreamRequirement::Open)
+        );
+        assert_eq!(
+            profile_read_stream_requirement(profile, Some(&["image.exposure"])).unwrap(),
             Some(StreamRequirement::Open)
         );
     }
