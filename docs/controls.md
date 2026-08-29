@@ -29,6 +29,7 @@ The command uses `VIDIOC_S_EXT_CTRLS`. If the driver rejects the batch, the erro
 linkctl --device link2cpro-… image status
 linkctl --device link2cpro-… image exposure auto
 linkctl --device link2cpro-… image exposure manual --shutter 1/120
+linkctl --device link2cpro-… image white-balance auto
 linkctl --device link2cpro-… image white-balance 5000K
 linkctl --device link2cpro-… image focus manual 0.5
 linkctl --device link2cpro-… image brightness 0.55
@@ -37,6 +38,8 @@ linkctl --device link2cpro-… image reset
 ```
 
 Manual shutter, ISO, white balance, focus, and gain first switch an advertised automatic parent to its manual state. `control set --raw` skips those prerequisite changes but still enforces type, range, step, menu, writability, and the movement-control deny policy.
+
+On the Link 2C Pro, the official controller capture confirms that white balance uses the standard UVC Processing Unit controls exposed by V4L2, not a vendor Extension Unit. Automatic mode is `white_balance_automatic`; manual temperature is `white_balance_temperature`. The controller writes automatic mode off before setting a manual temperature. Its UI exercised 2000 K, 4800 K, and 10000 K, with 4800 K as its default selection. Linux target-hardware tests verified the same endpoints and three complete manual/automatic cycles, with 1 K steps reported by the live descriptor. `image status` reports the live mode and Kelvin value together, while the capability record derives its accepted range and step from that descriptor.
 
 ## Digital zoom
 

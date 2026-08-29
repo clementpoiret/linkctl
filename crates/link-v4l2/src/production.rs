@@ -1140,6 +1140,14 @@ mod tests {
     }
 
     #[test]
+    fn manual_white_balance_disables_automatic_white_balance() {
+        assert_eq!(
+            manual_dependencies(bindings::V4L2_CID_WHITE_BALANCE_TEMPERATURE),
+            [(bindings::V4L2_CID_AUTO_WHITE_BALANCE, 0)]
+        );
+    }
+
+    #[test]
     fn invalid_driver_defaults_are_detectable_without_writing() {
         let mut control = integer();
         control.control_type = bindings::v4l2_ctrl_type_V4L2_CTRL_TYPE_MENU;

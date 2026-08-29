@@ -5519,6 +5519,23 @@ fn now_unix_ms() -> Result<u128, LinkError> {
         })
 }
 
+fn white_balance_status_value(automatic: Option<i64>, kelvin: Option<i64>) -> Option<Value> {
+    if automatic.is_none() && kelvin.is_none() {
+        return None;
+    }
+    let mut status = serde_json::Map::new();
+    if let Some(automatic) = automatic {
+        status.insert(
+            "mode".into(),
+            json!(if automatic == 0 { "manual" } else { "auto" }),
+        );
+    }
+    if let Some(kelvin) = kelvin {
+        status.insert("kelvin".into(), json!(kelvin));
+    }
+    Some(Value::Object(status))
+}
+
 fn control_capabilities(
     device: &DiscoveredDevice,
     controls: Vec<ControlDescriptor>,
@@ -5557,6 +5574,20 @@ fn control_capabilities(
                 .iter()
                 .find_map(|candidate| controls.iter().find(|control| control.name == *candidate))
                 .cloned();
+            let white_balance_temperature = (capability == "image.white_balance")
+                .then(|| {
+                    controls
+                        .iter()
+                        .find(|control| control.name == "white_balance_temperature")
+                })
+                .flatten();
+            let white_balance_automatic = (capability == "image.white_balance")
+                .then(|| {
+                    controls
+                        .iter()
+                        .find(|control| control.name == "white_balance_automatic")
+                })
+                .flatten();
             let available = control.is_some();
             (
                 capability.to_owned(),
@@ -5585,12 +5616,34 @@ fn control_capabilities(
                     source: control.as_ref().map(|control| CapabilitySource::V4l2 {
                         control: control.name.clone(),
                     }),
-                    range: None,
-                    values: Vec::new(),
-                    current: control
-                        .as_ref()
-                        .and_then(|control| control.current)
-                        .map(|value| json!(value)),
+                    range: white_balance_temperature.map(|control| SemanticRange {
+                        minimum: control.minimum as f64,
+                        maximum: control.maximum as f64,
+                        step: Some(control.step as f64),
+                        unit: "K".into(),
+                    }),
+                    values: if capability == "image.white_balance" {
+                        [
+                            white_balance_automatic.map(|_| "auto".into()),
+                            white_balance_temperature.map(|_| "manual".into()),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .collect()
+                    } else {
+                        Vec::new()
+                    },
+                    current: if capability == "image.white_balance" {
+                        white_balance_status_value(
+                            white_balance_automatic.and_then(|control| control.current),
+                            white_balance_temperature.and_then(|control| control.current),
+                        )
+                    } else {
+                        control
+                            .as_ref()
+                            .and_then(|control| control.current)
+                            .map(|value| json!(value))
+                    },
                     control,
                 },
             )
@@ -9272,7 +9325,7 @@ mod tests {
         TransactionReport, TransactionStepKind, TransactionStepPlan, TransactionStepReport,
         TransactionStepStatus, parse_fps, parse_size, parse_zoom_factor,
         profile_read_stream_requirement, record_rollback_result, rollback_order_for,
-        shutter_to_v4l2, validate_preset_requirements,
+        shutter_to_v4l2, validate_preset_requirements, white_balance_status_value,
     };
 
     #[test]
@@ -9286,6 +9339,18 @@ mod tests {
         assert_eq!(shutter_to_v4l2("1/100").unwrap(), 100);
         assert_eq!(shutter_to_v4l2("10ms").unwrap(), 100);
         assert!(shutter_to_v4l2("1/0").is_err());
+    }
+
+    #[test]
+    fn white_balance_status_reports_mode_and_kelvin() {
+        assert_eq!(
+            white_balance_status_value(Some(1), Some(4_800)),
+            Some(serde_json::json!({"mode": "auto", "kelvin": 4_800}))
+        );
+        assert_eq!(
+            white_balance_status_value(Some(0), Some(2_000)),
+            Some(serde_json::json!({"mode": "manual", "kelvin": 2_000}))
+        );
     }
 
     #[test]
