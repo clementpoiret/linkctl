@@ -20,6 +20,8 @@ provenance = [
   "Linux hardware validation on the same firmware and descriptor verified three complete original/focus/wide/standard/focus cycles with exact 03/02/01/00/02 readback while video was closed, plus idempotent focus restoration; mutations completed in 0.52-0.66 seconds and the final focus state was restored (2026-08-29)",
   "Link 2C Pro USBPcap DeskView capture on firmware v0.2.9.8_build3, SHA-256 d134801e2564ac699bc3c59629faa55cc812ab564d96c61d8d0ae38b2c031b78; repeated mode writes established selector 2 value 6 as DeskView and value 0 as off, while direct GET_CUR samples mapped the signed little-endian field at offset 52 to vertical correction using raw=-10*setting for 10, 45, and 80 (2026-08-29)",
   "Linux hardware validation on the same firmware and descriptor verified three complete DeskView on/10/80/45/off cycles with exact semantic readback under the trace-matched stream, plus an idempotent off restoration; mode mutations completed in 4.81-5.33 seconds, correction mutations in 2.81-2.84 seconds, and the camera finished off at correction 45 (2026-08-29)",
+  "Link 2C Pro USBPcap gesture capture on firmware v0.2.9.8_build3, SHA-256 92c80aded28ca497db18727bae5ba590dddf93ceb9ffbc3c0bb8fc92dcde059c; repeated writes and direct GET_CUR samples established selector 5 as a one-byte mask with Palm/Auto Framing in bit 0x02, L-sign/Zoom in bit 0x04, and V-sign/Whiteboard in bit 0x08, ending with all three enabled at 0x0e (2026-08-29)",
+  "Linux hardware validation on the same firmware and descriptor verified global all-off/all-on writes and three complete off/on cycles for each gesture with exact semantic readback; partial-state reads proved every individual mutation preserved the other two switches, and the camera finished with Palm, V-sign, and L-sign all enabled (2026-08-29)",
 ]
 
 [[match]]
@@ -175,6 +177,110 @@ verification_delay_ms = 500
 persistence = "volatile"
 rollback = "readback"
 trace_ids = ["misc-options-1-flips-2d36337eb00d"]
+safety = "normal"
+
+[[controls]]
+name = "gesture.enabled"
+entity_guid = "faf1672d-b71b-4793-8c91-7b1c9b7f95f8"
+selector = 5
+length = 1
+readable = true
+writable = true
+codec = "enum"
+offset = 0
+width = 1
+values = { off = 0, palm = 2, "l-sign" = 4, "palm+l-sign" = 6, "v-sign" = 8, "palm+v-sign" = 10, "v-sign+l-sign" = 12, on = 14 }
+read_modify_write = true
+write_mask = 14
+tail_policy = { kind = "preserve" }
+verification = "readback"
+stream_requirement = "open"
+stream_format = { fourcc = "MJPG", width = 1920, height = 1080, fps_numerator = 30, fps_denominator = 1 }
+stream_warmup_delay_ms = 1000
+write_prelude = "get-length-twice"
+minimum_write_interval_ms = 250
+verification_delay_ms = 500
+persistence = "volatile"
+rollback = "readback"
+trace_ids = ["misc-options-1-gestures-92c80aded28c"]
+safety = "normal"
+
+[[controls]]
+name = "gesture.palm"
+entity_guid = "faf1672d-b71b-4793-8c91-7b1c9b7f95f8"
+selector = 5
+length = 1
+readable = true
+writable = true
+codec = "enum"
+offset = 0
+width = 1
+values = { off = 0, on = 2 }
+read_modify_write = true
+write_mask = 2
+tail_policy = { kind = "preserve" }
+verification = "readback"
+stream_requirement = "open"
+stream_format = { fourcc = "MJPG", width = 1920, height = 1080, fps_numerator = 30, fps_denominator = 1 }
+stream_warmup_delay_ms = 1000
+write_prelude = "get-length-twice"
+minimum_write_interval_ms = 250
+verification_delay_ms = 500
+persistence = "volatile"
+rollback = "readback"
+trace_ids = ["misc-options-1-gestures-92c80aded28c"]
+safety = "normal"
+
+[[controls]]
+name = "gesture.v-sign"
+entity_guid = "faf1672d-b71b-4793-8c91-7b1c9b7f95f8"
+selector = 5
+length = 1
+readable = true
+writable = true
+codec = "enum"
+offset = 0
+width = 1
+values = { off = 0, on = 8 }
+read_modify_write = true
+write_mask = 8
+tail_policy = { kind = "preserve" }
+verification = "readback"
+stream_requirement = "open"
+stream_format = { fourcc = "MJPG", width = 1920, height = 1080, fps_numerator = 30, fps_denominator = 1 }
+stream_warmup_delay_ms = 1000
+write_prelude = "get-length-twice"
+minimum_write_interval_ms = 250
+verification_delay_ms = 500
+persistence = "volatile"
+rollback = "readback"
+trace_ids = ["misc-options-1-gestures-92c80aded28c"]
+safety = "normal"
+
+[[controls]]
+name = "gesture.l-sign"
+entity_guid = "faf1672d-b71b-4793-8c91-7b1c9b7f95f8"
+selector = 5
+length = 1
+readable = true
+writable = true
+codec = "enum"
+offset = 0
+width = 1
+values = { off = 0, on = 4 }
+read_modify_write = true
+write_mask = 4
+tail_policy = { kind = "preserve" }
+verification = "readback"
+stream_requirement = "open"
+stream_format = { fourcc = "MJPG", width = 1920, height = 1080, fps_numerator = 30, fps_denominator = 1 }
+stream_warmup_delay_ms = 1000
+write_prelude = "get-length-twice"
+minimum_write_interval_ms = 250
+verification_delay_ms = 500
+persistence = "volatile"
+rollback = "readback"
+trace_ids = ["misc-options-1-gestures-92c80aded28c"]
 safety = "normal"
 
 [[controls]]

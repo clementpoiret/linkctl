@@ -13,7 +13,7 @@ The following outcomes are established for the currently recorded landscape desc
 | Pickup mode | `audio mode status/standard/wide/focus/original` | All four camera-native modes are verified for firmware `v0.2.9.8_build3`; host gain/mute/filter controls remain separate. |
 | Regular Whiteboard Mode | `mode whiteboard on/off/status` | Discovered, vendor transport unmapped. |
 | DeskView | `mode deskview on/off/status/vertical-correction` | Camera-native mode and vertical correction are verified for firmware `v0.2.9.8_build3`. Host calibration, perspective correction, and virtual-camera output remain separate. |
-| Gestures | `gesture status/enable/disable/set` | Discovered, global/per-gesture mappings pending. |
+| Gestures | `gesture status/enable/disable/set` | Global and per-gesture controls are verified for firmware `v0.2.9.8_build3`. |
 | Native portrait | `portrait status/native` | Discovered, including correction switches; re-enumeration mapping pending. |
 | Compatibility | `mode compatibility status/set` | Discovered, low-resolution and YUY2 switches unmapped. |
 | Firmware | `firmware info` | Verified read-only landscape mapping: XU GUID `faf1672d-b71b-4793-8c91-7b1c9b7f95f8`, selector 3, 234-byte payload, UTF-8 field at offset 97. Observed version: `v0.2.9.8_build3`. |
@@ -89,6 +89,14 @@ The reviewed `deskview.pcap` Controller capture (SHA-256 `d134801e2564ac699bc3c5
 Vertical correction is a signed little-endian value at bytes 52–53 of the same selector. The wire value is negative ten times the whole-number setting: 10 is `-100` (`9c ff`), the default 45 is `-450` (`3e fe`), and 80 is `-800` (`e0 fc`). Each value was written repeatedly and confirmed by later reads. The Controller uses a stable 61-byte write template rather than echoing the selector's volatile status bytes, so the verified profile reproduces that template and changes only the correction field. Setting correction also selects DeskView; values outside 10–80 are rejected before device access.
 
 Linux hardware validation completed three `on → 10 → 80 → 45 → off` cycles with exact semantic readback and an additional idempotent off restoration. Mode commands completed in 4.81–5.33 seconds and correction commands in 2.81–2.84 seconds, including temporary stream startup and verification. The camera was restored to DeskView off with correction 45. Reconnect and power-cycle persistence remain unverified.
+
+## Camera-native gesture mapping
+
+The reviewed `gestures.pcap` Controller capture (SHA-256 `92c80aded28ca497db18727bae5ba590dddf93ceb9ffbc3c0bb8fc92dcde059c`) maps the gesture switches to a one-byte mask on XU GUID `faf1672d-b71b-4793-8c91-7b1c9b7f95f8`, selector 5. Palm/Auto Framing uses `0x02`, L-sign/Zoom uses `0x04`, and V-sign/Whiteboard uses `0x08`; all three on is `0x0e`. Repeated writes and periodic `GET_CUR` reads confirmed the independent transitions `0x0e ↔ 0x0c`, `0x0e ↔ 0x06`, and `0x0e ↔ 0x0a`, and the capture ended with all three switches on.
+
+Each per-gesture command uses a masked read-modify-write, preserving both the other gesture switches and the currently unassigned `0x01` bit. `gesture enable` sets all three verified bits and `gesture disable` clears them in one masked write; a partial configuration is reported as its enabled gesture combination. The verified profile follows the captured running-preview transfer sequence with two length queries before each write and delayed exact readback.
+
+Linux hardware validation verified the aggregate all-off/all-on transition and three complete off/on cycles for each individual switch. Exact status readback showed the two untargeted switches remained on throughout every individual off state. The camera was restored to Palm, V-sign, and L-sign all on. Reconnect and power-cycle persistence remain unverified.
 
 ## Mapping checkpoint
 

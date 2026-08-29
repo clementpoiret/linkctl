@@ -1700,6 +1700,61 @@ firmware = ["v1.2.3"]
             [0xdd, 0x01]
         );
 
+        let gestures = matched.profile.control("gesture.enabled").unwrap();
+        assert!(gestures.writable);
+        assert!(gestures.read_modify_write);
+        assert_eq!(gestures.selector, 5);
+        assert_eq!(gestures.length, 1);
+        assert_eq!(gestures.write_mask, Some(0x0e));
+        assert_eq!(gestures.stream_requirement, super::StreamRequirement::Open);
+        assert_eq!(gestures.stream_warmup_delay_ms, 1_000);
+        assert_eq!(gestures.verification_delay_ms, 500);
+        assert_eq!(gestures.write_prelude, super::WritePrelude::GetLengthTwice);
+        assert_eq!(decode_control(gestures, &[0x0e]).unwrap(), json!("on"));
+        assert_eq!(
+            decode_control(gestures, &[0x0c]).unwrap(),
+            json!("v-sign+l-sign")
+        );
+        assert_eq!(
+            decode_control(gestures, &[0x07]).unwrap(),
+            json!("palm+l-sign")
+        );
+        assert_eq!(
+            encode_control(gestures, "off", Some(&[0x0f])).unwrap(),
+            [0x01]
+        );
+        assert_eq!(
+            encode_control(gestures, "on", Some(&[0x01])).unwrap(),
+            [0x0f]
+        );
+
+        let palm = matched.profile.control("gesture.palm").unwrap();
+        assert_eq!(palm.write_mask, Some(0x02));
+        assert_eq!(decode_control(palm, &[0x0c]).unwrap(), json!("off"));
+        assert_eq!(decode_control(palm, &[0x0e]).unwrap(), json!("on"));
+        assert_eq!(encode_control(palm, "off", Some(&[0x0f])).unwrap(), [0x0d]);
+        assert_eq!(encode_control(palm, "on", Some(&[0x0d])).unwrap(), [0x0f]);
+
+        let v_sign = matched.profile.control("gesture.v-sign").unwrap();
+        assert_eq!(v_sign.write_mask, Some(0x08));
+        assert_eq!(decode_control(v_sign, &[0x06]).unwrap(), json!("off"));
+        assert_eq!(decode_control(v_sign, &[0x0e]).unwrap(), json!("on"));
+        assert_eq!(
+            encode_control(v_sign, "off", Some(&[0x0f])).unwrap(),
+            [0x07]
+        );
+        assert_eq!(encode_control(v_sign, "on", Some(&[0x07])).unwrap(), [0x0f]);
+
+        let l_sign = matched.profile.control("gesture.l-sign").unwrap();
+        assert_eq!(l_sign.write_mask, Some(0x04));
+        assert_eq!(decode_control(l_sign, &[0x0a]).unwrap(), json!("off"));
+        assert_eq!(decode_control(l_sign, &[0x0e]).unwrap(), json!("on"));
+        assert_eq!(
+            encode_control(l_sign, "off", Some(&[0x0f])).unwrap(),
+            [0x0b]
+        );
+        assert_eq!(encode_control(l_sign, "on", Some(&[0x0b])).unwrap(), [0x0f]);
+
         let pickup_mode = matched.profile.control("audio.pickup-mode").unwrap();
         assert!(pickup_mode.writable);
         assert_eq!(pickup_mode.selector, 31);
