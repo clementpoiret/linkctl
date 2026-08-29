@@ -11,7 +11,7 @@ The following outcomes are established for the currently recorded landscape desc
 | Auto Framing | `auto-framing on/off/status/style` | Status, on/off, and Head/Half-body selection are verified for firmware `v0.2.9.8_build3`. No tracking-zone commands are exposed. |
 | Image pipeline | existing `image` commands plus `hdr`, `mirror`, and `flip` | Exposure auto/manual mode, ISO, shutter, exposure compensation, HDR, horizontal mirror, and vertical flip are verified for firmware `v0.2.9.8_build3`. White balance, focus, and anti-flicker are verified through standard UVC controls. Other camera-native image items remain explicitly unmapped. |
 | Pickup mode | `audio mode status/standard/wide/focus/original` | All four camera-native modes are verified for firmware `v0.2.9.8_build3`; host gain/mute/filter controls remain separate. |
-| Regular Whiteboard Mode | `mode whiteboard on/off/status` | Discovered, vendor transport unmapped. |
+| Regular Whiteboard Mode | `mode whiteboard on/off/status` | Camera-resident mode is verified for firmware `v0.2.9.8_build3`; Smart Whiteboard remains a separate host pipeline. |
 | DeskView | `mode deskview on/off/status/vertical-correction` | Camera-native mode and vertical correction are verified for firmware `v0.2.9.8_build3`. Host calibration, perspective correction, and virtual-camera output remain separate. |
 | Gestures | `gesture status/enable/disable/set` | Global and per-gesture controls are verified for firmware `v0.2.9.8_build3`. |
 | Native portrait | `portrait status/native` | Discovered, including correction switches; re-enumeration mapping pending. |
@@ -89,6 +89,16 @@ The reviewed `deskview.pcap` Controller capture (SHA-256 `d134801e2564ac699bc3c5
 Vertical correction is a signed little-endian value at bytes 52–53 of the same selector. The wire value is negative ten times the whole-number setting: 10 is `-100` (`9c ff`), the default 45 is `-450` (`3e fe`), and 80 is `-800` (`e0 fc`). Each value was written repeatedly and confirmed by later reads. The Controller uses a stable 61-byte write template rather than echoing the selector's volatile status bytes, so the verified profile reproduces that template and changes only the correction field. Setting correction also selects DeskView; values outside 10–80 are rejected before device access.
 
 Linux hardware validation completed three `on → 10 → 80 → 45 → off` cycles with exact semantic readback and an additional idempotent off restoration. Mode commands completed in 4.81–5.33 seconds and correction commands in 2.81–2.84 seconds, including temporary stream startup and verification. The camera was restored to DeskView off with correction 45. Reconnect and power-cycle persistence remain unverified.
+
+## Camera-native Whiteboard mapping
+
+The reviewed `whiteboard.pcap` Controller capture (SHA-256 `413fd7c986b99dfe0789e7bed6a10639e6236eba8c0d3dff4a77249bb5a43d20`) maps regular camera-resident Whiteboard to mode byte `04` and off to `00` on XU GUID `faf1672d-b71b-4793-8c91-7b1c9b7f95f8`, selector 2, length 61. The Controller wrote regular Whiteboard on three times and off twice before the Smart Whiteboard attempt; periodic `GET_CUR` samples confirmed each transition after approximately one second. No gesture-selector write accompanied these changes, so activating regular Whiteboard does not rewrite the configured V-sign gesture switch.
+
+The later Smart Whiteboard sequence is deliberately not mapped as a camera-native mode. It used mode byte `0a`, additional controls on a second Extension Unit, and stream negotiation associated with the Insta360 virtual camera. That is consistent with Smart Whiteboard being a host/virtual-camera workflow rather than the regular camera-resident transform. `linkctl mode whiteboard` therefore exposes only the repeated `04 ↔ 00` mapping; the independent `smart-whiteboard` command family remains the host-side interface.
+
+The verified profile starts the trace-matched MJPEG 1920×1080 at 30 fps stream, waits one second, checks the 61-byte selector length twice, writes a bounded mode template, and performs exact readback after the selector's bounded transition interval with rollback on mismatch.
+
+Linux hardware validation first observed the selector's transient `ff` mode during an off transition at a 1.25-second readback; the command rejected the mismatch and successfully restored Whiteboard on. Extending readback to 2.25 seconds then passed three complete on/off cycles. Whiteboard was restored off, while Palm, V-sign, and L-sign gesture settings all remained on. Reconnect and power-cycle persistence remain unverified.
 
 ## Camera-native gesture mapping
 

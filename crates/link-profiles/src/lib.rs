@@ -1783,6 +1783,32 @@ firmware = ["v1.2.3"]
             [2]
         );
 
+        let whiteboard = matched.profile.control("mode.whiteboard").unwrap();
+        assert!(whiteboard.writable);
+        assert_eq!(whiteboard.selector, 2);
+        assert_eq!(whiteboard.length, 61);
+        assert_eq!(
+            whiteboard.stream_requirement,
+            super::StreamRequirement::Open
+        );
+        assert_eq!(whiteboard.stream_warmup_delay_ms, 1_000);
+        assert_eq!(whiteboard.verification_delay_ms, 2_250);
+        assert_eq!(
+            whiteboard.write_prelude,
+            super::WritePrelude::GetLengthTwice
+        );
+        assert_eq!(decode_control(whiteboard, &[4; 61]).unwrap(), json!("on"));
+        assert_eq!(decode_control(whiteboard, &[0; 61]).unwrap(), json!("off"));
+        let whiteboard_on = encode_control(whiteboard, "on", None).unwrap();
+        assert_eq!(whiteboard_on.len(), 61);
+        assert_eq!(whiteboard_on[0], 4);
+        assert_eq!(&whiteboard_on[38..42], &[0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(&whiteboard_on[42..46], &[0x1a, 0x0e, 0, 0]);
+        assert_eq!(&whiteboard_on[50..55], &[0, 0, 0x3e, 0xfe, 0]);
+        let whiteboard_off = encode_control(whiteboard, "off", None).unwrap();
+        assert_eq!(whiteboard_off[0], 0);
+        assert_eq!(&whiteboard_off[1..], &whiteboard_on[1..]);
+
         let deskview = matched.profile.control("mode.deskview").unwrap();
         assert!(deskview.writable);
         assert_eq!(deskview.selector, 2);

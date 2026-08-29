@@ -22,6 +22,8 @@ provenance = [
   "Linux hardware validation on the same firmware and descriptor verified three complete DeskView on/10/80/45/off cycles with exact semantic readback under the trace-matched stream, plus an idempotent off restoration; mode mutations completed in 4.81-5.33 seconds, correction mutations in 2.81-2.84 seconds, and the camera finished off at correction 45 (2026-08-29)",
   "Link 2C Pro USBPcap gesture capture on firmware v0.2.9.8_build3, SHA-256 92c80aded28ca497db18727bae5ba590dddf93ceb9ffbc3c0bb8fc92dcde059c; repeated writes and direct GET_CUR samples established selector 5 as a one-byte mask with Palm/Auto Framing in bit 0x02, L-sign/Zoom in bit 0x04, and V-sign/Whiteboard in bit 0x08, ending with all three enabled at 0x0e (2026-08-29)",
   "Linux hardware validation on the same firmware and descriptor verified global all-off/all-on writes and three complete off/on cycles for each gesture with exact semantic readback; partial-state reads proved every individual mutation preserved the other two switches, and the camera finished with Palm, V-sign, and L-sign all enabled (2026-08-29)",
+  "Link 2C Pro USBPcap Whiteboard capture on firmware v0.2.9.8_build3, SHA-256 413fd7c986b99dfe0789e7bed6a10639e6236eba8c0d3dff4a77249bb5a43d20; repeated regular-mode writes and direct GET_CUR samples established selector 2 value 4 as camera-resident Whiteboard and value 0 as off, while the later Smart Whiteboard value 10, secondary-XU traffic, and virtual-camera stream negotiation were explicitly excluded (2026-08-29)",
+  "Linux hardware validation on the same firmware and descriptor verified three complete regular Whiteboard on/off cycles with exact semantic readback under the trace-matched stream; a 1.25-second off readback observed the selector's transient 255 state and successfully rolled back, while 2.25-second readback passed every cycle, preserved all gesture switches, and left Whiteboard off (2026-08-29)",
 ]
 
 [[match]]
@@ -395,6 +397,30 @@ verification_delay_ms = 250
 persistence = "volatile"
 rollback = "readback"
 trace_ids = ["misc-options-1-audio-modes-71f9a37a70a1"]
+safety = "normal"
+
+[[controls]]
+name = "mode.whiteboard"
+entity_guid = "faf1672d-b71b-4793-8c91-7b1c9b7f95f8"
+selector = 2
+length = 61
+readable = true
+writable = true
+codec = "enum"
+offset = 0
+width = 1
+values = { off = 0, on = 4 }
+tail_policy = { kind = "fixed", hex = "00000000000000000000000000000000000000000000000000000000000000000000000000ffffffff1a0e00001a0e000000003efe00000000000000" }
+verification = "readback"
+stream_requirement = "open"
+stream_format = { fourcc = "MJPG", width = 1920, height = 1080, fps_numerator = 30, fps_denominator = 1 }
+stream_warmup_delay_ms = 1000
+write_prelude = "get-length-twice"
+minimum_write_interval_ms = 250
+verification_delay_ms = 2250
+persistence = "volatile"
+rollback = "readback"
+trace_ids = ["misc-options-1-whiteboard-413fd7c986b9"]
 safety = "normal"
 
 [[controls]]
