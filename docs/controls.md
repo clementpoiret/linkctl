@@ -38,10 +38,28 @@ linkctl --device link2cpro-… image reset
 
 Manual shutter, ISO, white balance, focus, and gain first switch an advertised automatic parent to its manual state. `control set --raw` skips those prerequisite changes but still enforces type, range, step, menu, writability, and the movement-control deny policy.
 
+## Digital zoom
+
+The Link 2C Pro exposes standard `zoom_absolute` from 100 through 400 in steps of one. `linkctl` renders those raw units as 1.00x through 4.00x and continues to validate the live descriptor rather than assuming that range for another device:
+
+```sh
+linkctl --device link2cpro-… zoom get
+linkctl --device link2cpro-… zoom set 1.5x
+linkctl --device link2cpro-… zoom step +0.1x
+linkctl --device link2cpro-… zoom ramp 1x 2x --duration 750ms
+linkctl --device link2cpro-… zoom reset
+```
+
+`ramp` uses a bounded 20 Hz sequence, verifies the final value, and restores the starting value if an intermediate or final write fails. Durations below 50 ms or above 60 seconds are rejected. Camera-native frame translation remains a separate capability and is never synthesized by changing pan or tilt controls.
+
+## Camera-native controls
+
+`caps all` combines standard controls with the fixed-mount camera-native capability set. Status commands remain useful before a vendor mapping exists: their machine output identifies the item as `discovered-unmapped` and does not read or write a guessed selector. See the [camera-native capability matrix](camera-native.md) for the exact commands and current evidence.
+
 ## Mutation guarantees
 
 Use global `--dry-run` to resolve devices, capabilities, prerequisites, values, and intended writes without opening a node for writing. Successful writes include the previous, requested, and observed values in machine output. Readback mismatch or a later failed write triggers best-effort rollback of already changed readable controls.
 
-All-device reads use `--device all`. Mutating `--device all` additionally requires `--yes` and returns per-device results. The direct CLI supports only the standard backend; forcing `vendor` or `host` returns exit code 4, and requiring the unavailable daemon returns exit code 12.
+All-device reads use `--device all`. Mutating `--device all` additionally requires `--yes` and returns per-device results. Standard image and zoom operations use the standard backend. A vendor operation is admitted only for an exact trusted built-in profile; an unmapped operation returns exit code 4. Requiring the unavailable daemon returns exit code 12.
 
 This camera has no mechanical gimbal. Pan and tilt controls may be listed and read for diagnosis, but every attempted write is denied with exit code 9, including raw and dry-run requests. No semantic movement commands are provided.

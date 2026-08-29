@@ -78,6 +78,18 @@
         }
       ]
     },
+    "stream_format": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fourcc", "width", "height", "fps_numerator", "fps_denominator"],
+      "properties": {
+        "fourcc": {"type": "string", "minLength": 4, "maxLength": 4},
+        "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1},
+        "fps_numerator": {"type": "integer", "minimum": 1},
+        "fps_denominator": {"type": "integer", "minimum": 1}
+      }
+    },
     "control": {
       "type": "object",
       "additionalProperties": false,
@@ -101,10 +113,10 @@
         "readable": {"type": "boolean"},
         "writable": {"type": "boolean"},
         "codec": {
-          "enum": ["raw", "boolean", "unsigned", "signed", "enum", "bitmask", "rectangle", "structured"]
+          "enum": ["raw", "utf8", "boolean", "unsigned", "signed", "enum", "bitmask", "rectangle", "structured"]
         },
         "offset": {"type": "integer", "minimum": 0},
-        "width": {"type": "integer", "minimum": 0, "maximum": 8},
+        "width": {"type": "integer", "minimum": 0, "maximum": 255},
         "byte_order": {"enum": ["little", "big"]},
         "values": {"type": "object", "additionalProperties": {"type": "integer"}},
         "fields": {"type": "array", "items": {"$ref": "#/$defs/field"}},
@@ -114,9 +126,13 @@
           "enum": ["readback", "status", "video-observation", "audio-observation", "reenumeration", "manual"]
         },
         "stream_requirement": {"enum": ["closed", "open", "either", "restart"]},
+        "stream_format": {"$ref": "#/$defs/stream_format"},
+        "stream_warmup_delay_ms": {"type": "integer", "minimum": 0, "maximum": 60000},
+        "write_prelude": {"enum": ["capabilities", "get-length-twice"]},
         "preconditions": {"type": "array", "items": {"type": "string"}},
         "postconditions": {"type": "array", "items": {"type": "string"}},
         "minimum_write_interval_ms": {"type": "integer", "minimum": 0},
+        "verification_delay_ms": {"type": "integer", "minimum": 0, "maximum": 60000},
         "persistence": {"enum": ["volatile", "stream", "reconnect", "power-cycle"]},
         "rollback": {"enum": ["readback", "none"]},
         "trace_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},

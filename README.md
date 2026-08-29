@@ -7,10 +7,17 @@ The CLI discovers cameras by stable USB identity, reports their live capabilitie
 ```sh
 linkctl device list
 linkctl --device link2cpro-… device info
+linkctl --device link2cpro-… device state
+linkctl --device link2cpro-… caps all
 linkctl --device link2cpro-… caps controls
 linkctl --device link2cpro-… control list
 linkctl --device link2cpro-… control set brightness 55%
 linkctl --device link2cpro-… image white-balance 5000K
+linkctl --device link2cpro-… zoom set 1.5x
+linkctl --device link2cpro-… auto-framing status
+linkctl --device link2cpro-… auto-framing on
+linkctl --device link2cpro-… auto-framing style half-body
+linkctl --device link2cpro-… firmware info
 linkctl --device link2cpro-… video formats --fourcc H264
 linkctl audio devices
 linkctl --device link2cpro-… audio status
@@ -26,7 +33,7 @@ linkctl xu diff baseline.json after.json
 
 Every mutation supports `--dry-run`, validates values, reads the previous value, verifies readback, and attempts rollback after a partial failure. Automatic/manual prerequisites are applied by default; `control set --raw` bypasses only that semantic gating. Pan and tilt remain read-only raw inventory even if a driver advertises them.
 
-Use `device watch --format jsonl` for hotplug events and `control watch --format jsonl` for control changes. `linkctl doctor` performs read-only configuration, permission, profile, control, and recovery-journal checks; `doctor --bundle report.tar.zst` creates a private redacted diagnostic archive. See [configuration and presets](docs/presets.md), [audio](docs/audio.md), [video capture and recording](docs/media.md), [standard controls](docs/controls.md), [safe XU research](docs/xu-research.md), [permissions and udev setup](docs/permissions.md), and the [hardware probe guide](docs/hardware-probe.md).
+Use `device watch --format jsonl` for hotplug events and `control watch --format jsonl` for control changes. `linkctl doctor` performs read-only configuration, permission, profile, control, and recovery-journal checks; `doctor --bundle report.tar.zst` creates a private redacted diagnostic archive. See [camera-native capabilities](docs/camera-native.md), [configuration and presets](docs/presets.md), [audio](docs/audio.md), [video capture and recording](docs/media.md), [standard controls](docs/controls.md), [safe XU research](docs/xu-research.md), [permissions and udev setup](docs/permissions.md), and the [hardware probe guide](docs/hardware-probe.md).
 
 GStreamer and PipeWire support are enabled in normal builds, with direct ALSA capture as a fallback. H.264 and MJPEG recording paths preserve the camera encoding without decoding; recording audio is opt-in and muxes FLAC into Matroska or AAC into MP4. RTP/UDP output is available when the `network` feature is enabled.
 
@@ -55,7 +62,9 @@ cargo deny --all-features check
 
 ## Safety boundary
 
-Normal builds expose validated standard V4L2 control writes and safe Extension Unit reads. The raw XU command remains visible but cannot issue `SET_CUR` unless the binary was built with the non-default `research` feature and every runtime/profile gate passes. Driver detach, USB reset, firmware, calibration, and mechanical writes remain prohibited. Configuration cannot enable code that is absent from the build. A semantic vendor write additionally requires a compiled-in trusted verified profile matched to the exact device, descriptor, and firmware.
+Normal builds expose validated standard V4L2 control writes and safe Extension Unit reads. `caps all` reports camera-native items as standard, verified-profile, hardware-only, or explicitly unmapped; unavailable vendor features are never inferred from older Link models. The raw XU command remains visible but cannot issue `SET_CUR` unless the binary was built with the non-default `research` feature and every runtime/profile gate passes. Driver detach, USB reset, firmware, calibration, and mechanical writes remain prohibited. Configuration cannot enable code that is absent from the build. A semantic vendor write additionally requires a compiled-in trusted verified profile matched to the exact device, descriptor, and firmware.
+
+For the recorded landscape descriptor on firmware `v0.2.9.8_build3`, Auto Framing status, on/off mutations, and Head/Half-body styles are provided by a verified profile. The write path reproduces the captured 1920×1080 MJPEG stream conditions and warm-up, validates selector lengths, verifies delayed readback, and rolls back on mismatch. A style command transactionally enables the camera's Smart Composition prerequisite before setting the style; it does not implicitly enable Auto Framing itself.
 
 Discovery, read watches, capability reports, probes, snapshots, diffs, and `doctor` are device-read-only. They never set a V4L2 format or control and never issue a UVC `SET_CUR` request; an explicitly requested probe, snapshot, or diagnostic artifact is the only filesystem output.
 

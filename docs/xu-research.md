@@ -23,9 +23,9 @@ Snapshots contain repeated raw samples, a per-bit volatility mask, standard V4L2
 
 Profiles are strict versioned TOML. The data model is documented by [vendor-profile-v1.json](schemas/vendor-profile-v1.json), while snapshots use [xu-snapshot-v1.json](schemas/xu-snapshot-v1.json). A match includes USB mode, VID/PID, a `bcdDevice` range, exact descriptor SHA-256, and—when writes are described—an exact firmware allow-list. Unknown fields, placeholder fingerprints, invalid GUIDs, overlapping payload fields, inconsistent lengths, and writable controls without provenance and trace IDs are rejected.
 
-Controls declare a typed codec, byte order, exact payload length, read-modify-write behavior, tail policy, snapshot policy, stream requirement, verification method, persistence, rollback, minimum write interval, and safety class. Tail bytes are never guessed: a profile must preserve a read baseline, zero the tail, supply fixed bytes, or select one of the small deterministic checksum algorithms. The synthetic [52-byte and 61-byte fixtures](../fixtures/xu-profiles/README.md) demonstrate that these rules are profile-specific.
+Controls declare a typed codec, byte order, exact payload length, read-modify-write behavior, tail policy, snapshot policy, stream requirement and optional exact stream format and warm-up delay, write prelude, verification method and delay, persistence, rollback, minimum write interval, and safety class. A required stream format records its FourCC, dimensions, and rational frame rate so the transfer runs under the same negotiation observed in the source trace. A bounded warm-up delay can preserve an observed interval between stream commit and the first vendor write. The default write prelude checks advertised capabilities; a reviewed trace can instead be reproduced with two consecutive length queries immediately before `SET_CUR`. Verification and warm-up delays are bounded to 60 seconds and must come from observed device timing rather than retries. Tail bytes are never guessed: a profile must preserve a read baseline, zero the tail, supply fixed bytes, or select one of the small deterministic checksum algorithms. The synthetic [52-byte and 61-byte fixtures](../fixtures/xu-profiles/README.md) demonstrate that these rules are profile-specific.
 
-An external directory can be loaded with `--profile-dir`. External profiles remain research input even if their document says `verified`; they cannot authorize `xu set`. Semantic writes require a matching, compiled-in, reviewed `verified` profile. The checked-in Link 2C Pro profile is deliberately read-only because no vendor mapping has yet met that standard.
+An external directory can be loaded with `--profile-dir`. External profiles remain research input even if their document says `verified`; they cannot authorize `xu set`. Semantic writes require a matching, compiled-in, reviewed `verified` profile. The generic Link 2C Pro bootstrap profile remains read-only and decodes only the hardware-verified landscape firmware field. A separate exact-firmware profile verifies Auto Framing status, on/off writes, Smart Composition, and Head/Half-body style under the captured stream, timing, and transfer preconditions. Unknown firmware continues to match only the generic bootstrap and cannot authorize the templates.
 
 ## Experimental write boundary
 
@@ -59,6 +59,31 @@ notes.md
 `metadata.json` should record a random experiment ID, firmware source/value, descriptor SHA-256, video tuple, stream state, application version, changed setting, repetition number, and verification observation. Before publishing, remove USB serials, hostnames, usernames, home/mount paths, unrelated USB traffic, audio/video content, credentials, and unique controller/account identifiers. Prefer replacing identifiers with consistent synthetic tokens so correlations remain testable. Never publish a pcapng merely because the JSON snapshots are clean.
 
 Repository fixtures contain only normalized JSON or synthetic bytes. Each fixture README must state its origin, sanitization, expected parser behavior, and whether any byte came from hardware. Raw captured payloads require explicit review.
+
+### Windows controller capture
+
+Use Wireshark with USBPcap on the Windows machine that runs the official Insta360 controller. Raw captures belong under the repository-local ignored `traces/` directory (or another private location), never under `fixtures/`.
+
+1. Record the controller version, camera-reported firmware version, selected video mode, whether preview is running, and the one setting to be changed. Close other camera applications.
+2. Start Wireshark as an administrator and select the `USBPcapN` interface containing USB device `2e1a:4c05`. USBPcap's device list identifies which root hub contains the camera. Do not capture unrelated root hubs.
+3. Begin capture before opening the controller. Wait five seconds without interaction to establish a control run.
+4. Change exactly one setting from A to B, wait five seconds, restore B to A, and wait another five seconds. Repeat this transition at least three times without changing video mode or stream state.
+5. Stop the capture before changing another setting. Save it as `traces/<random-experiment-id>/usb-control-transfers.pcapng` and complete the metadata/notes files described above.
+6. Make a separate capture for closed-stream and open-preview conditions, and a separate no-change capture that opens and closes the same controller panel without changing a value.
+
+In Wireshark, first identify the camera's bus/device address from its device descriptor, then use that address with `usb.transfer_type == 0x02` to inspect control transfers. UVC class-interface candidates normally show `SET_CUR` (`bRequest` 0x01) or `GET_CUR` (0x81); `wValue` carries the selector in its high byte and `wIndex` carries the entity/unit and interface. Treat those fields as navigation aids only: the profile must still resolve the entity GUID from the captured descriptor topology and confirm the selector's live `GET_INFO` and `GET_LEN` on Linux.
+
+Before sharing a capture, create a filtered copy containing only the camera address and control transfers, then inspect packet bytes and metadata manually. USB addresses are session-local, so do not reuse a display filter from another capture. The devenv provides `tshark` for offline inspection; for example, list candidate setup packets without altering the source capture:
+
+```sh
+devenv shell -- tshark -r traces/<experiment>/usb-control-transfers.pcapng \
+  -Y 'usb.transfer_type == 0x02 && usb.setup.bRequest' \
+  -T fields -e frame.number -e usb.bus_id -e usb.device_address \
+  -e usb.bmRequestType -e usb.setup.bRequest \
+  -e usb.setup.wValue -e usb.setup.wIndex -e usb.setup.wLength
+```
+
+Do not redact by editing the only capture. Keep the original private, generate a derived file, and verify the derived packet set before it is considered for a reviewed fixture.
 
 ## Recovery and diagnostics
 

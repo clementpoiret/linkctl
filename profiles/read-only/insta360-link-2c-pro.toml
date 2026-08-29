@@ -2,6 +2,7 @@ schema_version = 1
 profile_id = "insta360-link-2c-pro"
 model = "Insta360 Link 2C Pro"
 status = "read-only"
+provenance = ["Link 2C Pro landscape hardware readback, 2026-08-29"]
 
 [[match]]
 mode = "camera"
@@ -11,18 +12,16 @@ bcd_device_min = 0x0200
 bcd_device_max = 0x0200
 descriptor_sha256 = "1d0fa40a5787adc39223e26a5262f3d5e1ba0421e17442487157905cbd2a066c"
 
-[[match]]
-mode = "camera"
-usb_vid = 0x2e1a
-usb_pid = 0x4c05
-bcd_device_min = 0x0200
-bcd_device_max = 0x0200
-descriptor_sha256 = "7a60c8dd0f5e3d83e6c1c1fb245d96e02cc4ea6fdea8c10cc5a2e3b1094a2cc8"
-
-[[match]]
-mode = "u-disk"
-usb_vid = 0x070a
-usb_pid = 0x4026
-bcd_device_min = 0x0001
-bcd_device_max = 0x0001
-descriptor_sha256 = "8c9226df8b126f700d738b42f38c0163549a37a19753832527ce27742d3d7f2e"
+[[controls]]
+name = "firmware.version"
+entity_guid = "faf1672d-b71b-4793-8c91-7b1c9b7f95f8"
+selector = 3
+length = 234
+readable = true
+writable = false
+codec = "utf8"
+offset = 97
+width = 16
+persistence = "power-cycle"
+trace_ids = ["link2cpro-landscape-fw-read-20260829"]
+snapshot = "exclude"

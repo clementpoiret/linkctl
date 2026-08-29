@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::probe::ProbeIssue;
 
@@ -149,6 +150,34 @@ pub enum CapabilityConfidence {
     Experimental,
 }
 
+/// Concrete source implementing one semantic capability.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum CapabilitySource {
+    V4l2 {
+        control: String,
+    },
+    UvcXu {
+        profile_id: String,
+        profile_checksum: String,
+        guid: String,
+        selector: u8,
+        length: u16,
+    },
+    Hardware {
+        component: String,
+    },
+}
+
+/// Public semantic range independent of a backend's raw units.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SemanticRange {
+    pub minimum: f64,
+    pub maximum: f64,
+    pub step: Option<f64>,
+    pub unit: String,
+}
+
 /// Machine-readable status for one semantic capability.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CapabilityRecord {
@@ -165,6 +194,11 @@ pub struct CapabilityRecord {
     pub destructive: bool,
     pub verified_at_unix_ms: u128,
     pub confidence: CapabilityConfidence,
+    pub source: Option<CapabilitySource>,
+    pub range: Option<SemanticRange>,
+    pub values: Vec<String>,
+    pub current: Option<Value>,
+    /// Standard control descriptor when this capability uses V4L2.
     pub control: Option<ControlDescriptor>,
 }
 

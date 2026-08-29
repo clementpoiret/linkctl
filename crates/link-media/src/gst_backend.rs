@@ -231,18 +231,33 @@ pub struct ProbeStream {
 impl ProbeStream {
     /// Open the camera and wait for a minimal source pipeline to reach PLAYING.
     pub fn open(node: &str, timeout: Duration) -> Result<Self, LinkError> {
-        initialize(&["v4l2src", "fakesink"])?;
+        Self::open_with_format(node, timeout, None)
+    }
+
+    /// Open the camera at an exact media tuple and wait for PLAYING.
+    pub fn open_with_format(
+        node: &str,
+        timeout: Duration,
+        format: Option<&VideoTuple>,
+    ) -> Result<Self, LinkError> {
+        initialize(&["v4l2src", "capsfilter", "fakesink"])?;
         let pipeline = gst::Pipeline::new();
         let source = gst::ElementFactory::make("v4l2src")
             .property("device", node)
             .build()
             .map_err(build_error)?;
+        let filter = gst::ElementFactory::make("capsfilter")
+            .build()
+            .map_err(build_error)?;
+        if let Some(format) = format {
+            filter.set_property("caps", caps_for(format)?);
+        }
         let sink = gst::ElementFactory::make("fakesink")
             .property("sync", false)
             .build()
             .map_err(build_error)?;
-        pipeline_add(&pipeline, &[&source, &sink])?;
-        source.link(&sink).map_err(link_error)?;
+        pipeline_add(&pipeline, &[&source, &filter, &sink])?;
+        gst::Element::link_many([&source, &filter, &sink]).map_err(link_error)?;
         pipeline
             .set_state(gst::State::Playing)
             .map_err(state_error)?;

@@ -19,7 +19,9 @@ use link_core::{
     paths::AppPaths,
     probe::{ProbeIssue, XuEntityReport, XuSelectorReport},
 };
-use link_profiles::{AuthorizedControl, SnapshotPolicy, VendorProfile, decode_control};
+use link_profiles::{
+    AuthorizedControl, SnapshotPolicy, VendorProfile, WritePrelude, decode_control,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -502,7 +504,7 @@ impl XuSession {
         address: XuAddress,
         authorization: AuthorizedControl<'_>,
         payload: &[u8],
-    ) -> Result<XuCapabilities, LinkError> {
+    ) -> Result<(), LinkError> {
         let control = authorization.control();
         if address.selector != control.selector {
             return Err(LinkError::new(
@@ -510,7 +512,15 @@ impl XuSession {
                 "authorized profile control does not match the XU selector",
             ));
         }
-        set_current_with_transport(&self.transport, address, control.length, payload)
+        match control.write_prelude {
+            WritePrelude::Capabilities => {
+                set_current_with_transport(&self.transport, address, control.length, payload)
+                    .map(|_| ())
+            }
+            WritePrelude::GetLengthTwice => {
+                set_current_after_double_length(&self.transport, address, control.length, payload)
+            }
+        }
     }
 
     #[cfg(feature = "research")]
@@ -527,6 +537,42 @@ impl XuSession {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+fn set_current_after_double_length<T: QueryTransport>(
+    transport: &T,
+    address: XuAddress,
+    expected_length: u16,
+    payload: &[u8],
+) -> Result<(), LinkError> {
+    if payload.len() != usize::from(expected_length) {
+        return Err(LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "XU write payload does not match the profile length",
+        )
+        .with_detail("profile", u64::from(expected_length))
+        .with_detail("payload", payload.len() as u64));
+    }
+    for _ in 0..2 {
+        let mut length = [0_u8; 2];
+        transport
+            .query(address.unit, address.selector, UVC_GET_LEN, &mut length)
+            .map_err(|error| query_error("get-len", address, &error))?;
+        let observed = u16::from_le_bytes(length);
+        if observed != expected_length {
+            return Err(LinkError::new(
+                ErrorKind::ProtocolProfileMismatch,
+                "XU write payload does not match GET_LEN",
+            )
+            .with_detail("profile", u64::from(expected_length))
+            .with_detail("observed", u64::from(observed))
+            .with_detail("payload", payload.len() as u64));
+        }
+    }
+    let mut copy = payload.to_vec();
+    transport
+        .query(address.unit, address.selector, UVC_SET_CUR, &mut copy)
+        .map_err(|error| query_error("set-current", address, &error))
 }
 
 fn capabilities_with_transport<T: QueryTransport>(
@@ -1405,7 +1451,7 @@ mod tests {
     use super::{
         QueryTransport, RateLimiter, UVC_GET_CUR, UVC_GET_INFO, UVC_GET_LEN, UVC_SET_CUR,
         XuAddress, diff_snapshots, get_current_with_transport, parse_descriptors,
-        set_current_with_transport,
+        set_current_after_double_length, set_current_with_transport,
     };
 
     fn descriptor_blob(bitmap: &[u8]) -> Vec<u8> {
@@ -1610,6 +1656,48 @@ mod tests {
                 .iter()
                 .all(|(query, _)| !matches!(*query, UVC_GET_CUR | UVC_SET_CUR))
         );
+    }
+
+    #[test]
+    fn traced_write_prelude_queries_length_twice_before_set() {
+        let transport = MockTransport {
+            requests: RefCell::new(Vec::new()),
+            length: 61,
+            info: 3,
+        };
+        set_current_after_double_length(
+            &transport,
+            XuAddress {
+                unit: 9,
+                selector: 2,
+            },
+            61,
+            &[0; 61],
+        )
+        .unwrap();
+        assert_eq!(
+            transport.requests.into_inner(),
+            [(UVC_GET_LEN, 2), (UVC_GET_LEN, 2), (UVC_SET_CUR, 61)]
+        );
+
+        let malformed = MockTransport {
+            requests: RefCell::new(Vec::new()),
+            length: 61,
+            info: 3,
+        };
+        assert!(
+            set_current_after_double_length(
+                &malformed,
+                XuAddress {
+                    unit: 9,
+                    selector: 2,
+                },
+                61,
+                &[0; 60],
+            )
+            .is_err()
+        );
+        assert!(malformed.requests.into_inner().is_empty());
     }
 
     #[test]

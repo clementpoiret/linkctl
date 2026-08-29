@@ -4,6 +4,8 @@ use std::{collections::BTreeMap, fs, path::Path};
 
 use link_core::{
     ErrorKind, LinkError,
+    media::VideoTuple,
+    probe::Rational,
     probe::{DeviceMode, ProfileReport, UsbIdentity},
 };
 use serde::{Deserialize, Serialize};
@@ -14,6 +16,10 @@ pub use link_core::safety::ProfileState;
 
 const BUILTIN_LINK_2C_PRO: &str =
     include_str!("../../../profiles/read-only/insta360-link-2c-pro.toml");
+const BUILTIN_LINK_2C_PRO_OTHER_PERSONALITIES: &str =
+    include_str!("../../../profiles/read-only/insta360-link-2c-pro-other-personalities.toml");
+const BUILTIN_LINK_2C_PRO_V0_2_9_8_BUILD3: &str =
+    include_str!("../../../profiles/verified/insta360-link-2c-pro-v0.2.9.8_build3.toml");
 
 /// Validation status declared by a profile document.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -59,6 +65,7 @@ pub enum ByteOrder {
 #[serde(rename_all = "kebab-case")]
 pub enum CodecKind {
     Raw,
+    Utf8,
     Boolean,
     Unsigned,
     Signed,
@@ -113,6 +120,42 @@ pub enum StreamRequirement {
     #[default]
     Either,
     Restart,
+}
+
+/// Control-transfer prelude required by a profiled vendor write.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WritePrelude {
+    #[default]
+    Capabilities,
+    GetLengthTwice,
+}
+
+/// Exact media tuple required while issuing a vendor control transfer.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamFormat {
+    pub fourcc: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps_numerator: u32,
+    pub fps_denominator: u32,
+}
+
+impl StreamFormat {
+    #[must_use]
+    pub fn video_tuple(&self) -> VideoTuple {
+        VideoTuple {
+            fourcc: self.fourcc.clone(),
+            width: self.width,
+            height: self.height,
+            fps: Rational {
+                numerator: self.fps_numerator,
+                denominator: self.fps_denominator,
+            },
+        }
+        .normalized()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -196,11 +239,19 @@ pub struct ProfileControl {
     #[serde(default)]
     pub stream_requirement: StreamRequirement,
     #[serde(default)]
+    pub stream_format: Option<StreamFormat>,
+    #[serde(default)]
+    pub stream_warmup_delay_ms: u64,
+    #[serde(default)]
+    pub write_prelude: WritePrelude,
+    #[serde(default)]
     pub preconditions: Vec<String>,
     #[serde(default)]
     pub postconditions: Vec<String>,
     #[serde(default = "default_write_interval")]
     pub minimum_write_interval_ms: u64,
+    #[serde(default)]
+    pub verification_delay_ms: u64,
     #[serde(default)]
     pub persistence: Persistence,
     #[serde(default)]
@@ -297,16 +348,33 @@ impl VendorProfile {
         mode: DeviceMode,
         firmware: Option<&str>,
     ) -> bool {
-        self.matches.iter().any(|guard| {
-            guard.mode == mode
-                && guard.usb_vid == identity.vendor_id
-                && guard.usb_pid == identity.product_id
-                && (guard.bcd_device_min..=guard.bcd_device_max).contains(&identity.device_revision)
-                && guard.descriptor_sha256 == identity.descriptor_sha256
-                && (guard.firmware.is_empty()
-                    || firmware
-                        .is_some_and(|value| guard.firmware.iter().any(|item| item == value)))
-        })
+        self.match_specificity(identity, mode, firmware).is_some()
+    }
+
+    /// Return the strongest matching guard: firmware-specific profiles outrank generic identity
+    /// profiles so a read-only bootstrap profile can coexist with verified firmware overlays.
+    #[must_use]
+    pub fn match_specificity(
+        &self,
+        identity: &UsbIdentity,
+        mode: DeviceMode,
+        firmware: Option<&str>,
+    ) -> Option<u8> {
+        self.matches
+            .iter()
+            .filter(|guard| {
+                guard.mode == mode
+                    && guard.usb_vid == identity.vendor_id
+                    && guard.usb_pid == identity.product_id
+                    && (guard.bcd_device_min..=guard.bcd_device_max)
+                        .contains(&identity.device_revision)
+                    && guard.descriptor_sha256 == identity.descriptor_sha256
+                    && (guard.firmware.is_empty()
+                        || firmware
+                            .is_some_and(|value| guard.firmware.iter().any(|item| item == value)))
+            })
+            .map(|guard| u8::from(!guard.firmware.is_empty()))
+            .max()
     }
 
     #[must_use]
@@ -372,11 +440,47 @@ fn validate_control(
                 "readback verification requires a readable control",
             ));
         }
+        if control.verification_delay_ms > 60_000 {
+            return Err(profile_error(
+                origin,
+                "profile verification delay exceeds the safety bound",
+            ));
+        }
     }
     if control.read_modify_write && !control.readable {
         return Err(profile_error(
             origin,
             "read-modify-write controls must also be readable",
+        ));
+    }
+    if (control.stream_format.is_some() || control.stream_warmup_delay_ms != 0)
+        && control.stream_requirement != StreamRequirement::Open
+    {
+        return Err(profile_error(
+            origin,
+            "stream format and warm-up settings require an open stream",
+        ));
+    }
+    if let Some(format) = &control.stream_format
+        && (format.fourcc.len() != 4
+            || !format.fourcc.is_ascii()
+            || format.width == 0
+            || format.height == 0
+            || format.fps_numerator == 0
+            || format.fps_denominator == 0)
+    {
+        return Err(profile_error(origin, "profile stream format is invalid"));
+    }
+    if control.stream_warmup_delay_ms > 60_000 {
+        return Err(profile_error(
+            origin,
+            "profile stream warm-up delay exceeds the safety bound",
+        ));
+    }
+    if control.write_prelude != WritePrelude::Capabilities && !control.writable {
+        return Err(profile_error(
+            origin,
+            "a custom write prelude requires a writable control",
         ));
     }
     let encoded = encoded_length(control)?;
@@ -473,6 +577,15 @@ fn valid_width(codec: CodecKind, width: u8) -> bool {
 fn encoded_length(control: &ProfileControl) -> Result<usize, LinkError> {
     match control.codec {
         CodecKind::Raw => Ok(usize::from(control.length)),
+        CodecKind::Utf8 => {
+            if control.width == 0 {
+                return Err(LinkError::new(
+                    ErrorKind::ProtocolProfileMismatch,
+                    "UTF-8 profile fields require a non-zero width",
+                ));
+            }
+            Ok(control.offset.saturating_add(usize::from(control.width)))
+        }
         CodecKind::Boolean
         | CodecKind::Unsigned
         | CodecKind::Signed
@@ -505,6 +618,20 @@ pub fn decode_control(control: &ProfileControl, payload: &[u8]) -> Result<Value,
     ensure_payload(control, payload)?;
     match control.codec {
         CodecKind::Raw => Ok(Value::String(lowercase_hex(payload))),
+        CodecKind::Utf8 => {
+            let field = &payload[control.offset..control.offset + usize::from(control.width)];
+            let end = field
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(field.len());
+            let value = std::str::from_utf8(&field[..end]).map_err(|_| {
+                LinkError::new(
+                    ErrorKind::ProtocolProfileMismatch,
+                    "profile UTF-8 payload contains invalid text",
+                )
+            })?;
+            Ok(Value::String(value.trim().to_owned()))
+        }
         CodecKind::Boolean
         | CodecKind::Unsigned
         | CodecKind::Signed
@@ -592,10 +719,10 @@ pub fn encode_control(
     };
 
     match control.codec {
-        CodecKind::Raw => {
+        CodecKind::Raw | CodecKind::Utf8 => {
             return Err(LinkError::new(
                 ErrorKind::UnsafeOperationDenied,
-                "raw codecs cannot be changed through semantic set",
+                "raw and text codecs cannot be changed through semantic set",
             ));
         }
         CodecKind::Boolean
@@ -652,6 +779,64 @@ pub fn encode_control(
         payload[length - 1] = checksum;
     }
     Ok(payload)
+}
+
+/// Re-encode a previously decoded semantic value using the control's write-tail policy.
+pub fn encode_decoded_control(
+    control: &ProfileControl,
+    value: &Value,
+    current: Option<&[u8]>,
+) -> Result<Vec<u8>, LinkError> {
+    let input = match control.codec {
+        CodecKind::Boolean
+        | CodecKind::Unsigned
+        | CodecKind::Signed
+        | CodecKind::Enum
+        | CodecKind::Bitmask => decoded_value_input(control.codec, value)?,
+        CodecKind::Rectangle | CodecKind::Structured => {
+            let object = value.as_object().ok_or_else(decoded_value_error)?;
+            control
+                .fields
+                .iter()
+                .map(|field| {
+                    object
+                        .get(&field.name)
+                        .ok_or_else(decoded_value_error)
+                        .and_then(|value| decoded_value_input(field.codec, value))
+                        .map(|value| format!("{}={value}", field.name))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .join(",")
+        }
+        CodecKind::Raw | CodecKind::Utf8 => return Err(decoded_value_error()),
+    };
+    encode_control(control, &input, current)
+}
+
+fn decoded_value_input(codec: CodecKind, value: &Value) -> Result<String, LinkError> {
+    match codec {
+        CodecKind::Boolean => value
+            .as_bool()
+            .map(|value| if value { "on" } else { "off" }.to_owned()),
+        CodecKind::Unsigned | CodecKind::Signed => value.as_i64().map(|value| value.to_string()),
+        CodecKind::Enum => value.as_str().map(ToOwned::to_owned),
+        CodecKind::Bitmask => value.as_array().and_then(|values| {
+            values
+                .iter()
+                .map(Value::as_str)
+                .collect::<Option<Vec<_>>>()
+                .map(|values| values.join("|"))
+        }),
+        _ => None,
+    }
+    .ok_or_else(decoded_value_error)
+}
+
+fn decoded_value_error() -> LinkError {
+    LinkError::new(
+        ErrorKind::ProtocolProfileMismatch,
+        "decoded profile value cannot be encoded for rollback",
+    )
 }
 
 fn parse_assignments(input: &str) -> Result<BTreeMap<String, String>, LinkError> {
@@ -815,6 +1000,16 @@ impl<'a> AuthorizedControl<'a> {
 }
 
 impl CatalogProfile {
+    /// Built-in read-only profiles can establish readable semantics without authorizing writes.
+    #[must_use]
+    pub fn semantic_read_verified(&self) -> bool {
+        self.trust == ProfileTrust::BuiltIn
+            && matches!(
+                self.profile.status,
+                ProfileStatus::ReadOnly | ProfileStatus::Verified
+            )
+    }
+
     #[must_use]
     pub fn semantic_write_authorized(&self) -> bool {
         self.trust == ProfileTrust::BuiltIn && self.profile.status == ProfileStatus::Verified
@@ -861,12 +1056,25 @@ pub struct ProfileCatalog {
 
 impl ProfileCatalog {
     pub fn load(additional_directory: Option<&Path>) -> Result<Self, LinkError> {
-        let built_in = VendorProfile::parse(BUILTIN_LINK_2C_PRO, "builtin:insta360-link-2c-pro")?;
-        let mut profiles = vec![CatalogProfile {
-            checksum: built_in.checksum(),
-            profile: built_in,
-            trust: ProfileTrust::BuiltIn,
-        }];
+        let mut profiles = Vec::new();
+        for (source, origin) in [
+            (BUILTIN_LINK_2C_PRO, "builtin:insta360-link-2c-pro"),
+            (
+                BUILTIN_LINK_2C_PRO_OTHER_PERSONALITIES,
+                "builtin:insta360-link-2c-pro-other-personalities",
+            ),
+            (
+                BUILTIN_LINK_2C_PRO_V0_2_9_8_BUILD3,
+                "builtin:insta360-link-2c-pro-v0.2.9.8_build3",
+            ),
+        ] {
+            let built_in = VendorProfile::parse(source, origin)?;
+            profiles.push(CatalogProfile {
+                checksum: built_in.checksum(),
+                profile: built_in,
+                trust: ProfileTrust::BuiltIn,
+            });
+        }
         if let Some(directory) = additional_directory {
             let mut paths = fs::read_dir(directory)
                 .map_err(|error| profile_io_error(directory, &error))?
@@ -918,7 +1126,18 @@ impl ProfileCatalog {
         let matches = self
             .profiles
             .iter()
-            .filter(|entry| entry.profile.matches(identity, mode, firmware))
+            .filter_map(|entry| {
+                entry
+                    .profile
+                    .match_specificity(identity, mode, firmware)
+                    .map(|specificity| (entry, specificity))
+            })
+            .collect::<Vec<_>>();
+        let strongest = matches.iter().map(|(_, specificity)| *specificity).max();
+        let matches = matches
+            .into_iter()
+            .filter(|(_, specificity)| Some(*specificity) == strongest)
+            .map(|(entry, _)| entry)
             .collect::<Vec<_>>();
         match matches.as_slice() {
             [] => Ok(None),
@@ -1058,7 +1277,9 @@ mod tests {
     use link_core::probe::{DeviceMode, UsbIdentity};
     use serde_json::json;
 
-    use super::{ProfileCatalog, VendorProfile, decode_control, encode_control};
+    use super::{
+        ProfileCatalog, VendorProfile, decode_control, encode_control, encode_decoded_control,
+    };
 
     fn identity(hash: &str) -> UsbIdentity {
         UsbIdentity {
@@ -1082,7 +1303,28 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(matched.profile.profile_id, "insta360-link-2c-pro");
+        assert!(matched.semantic_read_verified());
         assert!(!matched.semantic_write_authorized());
+
+        let portrait = identity("7a60c8dd0f5e3d83e6c1c1fb245d96e02cc4ea6fdea8c10cc5a2e3b1094a2cc8");
+        let portrait = catalog
+            .matching(&portrait, DeviceMode::Camera, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(portrait.profile.profile_id, "insta360-link-2c-pro");
+        assert!(portrait.profile.controls.is_empty());
+
+        let mut u_disk =
+            identity("8c9226df8b126f700d738b42f38c0163549a37a19753832527ce27742d3d7f2e");
+        u_disk.vendor_id = 0x070a;
+        u_disk.product_id = 0x4026;
+        u_disk.device_revision = 0x0001;
+        let u_disk = catalog
+            .matching(&u_disk, DeviceMode::UDisk, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(u_disk.profile.profile_id, "insta360-link-2c-pro");
+        assert!(u_disk.profile.controls.is_empty());
 
         let mismatched =
             identity("2d0fa40a5787adc39223e26a5262f3d5e1ba0421e17442487157905cbd2a066c");
@@ -1143,6 +1385,155 @@ descriptor_sha256 = "00000000000000000000000000000000000000000000000000000000000
         assert_eq!(
             &encoded_61[52..],
             &[0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9]
+        );
+        let decoded_61 = decode_control(control_61, &encoded_61).unwrap();
+        assert_eq!(
+            encode_decoded_control(control_61, &decoded_61, None).unwrap(),
+            encoded_61
+        );
+    }
+
+    #[test]
+    fn firmware_specific_guards_outrank_identity_bootstrap_guards() {
+        let observed = identity("1d0fa40a5787adc39223e26a5262f3d5e1ba0421e17442487157905cbd2a066c");
+        let generic = ProfileCatalog::load(None)
+            .unwrap()
+            .matching(&observed, DeviceMode::Camera, None)
+            .unwrap()
+            .unwrap()
+            .profile
+            .clone();
+        assert_eq!(
+            generic.match_specificity(&observed, DeviceMode::Camera, Some("v1.2.3")),
+            Some(0)
+        );
+
+        let source = r#"
+schema_version = 1
+profile_id = "firmware-specific"
+model = "Insta360 Link 2C Pro"
+status = "read-only"
+
+[[match]]
+mode = "camera"
+usb_vid = 0x2e1a
+usb_pid = 0x4c05
+bcd_device_min = 0x0200
+bcd_device_max = 0x0200
+descriptor_sha256 = "1d0fa40a5787adc39223e26a5262f3d5e1ba0421e17442487157905cbd2a066c"
+firmware = ["v1.2.3"]
+"#;
+        let specific = VendorProfile::parse(source, "specific fixture").unwrap();
+        assert_eq!(
+            specific.match_specificity(&observed, DeviceMode::Camera, Some("v1.2.3")),
+            Some(1)
+        );
+        assert_eq!(
+            specific.match_specificity(&observed, DeviceMode::Camera, Some("v9")),
+            None
+        );
+    }
+
+    #[test]
+    fn exact_firmware_profile_authorizes_trace_matched_auto_framing() {
+        let observed = identity("1d0fa40a5787adc39223e26a5262f3d5e1ba0421e17442487157905cbd2a066c");
+        let catalog = ProfileCatalog::load(None).unwrap();
+        let matched = catalog
+            .matching(&observed, DeviceMode::Camera, Some("v0.2.9.8_build3"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            matched.profile.profile_id,
+            "insta360-link-2c-pro-v0.2.9.8-build3"
+        );
+        assert!(matched.semantic_read_verified());
+        assert!(matched.semantic_write_authorized());
+
+        let control = matched.profile.control("auto-framing.enabled").unwrap();
+        assert!(control.writable);
+        assert_eq!(control.stream_requirement, super::StreamRequirement::Open);
+        assert_eq!(control.stream_warmup_delay_ms, 13_000);
+        assert_eq!(control.write_prelude, super::WritePrelude::GetLengthTwice);
+        assert_eq!(
+            control.stream_format.as_ref().unwrap().video_tuple(),
+            link_core::media::VideoTuple {
+                fourcc: "MJPG".into(),
+                width: 1920,
+                height: 1080,
+                fps: link_core::probe::Rational {
+                    numerator: 30,
+                    denominator: 1,
+                },
+            }
+        );
+
+        let mut on_readback = vec![0; 61];
+        on_readback[0] = 0x07;
+        on_readback[38..42].fill(0xff);
+        assert_eq!(decode_control(control, &on_readback).unwrap(), json!("on"));
+        on_readback[0] = 0x00;
+        assert_eq!(decode_control(control, &on_readback).unwrap(), json!("off"));
+
+        let smart_composition = matched
+            .profile
+            .control("auto-framing.smart-composition")
+            .unwrap();
+        assert!(smart_composition.writable);
+        assert_eq!(
+            decode_control(smart_composition, &[0xd4, 0x01]).unwrap(),
+            json!("off")
+        );
+        assert_eq!(
+            decode_control(smart_composition, &[0xd5, 0x01]).unwrap(),
+            json!("on")
+        );
+
+        let style = matched.profile.control("auto-framing.style").unwrap();
+        assert!(style.writable);
+        assert_eq!(decode_control(style, &[0x01]).unwrap(), json!("head"));
+        assert_eq!(decode_control(style, &[0x02]).unwrap(), json!("half-body"));
+
+        let bootstrap = catalog
+            .matching(&observed, DeviceMode::Camera, Some("unknown"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(bootstrap.profile.profile_id, "insta360-link-2c-pro");
+        assert!(!bootstrap.semantic_write_authorized());
+    }
+
+    #[test]
+    fn utf8_firmware_values_trim_nul_padding() {
+        let source = r#"
+schema_version = 1
+profile_id = "firmware-text"
+model = "Insta360 Link 2C Pro"
+status = "read-only"
+
+[[match]]
+mode = "camera"
+usb_vid = 0x2e1a
+usb_pid = 0x4c05
+bcd_device_min = 0x0200
+bcd_device_max = 0x0200
+descriptor_sha256 = "1d0fa40a5787adc39223e26a5262f3d5e1ba0421e17442487157905cbd2a066c"
+
+[[controls]]
+name = "firmware.version"
+entity_guid = "faf1672d-b71b-4793-8c91-7b1c9b7f95f8"
+selector = 1
+length = 16
+readable = true
+writable = false
+codec = "utf8"
+offset = 2
+width = 8
+"#;
+        let profile = VendorProfile::parse(source, "firmware fixture").unwrap();
+        let mut payload = vec![0; 16];
+        payload[2..9].copy_from_slice(b"v1.2.3\0");
+        assert_eq!(
+            decode_control(&profile.controls[0], &payload).unwrap(),
+            json!("v1.2.3")
         );
     }
 }

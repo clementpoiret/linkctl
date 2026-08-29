@@ -12,6 +12,18 @@ linkctl audio status --source pipewire:alsa_input.usb-…
 
 `audio devices` reports capture and playback routes, sample ranges/formats, discovered mixer controls, default-session routing, exclusive ALSA busy state, and current gain/mute layers. Machine output keeps hardware and host state separate.
 
+Camera-resident pickup modes have a separate semantic surface:
+
+```sh
+linkctl --device link2cpro-… audio mode status
+linkctl --device link2cpro-… audio mode standard
+linkctl --device link2cpro-… audio mode wide
+linkctl --device link2cpro-… audio mode focus
+linkctl --device link2cpro-… audio mode original
+```
+
+These commands do not substitute a PipeWire filter for a camera mode. Until an exact transport and firmware-specific mapping are verified, status reports `discovered-unmapped` and mutations fail without issuing a device write.
+
 ## Gain and mute
 
 Automatic control prefers a working ALSA/UAC hardware mixer and falls back to the PipeWire session node. Force the layer with global `--backend standard` or `--backend host`:

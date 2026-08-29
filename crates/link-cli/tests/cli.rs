@@ -50,6 +50,13 @@ fn help_and_version_advertise_only_implemented_commands() {
     assert!(stdout.contains("device"));
     assert!(stdout.contains("control"));
     assert!(stdout.contains("image"));
+    assert!(stdout.contains("zoom"));
+    assert!(stdout.contains("frame"));
+    assert!(stdout.contains("auto-framing"));
+    assert!(stdout.contains("gesture"));
+    assert!(stdout.contains("portrait"));
+    assert!(stdout.contains("privacy"));
+    assert!(stdout.contains("firmware"));
     assert!(stdout.contains("video"));
     assert!(stdout.contains("audio"));
     assert!(stdout.contains("snapshot"));
@@ -269,7 +276,7 @@ fn audio_help_exposes_discovery_control_and_streaming_commands() {
     assert!(audio.status.success());
     let stdout = String::from_utf8(audio.stdout).expect("UTF-8 help");
     for command in [
-        "devices", "status", "gain", "mute", "unmute", "meter", "capture", "monitor",
+        "devices", "status", "gain", "mute", "unmute", "mode", "meter", "capture", "monitor",
     ] {
         assert!(stdout.contains(command));
     }
@@ -337,6 +344,37 @@ fn control_and_image_help_expose_only_non_mechanical_commands() {
     assert!(!stdout.contains("pan"));
     assert!(!stdout.contains("tilt"));
     assert!(!stdout.contains("gimbal"));
+}
+
+#[test]
+fn camera_native_help_exposes_only_fixed_mount_semantics() {
+    for (command, expected) in [
+        ("zoom", &["get", "set", "step", "ramp", "reset"][..]),
+        ("frame", &["status", "set", "move", "center"]),
+        ("auto-framing", &["on", "off", "status", "style"]),
+        ("gesture", &["status", "enable", "disable", "set"]),
+        ("portrait", &["status", "native"]),
+    ] {
+        let help = run(&[command, "--help"]);
+        assert!(
+            help.status.success(),
+            "{command}: {}",
+            String::from_utf8_lossy(&help.stderr)
+        );
+        let stdout = String::from_utf8(help.stdout).expect("UTF-8 help");
+        for item in expected {
+            assert!(stdout.contains(item), "{command} help omitted {item}");
+        }
+        for prohibited in ["gimbal", "tracking-zone", "motor"] {
+            assert!(!stdout.contains(prohibited));
+        }
+    }
+
+    let style = run(&["auto-framing", "style", "--help"]);
+    let stdout = String::from_utf8(style.stdout).expect("UTF-8 help");
+    assert!(stdout.contains("head"));
+    assert!(stdout.contains("half-body"));
+    assert!(!stdout.contains("full-body"));
 }
 
 #[test]

@@ -34,9 +34,10 @@ integer values so values round-trip without normalized-slider loss. Pan and tilt
 an imported preset requests them.
 
 Preset schema 1 intentionally contains only state that current direct backends can verify: an exact video tuple, safe
-standard controls, and one explicit hardware or host audio-control layer. Vendor modes, effects, recording/streaming
-targets, and inline credentials are not accepted. No earlier public preset schema exists; loading still passes through a
-version-dispatch boundary so a real migration can be added when one is needed.
+standard controls (including standard digital zoom), and one explicit hardware or host audio-control layer. Camera-native
+vendor modes are not captured until a trusted profile can read, write, verify, and restore them; effects,
+recording/streaming targets, and inline credentials are also not accepted. No earlier public preset schema exists;
+loading still passes through a version-dispatch boundary so a real migration can be added when one is needed.
 
 ```toml
 schema_version = 1

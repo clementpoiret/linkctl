@@ -23,6 +23,7 @@
     pkgs.systemd
     pkgs.usbutils
     pkgs.v4l-utils
+    pkgs.wireshark-cli
     pkgs.wireplumber
   ];
 }

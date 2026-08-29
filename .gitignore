@@ -15,6 +15,9 @@ devenv.local.yaml
 # Local product specifications (must never be committed)
 /specs/
 
+# Private hardware research captures (publish only reviewed fixtures)
+/traces/
+
 # Devenv
 .devenv*
 devenv.local.nix

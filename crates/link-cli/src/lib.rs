@@ -7,8 +7,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     thread,
-    time::Duration,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(feature = "gstreamer")]
@@ -27,9 +26,9 @@ use link_core::{
         Config, ConfigLoader, ConfigOverrides, DaemonMode, DurationValue, LogLevel, OutputFormat,
     },
     control::{
-        CapabilityConfidence, CapabilityRecord, CapabilityState, ControlCapabilities,
-        ControlChangeReport, ControlDescriptor, ControlEvent, ControlSetReport, ControlValue,
-        RollbackReport,
+        CapabilityConfidence, CapabilityRecord, CapabilitySource, CapabilityState,
+        ControlCapabilities, ControlChangeReport, ControlDescriptor, ControlEvent,
+        ControlSetReport, ControlValue, RollbackReport, SemanticRange,
     },
     device::{DeviceEvent, DeviceState, DoctorCheck, DoctorReport, DoctorStatus},
     logging,
@@ -52,7 +51,10 @@ use link_core::{
     },
 };
 use link_linux::DiscoveredDevice;
-use link_profiles::{ProfileCatalog, SafetyClass, VerificationMethod};
+use link_profiles::{
+    CodecKind, Persistence, ProfileCatalog, RollbackPolicy, SafetyClass, StreamRequirement,
+    VerificationMethod,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -147,6 +149,46 @@ pub enum Command {
         #[command(subcommand)]
         command: ImageCommand,
     },
+    /// Inspect or change camera-native digital zoom.
+    Zoom {
+        #[command(subcommand)]
+        command: ZoomCommand,
+    },
+    /// Inspect or change verified digital frame translation.
+    Frame {
+        #[command(subcommand)]
+        command: FrameCommand,
+    },
+    /// Inspect or change camera-native automatic framing.
+    AutoFraming {
+        #[command(subcommand)]
+        command: AutoFramingCommand,
+    },
+    /// Inspect or change camera-native operating modes.
+    Mode {
+        #[command(subcommand)]
+        command: ModeCommand,
+    },
+    /// Inspect or configure camera-resident gesture recognition.
+    Gesture {
+        #[command(subcommand)]
+        command: GestureCommand,
+    },
+    /// Inspect or change native portrait operation.
+    Portrait {
+        #[command(subcommand)]
+        command: PortraitCommand,
+    },
+    /// Report physical and logical privacy state without actuating the shutter.
+    Privacy {
+        #[command(subcommand)]
+        command: PrivacyCommand,
+    },
+    /// Inspect verified camera firmware information.
+    Firmware {
+        #[command(subcommand)]
+        command: FirmwareCommand,
+    },
     /// Inspect or negotiate exact V4L2 video formats.
     Video {
         #[command(subcommand)]
@@ -210,6 +252,8 @@ pub enum DeviceCommand {
         #[arg(long)]
         include_serial: bool,
     },
+    /// Report camera personality, stream, indicator, and error state.
+    State,
     /// Watch add, remove, re-enumeration, and profile changes.
     Watch,
     /// Capture descriptors, V4L2 controls/formats, XUs, and audio capabilities.
@@ -227,6 +271,8 @@ pub enum DeviceCommand {
 /// Implemented capability reports.
 #[derive(Clone, Debug, Subcommand)]
 pub enum CapsCommand {
+    /// Report every implemented, unavailable, and unmapped semantic capability.
+    All,
     /// Report semantic image capabilities and all raw V4L2 controls.
     Controls,
 }
@@ -310,8 +356,158 @@ pub enum ImageCommand {
     AntiFlicker { value: AntiFlickerChoice },
     /// Set standard wide-dynamic-range/HDR state.
     Hdr { value: ToggleChoice },
+    /// Set camera-native horizontal mirroring when a verified mapping exists.
+    Mirror { value: ToggleChoice },
+    /// Set camera-native vertical flipping when a verified mapping exists.
+    Flip { value: ToggleChoice },
     /// Reset every present semantic image control with a valid default.
     Reset,
+}
+
+/// Camera-native digital zoom operations.
+#[derive(Clone, Debug, Subcommand)]
+pub enum ZoomCommand {
+    /// Read the current camera-native zoom factor.
+    Get,
+    /// Set an exact zoom factor such as `1.5x`.
+    Set { factor: String },
+    /// Add a signed zoom delta such as `+0.1x`.
+    Step { delta: String },
+    /// Move linearly between two factors over a bounded duration.
+    Ramp {
+        from: String,
+        to: String,
+        #[arg(long)]
+        duration: DurationValue,
+    },
+    /// Restore the driver-advertised zoom default.
+    Reset,
+}
+
+/// Digital frame translation operations.
+#[derive(Clone, Debug, Subcommand)]
+pub enum FrameCommand {
+    Status,
+    Set {
+        #[arg(long)]
+        x: f64,
+        #[arg(long)]
+        y: f64,
+    },
+    Move {
+        #[arg(long, allow_hyphen_values = true)]
+        x: f64,
+        #[arg(long, allow_hyphen_values = true)]
+        y: f64,
+    },
+    Center,
+}
+
+/// Camera-native automatic-framing operations.
+#[derive(Clone, Debug, Subcommand)]
+pub enum AutoFramingCommand {
+    On,
+    Off,
+    Status,
+    Style { style: AutoFramingStyle },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum AutoFramingStyle {
+    Head,
+    HalfBody,
+}
+
+/// Camera-native mode operations.
+#[derive(Clone, Debug, Subcommand)]
+pub enum ModeCommand {
+    Normal,
+    Whiteboard {
+        #[command(subcommand)]
+        command: ToggleStatusCommand,
+    },
+    Compatibility {
+        #[command(subcommand)]
+        command: CompatibilityCommand,
+    },
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum CompatibilityCommand {
+    Status,
+    Set { value: CompatibilityMode },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum CompatibilityMode {
+    Standard,
+    LowResolution,
+    Yuy2,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum ToggleStatusCommand {
+    On,
+    Off,
+    Status,
+}
+
+/// Camera-resident gesture configuration.
+#[derive(Clone, Debug, Subcommand)]
+pub enum GestureCommand {
+    Status,
+    Enable,
+    Disable,
+    Set {
+        gesture: GestureKind,
+        action: GestureAction,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum GestureKind {
+    Palm,
+    VSign,
+    LSign,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum GestureAction {
+    Disabled,
+    AutoFraming,
+    Whiteboard,
+    Zoom,
+}
+
+/// Native portrait operations. Host portrait is implemented by the daemon later.
+#[derive(Clone, Debug, Subcommand)]
+pub enum PortraitCommand {
+    Status,
+    Native {
+        #[command(subcommand)]
+        command: PortraitNativeCommand,
+    },
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum PortraitNativeCommand {
+    Enable {
+        #[arg(long)]
+        horizontal_correction: Option<ToggleChoice>,
+        #[arg(long)]
+        vertical_correction: Option<ToggleChoice>,
+    },
+    Disable,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum PrivacyCommand {
+    Status,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum FirmwareCommand {
+    Info,
 }
 
 /// V4L2 video format and direct stream statistics operations.
@@ -403,6 +599,11 @@ pub enum AudioCommand {
         #[arg(long, default_value = "camera")]
         source: String,
     },
+    /// Inspect or change the camera's verified pickup mode.
+    Mode {
+        #[command(subcommand)]
+        command: AudioModeCommand,
+    },
     /// Emit periodic peak/RMS and discontinuity events.
     #[cfg(feature = "gstreamer")]
     Meter(AudioMeterArgs),
@@ -412,6 +613,15 @@ pub enum AudioCommand {
     /// Monitor a capture source through a playback sink.
     #[cfg(feature = "gstreamer")]
     Monitor(AudioMonitorArgs),
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum AudioModeCommand {
+    Status,
+    Standard,
+    Wide,
+    Focus,
+    Original,
 }
 
 /// Local preset operations.
@@ -974,6 +1184,9 @@ pub fn run(arguments: Vec<OsString>) -> u8 {
             command: DeviceCommand::Info { include_serial },
         }) => run_device_info(&config, include_serial),
         Some(Command::Device {
+            command: DeviceCommand::State,
+        }) => run_device_state(&config),
+        Some(Command::Device {
             command: DeviceCommand::Watch,
         }) => run_device_watch(&config),
         Some(Command::Device {
@@ -986,12 +1199,25 @@ pub fn run(arguments: Vec<OsString>) -> u8 {
         Some(Command::Caps {
             command: CapsCommand::Controls,
         }) => run_caps_controls(&config, cli.backend),
+        Some(Command::Caps {
+            command: CapsCommand::All,
+        }) => run_caps_all(&config, cli.backend),
         Some(Command::Control { command }) => {
             run_control(&config, cli.backend, command, cli.dry_run, cli.yes)
         }
         Some(Command::Image { command }) => {
             run_image(&config, cli.backend, command, cli.dry_run, cli.yes)
         }
+        Some(Command::Zoom { command }) => {
+            run_zoom(&config, cli.backend, command, cli.dry_run, cli.yes)
+        }
+        Some(Command::Frame { command }) => run_frame(&config, command, cli.dry_run),
+        Some(Command::AutoFraming { command }) => run_auto_framing(&config, command, cli.dry_run),
+        Some(Command::Mode { command }) => run_mode(&config, command, cli.dry_run),
+        Some(Command::Gesture { command }) => run_gesture(&config, command, cli.dry_run),
+        Some(Command::Portrait { command }) => run_portrait(&config, command, cli.dry_run),
+        Some(Command::Privacy { command }) => run_privacy(&config, command),
+        Some(Command::Firmware { command }) => run_firmware(&config, command),
         Some(Command::Video { command }) => run_video(&config, cli.backend, command, cli.dry_run),
         Some(Command::Audio { command }) => run_audio(&config, cli.backend, command, cli.dry_run),
         Some(Command::Preset { command }) => run_preset(&config, cli.backend, command, cli.dry_run),
@@ -1051,7 +1277,19 @@ fn load_selected_device_config(
 
 fn command_uses_device_defaults(command: Option<&Command>) -> bool {
     match command {
-        Some(Command::Control { .. } | Command::Image { .. } | Command::Video { .. }) => true,
+        Some(
+            Command::Control { .. }
+            | Command::Image { .. }
+            | Command::Zoom { .. }
+            | Command::Frame { .. }
+            | Command::AutoFraming { .. }
+            | Command::Mode { .. }
+            | Command::Gesture { .. }
+            | Command::Portrait { .. }
+            | Command::Privacy { .. }
+            | Command::Firmware { .. }
+            | Command::Video { .. },
+        ) => true,
         Some(Command::Xu {
             command: XuCommand::Diff { .. },
         }) => false,
@@ -1065,6 +1303,7 @@ fn command_uses_device_defaults(command: Option<&Command>) -> bool {
             | AudioCommand::Gain { source, .. }
             | AudioCommand::Mute { source }
             | AudioCommand::Unmute { source } => source == "camera",
+            AudioCommand::Mode { .. } => true,
             #[cfg(feature = "gstreamer")]
             AudioCommand::Meter(arguments) => arguments.stream.source == "camera",
             #[cfg(feature = "gstreamer")]
@@ -1102,10 +1341,14 @@ fn command_identifier(command: Option<&Command>) -> &'static str {
         Some(Command::Device { command }) => match command {
             DeviceCommand::List { .. } => "device.list",
             DeviceCommand::Info { .. } => "device.info",
+            DeviceCommand::State => "device.state",
             DeviceCommand::Watch => "device.watch",
             DeviceCommand::Probe { .. } => "device.probe",
         },
-        Some(Command::Caps { .. }) => "caps.controls",
+        Some(Command::Caps { command }) => match command {
+            CapsCommand::All => "caps.all",
+            CapsCommand::Controls => "caps.controls",
+        },
         Some(Command::Control { command }) => match command {
             ControlCommand::List => "control.list",
             ControlCommand::Get { .. } => "control.get",
@@ -1127,8 +1370,46 @@ fn command_identifier(command: Option<&Command>) -> &'static str {
             ImageCommand::BacklightCompensation(_) => "image.backlight-compensation",
             ImageCommand::AntiFlicker { .. } => "image.anti-flicker",
             ImageCommand::Hdr { .. } => "image.hdr",
+            ImageCommand::Mirror { .. } => "image.mirror",
+            ImageCommand::Flip { .. } => "image.flip",
             ImageCommand::Reset => "image.reset",
         },
+        Some(Command::Zoom { command }) => match command {
+            ZoomCommand::Get => "zoom.get",
+            ZoomCommand::Set { .. } => "zoom.set",
+            ZoomCommand::Step { .. } => "zoom.step",
+            ZoomCommand::Ramp { .. } => "zoom.ramp",
+            ZoomCommand::Reset => "zoom.reset",
+        },
+        Some(Command::Frame { command }) => match command {
+            FrameCommand::Status => "frame.status",
+            FrameCommand::Set { .. } => "frame.set",
+            FrameCommand::Move { .. } => "frame.move",
+            FrameCommand::Center => "frame.center",
+        },
+        Some(Command::AutoFraming { command }) => match command {
+            AutoFramingCommand::On => "auto-framing.on",
+            AutoFramingCommand::Off => "auto-framing.off",
+            AutoFramingCommand::Status => "auto-framing.status",
+            AutoFramingCommand::Style { .. } => "auto-framing.style",
+        },
+        Some(Command::Mode { command }) => match command {
+            ModeCommand::Normal => "mode.normal",
+            ModeCommand::Whiteboard { .. } => "mode.whiteboard",
+            ModeCommand::Compatibility { .. } => "mode.compatibility",
+        },
+        Some(Command::Gesture { command }) => match command {
+            GestureCommand::Status => "gesture.status",
+            GestureCommand::Enable => "gesture.enable",
+            GestureCommand::Disable => "gesture.disable",
+            GestureCommand::Set { .. } => "gesture.set",
+        },
+        Some(Command::Portrait { command }) => match command {
+            PortraitCommand::Status => "portrait.status",
+            PortraitCommand::Native { .. } => "portrait.native",
+        },
+        Some(Command::Privacy { .. }) => "privacy.status",
+        Some(Command::Firmware { .. }) => "firmware.info",
         Some(Command::Video { command }) => match command {
             VideoCommand::Formats(_) => "video.formats",
             VideoCommand::Status => "video.status",
@@ -1141,6 +1422,13 @@ fn command_identifier(command: Option<&Command>) -> &'static str {
             AudioCommand::Gain { .. } => "audio.gain",
             AudioCommand::Mute { .. } => "audio.mute",
             AudioCommand::Unmute { .. } => "audio.unmute",
+            AudioCommand::Mode { command } => match command {
+                AudioModeCommand::Status => "audio.mode.status",
+                AudioModeCommand::Standard => "audio.mode.standard",
+                AudioModeCommand::Wide => "audio.mode.wide",
+                AudioModeCommand::Focus => "audio.mode.focus",
+                AudioModeCommand::Original => "audio.mode.original",
+            },
             #[cfg(feature = "gstreamer")]
             AudioCommand::Meter(_) => "audio.meter",
             #[cfg(feature = "gstreamer")]
@@ -1535,6 +1823,26 @@ struct XuWriteReport {
 }
 
 #[derive(Serialize)]
+struct XuSemanticTransactionReport {
+    steps: Vec<XuWriteReport>,
+    verified: bool,
+    dry_run: bool,
+}
+
+struct PreparedSemanticWrite<'a> {
+    authorization: link_profiles::AuthorizedControl<'a>,
+    guid: String,
+    address: link_uvc_xu::XuAddress,
+    baseline: Vec<u8>,
+    previous: Value,
+    payload: Vec<u8>,
+    requested: Value,
+    observed: Option<Value>,
+    verified: bool,
+    rate_limit_wait_ms: u64,
+}
+
+#[derive(Serialize)]
 struct XuRecoveryReport {
     node: String,
     handles_reopened: bool,
@@ -1583,7 +1891,9 @@ fn run_xu(
             interval,
             include_volatile,
         } => run_xu_watch(config, interval.get(), include_volatile),
-        XuCommand::Set { control, value } => run_xu_semantic_set(config, &control, &value, dry_run),
+        XuCommand::Set { control, value } => {
+            run_xu_semantic_set(config, "xu.set", &control, &value, dry_run)
+        }
         XuCommand::RawSet {
             guid,
             selector,
@@ -1678,6 +1988,54 @@ fn selected_xu_context(
         link_uvc_xu::XuSession::open_read(Path::new(&node.path))?
     };
     Ok((device, node, inventory, catalog, session))
+}
+
+fn resolve_firmware_profile<'a>(
+    device: &DiscoveredDevice,
+    inventory: &link_uvc_xu::DescriptorInventory,
+    catalog: &'a ProfileCatalog,
+    session: &link_uvc_xu::XuSession,
+) -> Result<(Option<&'a link_profiles::CatalogProfile>, Option<String>), LinkError> {
+    let bootstrap = catalog.matching(&device.identity, device.mode(), None)?;
+    let firmware = bootstrap
+        .and_then(|entry| {
+            entry
+                .profile
+                .control("firmware.version")
+                .map(|control| (entry, control))
+        })
+        .filter(|(_, control)| control.readable)
+        .map(|(entry, control)| {
+            let value = link_uvc_xu::read_value(
+                session,
+                inventory,
+                Some(&control.entity_guid),
+                None,
+                control.selector,
+                Some(control.length),
+                Some(&entry.profile),
+            )?;
+            let decoded = value.decoded.get("firmware.version").ok_or_else(|| {
+                LinkError::new(
+                    ErrorKind::ProtocolProfileMismatch,
+                    "firmware bootstrap control did not decode a value",
+                )
+            })?;
+            let version = match decoded {
+                Value::String(value) => value.clone(),
+                value => value.to_string(),
+            };
+            if version.trim().is_empty() {
+                return Err(LinkError::new(
+                    ErrorKind::ProtocolProfileMismatch,
+                    "firmware bootstrap control decoded an empty value",
+                ));
+            }
+            Ok::<String, LinkError>(version)
+        })
+        .transpose()?;
+    let selected = catalog.matching(&device.identity, device.mode(), firmware.as_deref())?;
+    Ok((selected, firmware))
 }
 
 fn run_xu_get(
@@ -1881,23 +2239,54 @@ fn authorize_control_safety(class: SafetyClass, policy: &SafetyPolicy) -> Result
 
 fn run_xu_semantic_set(
     config: &Config,
+    command: &'static str,
     control_name: &str,
     input: &str,
     dry_run: bool,
 ) -> Result<(), LinkError> {
+    run_xu_semantic_writes(config, command, &[(control_name, input)], dry_run)
+}
+
+fn run_xu_semantic_transaction(
+    config: &Config,
+    command: &'static str,
+    writes: &[(&str, &str)],
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    if writes.len() < 2 {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "semantic XU transactions require at least two writes",
+        ));
+    }
+    run_xu_semantic_writes(config, command, writes, dry_run)
+}
+
+fn run_xu_semantic_writes(
+    config: &Config,
+    command: &'static str,
+    writes: &[(&str, &str)],
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    if writes.is_empty() {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "semantic XU writes cannot be empty",
+        ));
+    }
     let (device, node, inventory, catalog, session) = selected_xu_context(config, true)?;
     let stable_id = device.identity.stable_id();
-    let _lease = acquire_operation_lease(config, &stable_id, "xu.set")?;
+    let _lease = acquire_operation_lease(config, &stable_id, command)?;
     #[cfg(feature = "gstreamer")]
-    let _media_lease = link_media::MediaLease::acquire(&stable_id, "xu.set")?;
-    let entry = catalog
-        .matching(&device.identity, device.mode(), None)?
-        .ok_or_else(|| {
-            LinkError::new(
-                ErrorKind::ProtocolProfileMismatch,
-                "no exact vendor profile matches the selected device",
-            )
-        })?;
+    let _media_lease = link_media::MediaLease::acquire(&stable_id, command)?;
+    let (entry, firmware) = resolve_firmware_profile(&device, &inventory, &catalog, &session)?;
+    let entry = entry.ok_or_else(|| {
+        LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "no exact vendor profile matches the selected device",
+        )
+        .with_detail("firmware", firmware.unwrap_or_else(|| "unknown".into()))
+    })?;
     SafetyPolicy::new(config.safety.clone())
         .authorize(Operation::VendorProfileWrite(entry.state()))?;
     if !entry.semantic_write_authorized() {
@@ -1906,114 +2295,223 @@ fn run_xu_semantic_set(
             "semantic XU writes require a compiled-in trusted verified profile",
         ));
     }
-    let authorization = entry.authorized_control(control_name).ok_or_else(|| {
-        LinkError::new(
-            ErrorKind::CapabilityUnsupported,
-            "semantic XU control is not a writable authorized profile control",
-        )
-    })?;
-    let control = authorization.control();
     let policy = SafetyPolicy::new(config.safety.clone());
-    authorize_control_safety(control.safety, &policy)?;
-    if control.verification != VerificationMethod::Readback {
-        return Err(LinkError::new(
-            ErrorKind::CapabilityUnsupported,
-            "semantic XU writes currently require direct readback verification",
-        )
-        .with_detail("verification", format!("{:?}", control.verification)));
-    }
-    let _stream = prepare_xu_stream(
-        control.stream_requirement,
-        &node.path,
-        config.timeout.get(),
-        dry_run,
-    )?;
-    let (guid, address) = link_uvc_xu::resolve_address(
-        &inventory,
-        Some(&control.entity_guid),
-        None,
-        control.selector,
-    )?;
-    let baseline = if control.readable || control.read_modify_write {
-        Some(session.get_current(address, Some(control.length))?.1)
-    } else {
-        None
-    };
-    let payload = link_profiles::encode_control(control, input, baseline.as_deref())?;
-    let rate_wait = link_uvc_xu::RateLimiter::from_process()?.enforce(
-        &format!("{stable_id}:{guid}:{}", control.selector),
-        Duration::from_millis(
-            control
-                .minimum_write_interval_ms
-                .max(config.safety.minimum_xu_write_interval_ms),
-        ),
-        config.timeout.get(),
-        dry_run,
-    )?;
-    let requested = link_profiles::decode_control(control, &payload)?;
-    let mut observed = None;
-    let mut verified = dry_run;
-    if !dry_run {
-        session.set_profiled(address, authorization, &payload)?;
-        let readback = session.get_current(address, Some(control.length))?.1;
-        observed = Some(link_profiles::decode_control(control, &readback)?);
-        verified = readback == payload;
-        if !verified {
-            if let Some(previous) = &baseline {
-                let _rollback = session.set_profiled(address, authorization, previous);
-            }
+    let mut authorized = Vec::with_capacity(writes.len());
+    for (control_name, input) in writes {
+        let authorization = entry.authorized_control(control_name).ok_or_else(|| {
+            LinkError::new(
+                ErrorKind::CapabilityUnsupported,
+                "semantic XU control is not a writable authorized profile control",
+            )
+            .with_detail("control", (*control_name).to_owned())
+        })?;
+        let control = authorization.control();
+        authorize_control_safety(control.safety, &policy)?;
+        if control.verification != VerificationMethod::Readback {
             return Err(LinkError::new(
-                ErrorKind::ProtocolProfileMismatch,
-                "semantic XU write failed readback verification",
-            ));
+                ErrorKind::CapabilityUnsupported,
+                "semantic XU writes currently require direct readback verification",
+            )
+            .with_detail("control", control.name.clone())
+            .with_detail("verification", format!("{:?}", control.verification)));
+        }
+        authorized.push((authorization, *input));
+    }
+
+    let stream_control = authorized[0].0.control();
+    if authorized.iter().skip(1).any(|(authorization, _)| {
+        let control = authorization.control();
+        control.stream_requirement != stream_control.stream_requirement
+            || control.stream_format != stream_control.stream_format
+            || control.stream_warmup_delay_ms != stream_control.stream_warmup_delay_ms
+    }) {
+        return Err(LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "semantic XU transaction controls require incompatible stream conditions",
+        ));
+    }
+    let _stream = prepare_xu_stream(stream_control, &node.path, config.timeout.get(), dry_run)?;
+    let limiter = link_uvc_xu::RateLimiter::from_process()?;
+    let mut prepared = Vec::with_capacity(authorized.len());
+    for (authorization, input) in authorized {
+        let control = authorization.control();
+        let (guid, address) = link_uvc_xu::resolve_address(
+            &inventory,
+            Some(&control.entity_guid),
+            None,
+            control.selector,
+        )?;
+        let baseline = session.get_current(address, Some(control.length))?.1;
+        let previous = link_profiles::decode_control(control, &baseline)?;
+        let payload = link_profiles::encode_control(control, input, Some(&baseline))?;
+        let requested = link_profiles::decode_control(control, &payload)?;
+        let rate_wait = limiter.enforce(
+            &format!("{stable_id}:{guid}:{}", control.selector),
+            Duration::from_millis(
+                control
+                    .minimum_write_interval_ms
+                    .max(config.safety.minimum_xu_write_interval_ms),
+            ),
+            config.timeout.get(),
+            dry_run,
+        )?;
+        prepared.push(PreparedSemanticWrite {
+            authorization,
+            guid,
+            address,
+            baseline,
+            previous,
+            payload,
+            requested,
+            observed: None,
+            verified: false,
+            rate_limit_wait_ms: rate_wait.as_millis() as u64,
+        });
+    }
+
+    if !dry_run {
+        for index in 0..prepared.len() {
+            let write_result = apply_semantic_write(&session, &prepared[index]);
+            match write_result {
+                Ok(observed) if observed == prepared[index].requested => {
+                    prepared[index].observed = Some(observed);
+                    prepared[index].verified = true;
+                }
+                Ok(observed) => {
+                    prepared[index].observed = Some(observed);
+                    let rollback = rollback_semantic_writes(&session, &prepared[..=index]);
+                    return Err(LinkError::new(
+                        ErrorKind::ProtocolProfileMismatch,
+                        "semantic XU write failed readback verification",
+                    )
+                    .with_detail(
+                        "control",
+                        prepared[index].authorization.control().name.clone(),
+                    )
+                    .with_detail("rollback", rollback));
+                }
+                Err(error) => {
+                    let rollback = rollback_semantic_writes(&session, &prepared[..=index]);
+                    return Err(error
+                        .with_detail(
+                            "control",
+                            prepared[index].authorization.control().name.clone(),
+                        )
+                        .with_detail("rollback", rollback));
+                }
+            }
         }
         complete_xu_stream_requirement(
-            control.stream_requirement,
+            stream_control.stream_requirement,
             &node.path,
             config.timeout.get(),
         )?;
     }
-    let report = XuWriteReport {
-        control: Some(control.name.clone()),
-        guid,
-        unit: address.unit,
-        selector: address.selector,
-        length: control.length,
-        previous: baseline
-            .as_deref()
-            .map(|payload| link_profiles::decode_control(control, payload))
-            .transpose()?,
-        requested,
-        observed,
-        verified,
-        dry_run,
-        rate_limit_wait_ms: rate_wait.as_millis() as u64,
-        audit_path: None,
-    };
-    emit_xu_write_report(config, "xu.set", &device, &report)
+    let reports = prepared
+        .into_iter()
+        .map(|write| {
+            let control = write.authorization.control();
+            XuWriteReport {
+                control: Some(control.name.clone()),
+                guid: write.guid,
+                unit: write.address.unit,
+                selector: write.address.selector,
+                length: control.length,
+                previous: Some(write.previous),
+                requested: write.requested,
+                observed: write.observed,
+                verified: write.verified,
+                dry_run,
+                rate_limit_wait_ms: write.rate_limit_wait_ms,
+                audit_path: None,
+            }
+        })
+        .collect::<Vec<_>>();
+    if let [report] = reports.as_slice() {
+        emit_xu_write_report(config, command, &device, report)
+    } else {
+        emit_xu_semantic_transaction_report(config, command, &device, reports, dry_run)
+    }
+}
+
+fn apply_semantic_write(
+    session: &link_uvc_xu::XuSession,
+    write: &PreparedSemanticWrite<'_>,
+) -> Result<Value, LinkError> {
+    let control = write.authorization.control();
+    session.set_profiled(write.address, write.authorization, &write.payload)?;
+    thread::sleep(Duration::from_millis(control.verification_delay_ms));
+    let readback = session.get_current(write.address, Some(control.length))?.1;
+    link_profiles::decode_control(control, &readback)
+}
+
+fn rollback_semantic_writes(
+    session: &link_uvc_xu::XuSession,
+    writes: &[PreparedSemanticWrite<'_>],
+) -> Value {
+    let mut results = Vec::with_capacity(writes.len());
+    for write in writes.iter().rev() {
+        let control = write.authorization.control();
+        if control.rollback == RollbackPolicy::None {
+            results.push(json!({
+                "control": control.name,
+                "attempted": false,
+                "reason": "profile marks rollback unavailable",
+            }));
+            continue;
+        }
+        let restored =
+            link_profiles::encode_decoded_control(control, &write.previous, Some(&write.baseline))
+                .and_then(|payload| {
+                    session.set_profiled(write.address, write.authorization, &payload)?;
+                    thread::sleep(Duration::from_millis(control.verification_delay_ms));
+                    let readback = session.get_current(write.address, Some(control.length))?.1;
+                    Ok(link_profiles::decode_control(control, &readback)? == write.previous)
+                });
+        match restored {
+            Ok(restored) => results.push(json!({
+                "control": control.name,
+                "attempted": true,
+                "restored": restored,
+            })),
+            Err(error) => results.push(json!({
+                "control": control.name,
+                "attempted": true,
+                "restored": false,
+                "error": error.message(),
+            })),
+        }
+    }
+    Value::Array(results)
 }
 
 #[cfg(feature = "gstreamer")]
 fn prepare_xu_stream(
-    requirement: link_profiles::StreamRequirement,
+    control: &link_profiles::ProfileControl,
     node: &str,
     timeout: Duration,
     dry_run: bool,
 ) -> Result<Option<link_media::ProbeStream>, LinkError> {
-    if dry_run || requirement != link_profiles::StreamRequirement::Open {
+    if dry_run || control.stream_requirement != link_profiles::StreamRequirement::Open {
         return Ok(None);
     }
-    link_media::ProbeStream::open(node, timeout).map(Some)
+    let format = control
+        .stream_format
+        .as_ref()
+        .map(link_profiles::StreamFormat::video_tuple);
+    let stream = link_media::ProbeStream::open_with_format(node, timeout, format.as_ref())?;
+    thread::sleep(Duration::from_millis(control.stream_warmup_delay_ms));
+    Ok(Some(stream))
 }
 
 #[cfg(not(feature = "gstreamer"))]
 fn prepare_xu_stream(
-    requirement: link_profiles::StreamRequirement,
+    control: &link_profiles::ProfileControl,
     _node: &str,
     _timeout: Duration,
     _dry_run: bool,
 ) -> Result<Option<()>, LinkError> {
-    match requirement {
+    match control.stream_requirement {
         link_profiles::StreamRequirement::Either | link_profiles::StreamRequirement::Closed => {
             Ok(None)
         }
@@ -2068,14 +2566,14 @@ fn run_xu_raw_set(
     let _lease = acquire_operation_lease(config, &stable_id, "xu.raw-set")?;
     #[cfg(feature = "gstreamer")]
     let _media_lease = link_media::MediaLease::acquire(&stable_id, "xu.raw-set")?;
-    let entry = catalog
-        .matching(&device.identity, device.mode(), None)?
-        .ok_or_else(|| {
-            LinkError::new(
-                ErrorKind::ProtocolProfileMismatch,
-                "raw XU writes require a known firmware and exact descriptor profile match",
-            )
-        })?;
+    let (entry, firmware) = resolve_firmware_profile(&device, &inventory, &catalog, &session)?;
+    let entry = entry.ok_or_else(|| {
+        LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "raw XU writes require a known firmware and exact descriptor profile match",
+        )
+        .with_detail("firmware", firmware.unwrap_or_else(|| "unknown".into()))
+    })?;
     SafetyPolicy::new(config.safety.clone()).authorize(Operation::RawXuWrite {
         feature_enabled: cfg!(feature = "research"),
         acknowledged: unsafe_xu,
@@ -2100,12 +2598,7 @@ fn run_xu_raw_set(
         })?;
     let policy = SafetyPolicy::new(config.safety.clone());
     authorize_control_safety(control.safety, &policy)?;
-    let _stream = prepare_xu_stream(
-        control.stream_requirement,
-        &node.path,
-        config.timeout.get(),
-        dry_run,
-    )?;
+    let _stream = prepare_xu_stream(control, &node.path, config.timeout.get(), dry_run)?;
     let (resolved_guid, address) =
         link_uvc_xu::resolve_address(&inventory, Some(guid), None, selector)?;
     let rate_wait = link_uvc_xu::RateLimiter::from_process()?.enforce(
@@ -2206,6 +2699,39 @@ fn emit_xu_write_report(
         Ok(())
     } else {
         emit_success(config.output, command, Some(device_summary(device)), report)
+    }
+}
+
+fn emit_xu_semantic_transaction_report(
+    config: &Config,
+    command: &'static str,
+    device: &DiscoveredDevice,
+    steps: Vec<XuWriteReport>,
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    let report = XuSemanticTransactionReport {
+        verified: steps.iter().all(|step| step.verified),
+        steps,
+        dry_run,
+    };
+    if config.output == OutputFormat::Human {
+        for step in &report.steps {
+            println!(
+                "{} {}={} verified={}",
+                if report.dry_run { "Would set" } else { "Set" },
+                step.control.as_deref().unwrap_or("vendor-control"),
+                step.requested,
+                step.verified,
+            );
+        }
+        Ok(())
+    } else {
+        emit_success(
+            config.output,
+            command,
+            Some(device_summary(device)),
+            &report,
+        )
     }
 }
 
@@ -2712,6 +3238,39 @@ fn run_audio(
         }
         AudioCommand::Mute { source } => run_audio_mute(config, backend, &source, true, dry_run),
         AudioCommand::Unmute { source } => run_audio_mute(config, backend, &source, false, dry_run),
+        AudioCommand::Mode { command } => match command {
+            AudioModeCommand::Status => {
+                run_native_status(config, "audio.mode.status", &["audio.pickup-mode"])
+            }
+            AudioModeCommand::Standard => run_native_vendor_set(
+                config,
+                "audio.mode.standard",
+                "audio.pickup-mode",
+                "standard",
+                dry_run,
+            ),
+            AudioModeCommand::Wide => run_native_vendor_set(
+                config,
+                "audio.mode.wide",
+                "audio.pickup-mode",
+                "wide",
+                dry_run,
+            ),
+            AudioModeCommand::Focus => run_native_vendor_set(
+                config,
+                "audio.mode.focus",
+                "audio.pickup-mode",
+                "focus",
+                dry_run,
+            ),
+            AudioModeCommand::Original => run_native_vendor_set(
+                config,
+                "audio.mode.original",
+                "audio.pickup-mode",
+                "original",
+                dry_run,
+            ),
+        },
         #[cfg(feature = "gstreamer")]
         AudioCommand::Meter(arguments) => run_audio_meter(config, arguments, dry_run),
         #[cfg(feature = "gstreamer")]
@@ -4966,7 +5525,7 @@ fn control_capabilities(
 ) -> Result<ControlCapabilities, LinkError> {
     let verified_at_unix_ms = now_unix_ms()?;
     let model = device.model();
-    let groups: [(&str, &[&str]); 12] = [
+    let groups: [(&str, &[&str]); 14] = [
         (
             "image.exposure",
             &["exposure_time_absolute", "exposure_automatic"],
@@ -4988,6 +5547,8 @@ fn control_capabilities(
         ("image.backlight_compensation", &["backlight_compensation"]),
         ("image.anti_flicker", &["power_line_frequency"]),
         ("image.hdr", &["wide_dynamic_range", "hdr_sensor_mode"]),
+        ("image.mirror", &["horizontal_flip"]),
+        ("image.flip", &["vertical_flip"]),
     ];
     let semantic = groups
         .into_iter()
@@ -5021,6 +5582,15 @@ fn control_capabilities(
                     destructive: false,
                     verified_at_unix_ms,
                     confidence: CapabilityConfidence::Verified,
+                    source: control.as_ref().map(|control| CapabilitySource::V4l2 {
+                        control: control.name.clone(),
+                    }),
+                    range: None,
+                    values: Vec::new(),
+                    current: control
+                        .as_ref()
+                        .and_then(|control| control.current)
+                        .map(|value| json!(value)),
                     control,
                 },
             )
@@ -5030,6 +5600,1207 @@ fn control_capabilities(
         semantic,
         raw: controls,
     })
+}
+
+const CAMERA_NATIVE_CAPABILITIES: &[(&str, &str)] = &[
+    (
+        "image.exposure",
+        "camera-native exposure controls have not been mapped for this profile",
+    ),
+    (
+        "image.exposure_compensation",
+        "camera-native exposure compensation has not been mapped for this profile",
+    ),
+    (
+        "image.white_balance",
+        "camera-native white balance has not been mapped for this profile",
+    ),
+    (
+        "image.gain",
+        "camera-native ISO/gain has not been mapped for this profile",
+    ),
+    (
+        "image.hdr",
+        "camera-native HDR has not been mapped for this profile",
+    ),
+    (
+        "image.mirror",
+        "camera-native mirroring has not been mapped for this profile",
+    ),
+    (
+        "image.flip",
+        "camera-native vertical flipping has not been mapped for this profile",
+    ),
+    (
+        "frame.position",
+        "digital frame translation has not been mapped for this profile",
+    ),
+    (
+        "auto-framing.enabled",
+        "camera-native Auto Framing has not been mapped for this profile",
+    ),
+    (
+        "auto-framing.style",
+        "Head and Half-body style selection has not been mapped for this profile",
+    ),
+    (
+        "audio.pickup-mode",
+        "camera pickup modes have not been mapped for this profile",
+    ),
+    (
+        "mode.normal",
+        "the normal-mode transition has not been mapped for this profile",
+    ),
+    (
+        "mode.whiteboard",
+        "regular camera Whiteboard Mode has not been mapped for this profile",
+    ),
+    (
+        "gesture.enabled",
+        "camera gesture recognition has not been mapped for this profile",
+    ),
+    (
+        "gesture.palm",
+        "the palm gesture setting has not been mapped for this profile",
+    ),
+    (
+        "gesture.v-sign",
+        "the V-sign gesture setting has not been mapped for this profile",
+    ),
+    (
+        "gesture.l-sign",
+        "the L-sign gesture setting has not been mapped for this profile",
+    ),
+    (
+        "portrait.native",
+        "native portrait mode has not been mapped for this profile",
+    ),
+    (
+        "portrait.horizontal-correction",
+        "portrait horizontal correction has not been mapped for this profile",
+    ),
+    (
+        "portrait.vertical-correction",
+        "portrait vertical correction has not been mapped for this profile",
+    ),
+    (
+        "mode.compatibility",
+        "low-resolution/YUY2 compatibility has not been mapped for this profile",
+    ),
+    (
+        "firmware.version",
+        "no verified firmware-version source is available",
+    ),
+    (
+        "hardware.version",
+        "no verified hardware-version source is available",
+    ),
+    (
+        "device.mode-state",
+        "no verified vendor mode-state source is available",
+    ),
+    (
+        "device.error-state",
+        "no verified vendor error-state source is available",
+    ),
+    (
+        "device.indicator-state",
+        "no verified indicator readback is available",
+    ),
+];
+
+#[derive(Serialize)]
+struct AllCapabilities {
+    semantic: BTreeMap<String, CapabilityRecord>,
+    raw_controls: Vec<ControlDescriptor>,
+    profile_id: Option<String>,
+    profile_checksum: Option<String>,
+}
+
+fn native_capabilities(
+    config: &Config,
+    device: &DiscoveredDevice,
+) -> Result<AllCapabilities, LinkError> {
+    let verified_at_unix_ms = now_unix_ms()?;
+    let model = device.model();
+    if device.mode() != DeviceMode::Camera {
+        let mut capabilities = BTreeMap::new();
+        capabilities.insert(
+            "zoom".into(),
+            unmapped_capability(
+                &model,
+                verified_at_unix_ms,
+                "standard and vendor camera controls are unavailable in U-disk mode",
+            ),
+        );
+        for (name, _) in CAMERA_NATIVE_CAPABILITIES {
+            capabilities.insert(
+                (*name).into(),
+                unmapped_capability(
+                    &model,
+                    verified_at_unix_ms,
+                    "camera-native controls are unavailable in U-disk mode",
+                ),
+            );
+        }
+        insert_physical_shutter(&mut capabilities, &model, verified_at_unix_ms);
+        return Ok(AllCapabilities {
+            semantic: capabilities,
+            raw_controls: Vec::new(),
+            profile_id: None,
+            profile_checksum: None,
+        });
+    }
+
+    let node = control_node(device, config.default_device.as_deref())?;
+    let backend = link_v4l2::production::ControlDevice::open_read(&node.path)?;
+    let controls = backend.controls()?;
+    let mut capabilities = control_capabilities(device, controls.clone())?.semantic;
+
+    if let Some(control) = controls
+        .iter()
+        .find(|control| control.name == "zoom_absolute")
+        .cloned()
+    {
+        let range = SemanticRange {
+            minimum: control.minimum as f64 / 100.0,
+            maximum: control.maximum as f64 / 100.0,
+            step: Some(control.step as f64 / 100.0),
+            unit: "x".into(),
+        };
+        capabilities.insert(
+            "zoom".into(),
+            CapabilityRecord {
+                state: CapabilityState::Standard,
+                backend: Some("v4l2".into()),
+                evidence: "live V4L2 zoom_absolute enumeration".into(),
+                model: model.clone(),
+                firmware: None,
+                readable: control.readable,
+                writable: control.writable,
+                persistent: None,
+                stream_dependent: Some(false),
+                restart_dependent: false,
+                destructive: false,
+                verified_at_unix_ms,
+                confidence: CapabilityConfidence::Verified,
+                source: Some(CapabilitySource::V4l2 {
+                    control: control.name.clone(),
+                }),
+                range: Some(range),
+                values: Vec::new(),
+                current: control.current.map(|raw| json!(raw as f64 / 100.0)),
+                control: Some(control),
+            },
+        );
+    } else {
+        capabilities.insert(
+            "zoom".into(),
+            unmapped_capability(
+                &model,
+                verified_at_unix_ms,
+                "no standard zoom control or verified vendor mapping is available",
+            ),
+        );
+    }
+
+    let catalog = ProfileCatalog::load(config.profile_dir.as_deref())?;
+    let inventory = link_uvc_xu::parse_descriptors(&device.descriptors)?;
+    let session = link_uvc_xu::XuSession::open_read(Path::new(&node.path))?;
+    let (profile, firmware) = resolve_firmware_profile(device, &inventory, &catalog, &session)?;
+    for (name, evidence) in CAMERA_NATIVE_CAPABILITIES {
+        if capabilities
+            .get(*name)
+            .is_some_and(|capability| capability.state == CapabilityState::Standard)
+        {
+            continue;
+        }
+        let record = profile
+            .and_then(|entry| entry.profile.control(name).map(|control| (entry, control)))
+            .map_or_else(
+                || unmapped_capability(&model, verified_at_unix_ms, evidence),
+                |(entry, control)| {
+                    let read_verified = entry.semantic_read_verified();
+                    CapabilityRecord {
+                        state: if read_verified {
+                            CapabilityState::VendorProfile
+                        } else {
+                            CapabilityState::DiscoveredUnmapped
+                        },
+                        backend: Some("uvc-xu".into()),
+                        evidence: entry.profile.provenance.join("; "),
+                        model: model.clone(),
+                        firmware: firmware.clone(),
+                        readable: control.readable,
+                        writable: entry.authorized_control(name).is_some(),
+                        persistent: Some(!matches!(control.persistence, Persistence::Volatile)),
+                        stream_dependent: Some(!matches!(
+                            control.stream_requirement,
+                            StreamRequirement::Either
+                        )),
+                        restart_dependent: control.stream_requirement == StreamRequirement::Restart,
+                        destructive: false,
+                        verified_at_unix_ms,
+                        confidence: if read_verified {
+                            CapabilityConfidence::Verified
+                        } else {
+                            CapabilityConfidence::Experimental
+                        },
+                        source: Some(CapabilitySource::UvcXu {
+                            profile_id: entry.profile.profile_id.clone(),
+                            profile_checksum: entry.checksum.clone(),
+                            guid: control.entity_guid.clone(),
+                            selector: control.selector,
+                            length: control.length,
+                        }),
+                        range: None,
+                        values: profile_values(control),
+                        current: if control.readable {
+                            link_uvc_xu::read_value(
+                                &session,
+                                &inventory,
+                                Some(&control.entity_guid),
+                                None,
+                                control.selector,
+                                Some(control.length),
+                                Some(&entry.profile),
+                            )
+                            .ok()
+                            .and_then(|value| value.decoded.get(*name).cloned())
+                        } else {
+                            None
+                        },
+                        control: None,
+                    }
+                },
+            );
+        capabilities.insert((*name).into(), record);
+    }
+    insert_physical_shutter(&mut capabilities, &model, verified_at_unix_ms);
+    Ok(AllCapabilities {
+        semantic: capabilities,
+        raw_controls: controls,
+        profile_id: profile.map(|entry| entry.profile.profile_id.clone()),
+        profile_checksum: profile.map(|entry| entry.checksum.clone()),
+    })
+}
+
+fn insert_physical_shutter(
+    capabilities: &mut BTreeMap<String, CapabilityRecord>,
+    model: &str,
+    verified_at_unix_ms: u128,
+) {
+    capabilities.insert(
+        "privacy.physical-shutter".into(),
+        CapabilityRecord {
+            state: CapabilityState::HardwareOnly,
+            backend: None,
+            evidence: "the lens shutter is physically actuated and has no verified readback".into(),
+            model: model.into(),
+            firmware: None,
+            readable: false,
+            writable: false,
+            persistent: None,
+            stream_dependent: Some(false),
+            restart_dependent: false,
+            destructive: false,
+            verified_at_unix_ms,
+            confidence: CapabilityConfidence::Verified,
+            source: Some(CapabilitySource::Hardware {
+                component: "lens-shutter".into(),
+            }),
+            range: None,
+            values: vec!["open".into(), "closed".into(), "unknown".into()],
+            current: Some(json!("unknown")),
+            control: None,
+        },
+    );
+}
+
+fn unmapped_capability(model: &str, verified_at_unix_ms: u128, evidence: &str) -> CapabilityRecord {
+    CapabilityRecord {
+        state: CapabilityState::DiscoveredUnmapped,
+        backend: None,
+        evidence: evidence.into(),
+        model: model.into(),
+        firmware: None,
+        readable: false,
+        writable: false,
+        persistent: None,
+        stream_dependent: None,
+        restart_dependent: false,
+        destructive: false,
+        verified_at_unix_ms,
+        confidence: CapabilityConfidence::Experimental,
+        source: None,
+        range: None,
+        values: Vec::new(),
+        current: None,
+        control: None,
+    }
+}
+
+fn profile_values(control: &link_profiles::ProfileControl) -> Vec<String> {
+    match control.codec {
+        CodecKind::Enum | CodecKind::Bitmask => control.values.keys().cloned().collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn run_caps_all(config: &Config, _backend_choice: Option<BackendChoice>) -> Result<(), LinkError> {
+    let devices = selected_devices(config, true)?;
+    let mut results = Vec::with_capacity(devices.len());
+    for device in &devices {
+        results.push(PerDeviceResult {
+            device: device_summary(device),
+            result: native_capabilities(config, device)?,
+        });
+    }
+    if config.output == OutputFormat::Human {
+        for result in &results {
+            println!("{} ({})", result.device.model, result.device.stable_id);
+            for (name, capability) in &result.result.semantic {
+                println!(
+                    "{name}\t{:?}\t{}",
+                    capability.state,
+                    capability.backend.as_deref().unwrap_or("-")
+                );
+            }
+        }
+        Ok(())
+    } else {
+        emit_success(config.output, "caps.all", None, &results)
+    }
+}
+
+#[derive(Serialize)]
+struct ZoomStatusResult {
+    factor: f64,
+    raw: i64,
+    minimum: f64,
+    maximum: f64,
+    step: f64,
+    backend: &'static str,
+}
+
+#[derive(Serialize)]
+struct ZoomRampResult {
+    previous: ZoomStatusResult,
+    requested_from: f64,
+    requested_to: f64,
+    observed: Option<ZoomStatusResult>,
+    writes: usize,
+    duration_ms: u64,
+    verified: bool,
+    dry_run: bool,
+    rollback: RollbackReport,
+}
+
+fn run_zoom(
+    config: &Config,
+    backend_choice: Option<BackendChoice>,
+    command: ZoomCommand,
+    dry_run: bool,
+    yes: bool,
+) -> Result<(), LinkError> {
+    ensure_standard_backend(config, backend_choice)?;
+    match command {
+        ZoomCommand::Get => run_zoom_get(config),
+        ZoomCommand::Set { factor } => {
+            let factor = parse_zoom_factor(&factor, false)?;
+            run_semantic_builder(config, dry_run, yes, "zoom.set", move |backend| {
+                let control = backend.resolve("zoom_absolute")?;
+                let raw = zoom_factor_to_raw(&control, factor)?;
+                Ok(vec![raw_request(&control.id.to_string(), raw)])
+            })
+        }
+        ZoomCommand::Step { delta } => {
+            let delta = parse_zoom_factor(&delta, true)?;
+            run_semantic_builder(config, dry_run, yes, "zoom.step", move |backend| {
+                let control = backend.resolve("zoom_absolute")?;
+                let current = backend.get(control.id)?.1.raw;
+                let factor = current as f64 / 100.0 + delta;
+                let raw = zoom_factor_to_raw(&control, factor)?;
+                Ok(vec![raw_request(&control.id.to_string(), raw)])
+            })
+        }
+        ZoomCommand::Reset => {
+            run_semantic_builder(config, dry_run, yes, "zoom.reset", move |backend| {
+                let control = backend.resolve("zoom_absolute")?;
+                if !control.default_is_valid {
+                    return Err(LinkError::new(
+                        ErrorKind::CapabilityUnsupported,
+                        "the zoom control has no valid driver default",
+                    ));
+                }
+                Ok(vec![raw_request(&control.id.to_string(), control.default)])
+            })
+        }
+        ZoomCommand::Ramp { from, to, duration } => {
+            let from = parse_zoom_factor(&from, false)?;
+            let to = parse_zoom_factor(&to, false)?;
+            run_zoom_ramp(config, from, to, duration.get(), dry_run, yes)
+        }
+    }
+}
+
+fn run_zoom_get(config: &Config) -> Result<(), LinkError> {
+    let devices = selected_devices(config, true)?;
+    let mut results = Vec::with_capacity(devices.len());
+    for device in &devices {
+        let node = control_node(device, config.default_device.as_deref())?;
+        let backend = link_v4l2::production::ControlDevice::open_read(&node.path)?;
+        let control = backend.resolve("zoom_absolute")?;
+        let (_, value) = backend.get(control.id)?;
+        results.push(PerDeviceResult {
+            device: device_summary(device),
+            result: zoom_status(&control, value.raw),
+        });
+    }
+    if config.output == OutputFormat::Human {
+        for result in &results {
+            println!("{:.2}x", result.result.factor);
+        }
+        Ok(())
+    } else {
+        emit_success(config.output, "zoom.get", None, &results)
+    }
+}
+
+fn run_zoom_ramp(
+    config: &Config,
+    from: f64,
+    to: f64,
+    duration: Duration,
+    dry_run: bool,
+    yes: bool,
+) -> Result<(), LinkError> {
+    const TICK: Duration = Duration::from_millis(50);
+    const MAX_DURATION: Duration = Duration::from_secs(60);
+    if duration < TICK || duration > MAX_DURATION {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "zoom ramp duration must be between 50ms and 60s",
+        ));
+    }
+    require_all_confirmation(config, yes)?;
+    let devices = selected_devices(config, true)?;
+    let ticks_u128 = duration.as_millis().div_ceil(TICK.as_millis());
+    let ticks = usize::try_from(ticks_u128).map_err(|_| {
+        LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "zoom ramp duration is too large",
+        )
+    })?;
+    let mut results = Vec::new();
+    let mut failures = Vec::new();
+    for device in &devices {
+        let outcome = (|| {
+            let stable_id = device.identity.stable_id();
+            let _lease = acquire_operation_lease(config, &stable_id, "zoom.ramp")?;
+            let node = control_node(device, config.default_device.as_deref())?;
+            let read_backend = link_v4l2::production::ControlDevice::open_read(&node.path)?;
+            let control = read_backend.resolve("zoom_absolute")?;
+            let previous_raw = read_backend.get(control.id)?.1.raw;
+            let previous = zoom_status(&control, previous_raw);
+            let from_raw = zoom_factor_to_raw(&control, from)?;
+            let to_raw = zoom_factor_to_raw(&control, to)?;
+            let raw_at_tick = |tick: usize| {
+                let fraction = tick as f64 / ticks as f64;
+                let interpolated = from_raw as f64 + (to_raw - from_raw) as f64 * fraction;
+                let step = i64::try_from(control.step.max(1)).unwrap_or(i64::MAX);
+                control.minimum + ((interpolated.round() as i64 - control.minimum) / step) * step
+            };
+            let mut planned_writes = 0_usize;
+            let mut last_raw = Some(previous_raw);
+            for tick in 0..=ticks {
+                let raw = raw_at_tick(tick);
+                if last_raw != Some(raw) {
+                    planned_writes += 1;
+                    last_raw = Some(raw);
+                }
+            }
+            if dry_run {
+                return Ok(ZoomRampResult {
+                    previous,
+                    requested_from: from,
+                    requested_to: to,
+                    observed: None,
+                    writes: planned_writes,
+                    duration_ms: duration.as_millis() as u64,
+                    verified: false,
+                    dry_run: true,
+                    rollback: RollbackReport::default(),
+                });
+            }
+            let backend = link_v4l2::production::ControlDevice::open_write(&node.path)?;
+            let mut writes = 0_usize;
+            let result = (|| {
+                let started = Instant::now();
+                let mut last_raw = Some(previous_raw);
+                for tick in 0..=ticks {
+                    let raw = raw_at_tick(tick);
+                    if last_raw != Some(raw) {
+                        backend.set(&control, raw)?;
+                        writes += 1;
+                        last_raw = Some(raw);
+                    }
+                    if tick < ticks {
+                        let target_elapsed = duration.mul_f64((tick + 1) as f64 / ticks as f64);
+                        if let Some(remaining) = target_elapsed.checked_sub(started.elapsed()) {
+                            thread::sleep(remaining);
+                        }
+                    }
+                }
+                let (_, observed_value) = backend.get(control.id)?;
+                if observed_value.raw != to_raw {
+                    return Err(LinkError::new(
+                        ErrorKind::IoFailure,
+                        "zoom ramp failed final readback verification",
+                    )
+                    .with_detail("requested", to_raw)
+                    .with_detail("observed", observed_value.raw));
+                }
+                Ok(zoom_status(&control, observed_value.raw))
+            })();
+            match result {
+                Ok(observed) => Ok(ZoomRampResult {
+                    previous,
+                    requested_from: from,
+                    requested_to: to,
+                    observed: Some(observed),
+                    writes,
+                    duration_ms: duration.as_millis() as u64,
+                    verified: true,
+                    dry_run: false,
+                    rollback: RollbackReport::default(),
+                }),
+                Err(error) => {
+                    let mut rollback = RollbackReport {
+                        attempted: true,
+                        ..RollbackReport::default()
+                    };
+                    if backend.set(&control, previous_raw).is_ok()
+                        && backend
+                            .get(control.id)
+                            .is_ok_and(|(_, value)| value.raw == previous_raw)
+                    {
+                        rollback.restored.push("zoom".into());
+                    } else {
+                        rollback.failed.push("zoom".into());
+                    }
+                    Err(error.with_detail("rollback", json!(rollback)))
+                }
+            }
+        })();
+        match outcome {
+            Ok(result) => results.push(PerDeviceResult {
+                device: device_summary(device),
+                result,
+            }),
+            Err(error) => failures.push(device_failure(device, &error)),
+        }
+    }
+    if failures.is_empty() {
+        if config.output == OutputFormat::Human {
+            for result in &results {
+                println!(
+                    "{:.2}x -> {:.2}x ({} write(s){})",
+                    result.result.requested_from,
+                    result.result.requested_to,
+                    result.result.writes,
+                    if result.result.dry_run {
+                        ", dry-run"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            Ok(())
+        } else {
+            emit_success(config.output, "zoom.ramp", None, &results)
+        }
+    } else {
+        let kind = if results.is_empty()
+            && failures
+                .iter()
+                .all(|failure| failure.kind == failures[0].kind)
+        {
+            failures[0].kind
+        } else {
+            ErrorKind::PartialSuccess
+        };
+        Err(LinkError::new(kind, "one or more zoom ramps failed")
+            .with_detail(
+                "successes",
+                serde_json::to_value(&results).unwrap_or_default(),
+            )
+            .with_detail(
+                "failures",
+                Value::Array(failures.into_iter().map(|failure| failure.value).collect()),
+            ))
+    }
+}
+
+fn zoom_status(control: &ControlDescriptor, raw: i64) -> ZoomStatusResult {
+    ZoomStatusResult {
+        factor: raw as f64 / 100.0,
+        raw,
+        minimum: control.minimum as f64 / 100.0,
+        maximum: control.maximum as f64 / 100.0,
+        step: control.step as f64 / 100.0,
+        backend: "v4l2",
+    }
+}
+
+fn parse_zoom_factor(input: &str, signed: bool) -> Result<f64, LinkError> {
+    let value = input
+        .trim()
+        .trim_end_matches(['x', 'X'])
+        .parse::<f64>()
+        .map_err(|_| invalid_zoom_value(input))?;
+    if !value.is_finite() || (!signed && value <= 0.0) {
+        return Err(invalid_zoom_value(input));
+    }
+    Ok(value)
+}
+
+fn zoom_factor_to_raw(control: &ControlDescriptor, factor: f64) -> Result<i64, LinkError> {
+    let raw = (factor * 100.0).round() as i64;
+    validate_semantic_raw(control, raw)?;
+    let step = i64::try_from(control.step.max(1)).unwrap_or(i64::MAX);
+    if (raw - control.minimum) % step != 0 {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "zoom factor does not align with the advertised device step",
+        )
+        .with_detail("factor", factor)
+        .with_detail("step", control.step));
+    }
+    Ok(raw)
+}
+
+fn invalid_zoom_value(input: &str) -> LinkError {
+    LinkError::new(
+        ErrorKind::InvalidInvocation,
+        "zoom values must be finite factors such as 1.5x",
+    )
+    .with_detail("value", input.to_owned())
+}
+
+#[derive(Serialize)]
+struct NativeStatusResult {
+    capabilities: BTreeMap<String, CapabilityRecord>,
+}
+
+fn run_native_status(
+    config: &Config,
+    command: &'static str,
+    names: &[&str],
+) -> Result<(), LinkError> {
+    let devices = selected_devices(config, true)?;
+    let mut results = Vec::with_capacity(devices.len());
+    for device in &devices {
+        let all = native_capabilities(config, device)?;
+        let capabilities = names
+            .iter()
+            .filter_map(|name| {
+                all.semantic
+                    .get(*name)
+                    .cloned()
+                    .map(|capability| ((*name).to_owned(), capability))
+            })
+            .collect();
+        results.push(PerDeviceResult {
+            device: device_summary(device),
+            result: NativeStatusResult { capabilities },
+        });
+    }
+    if config.output == OutputFormat::Human {
+        for result in &results {
+            println!("{} ({})", result.device.model, result.device.stable_id);
+            for (name, capability) in &result.result.capabilities {
+                println!(
+                    "{name}\t{:?}\t{}",
+                    capability.state,
+                    capability
+                        .current
+                        .as_ref()
+                        .map_or_else(|| "-".into(), Value::to_string)
+                );
+            }
+        }
+        Ok(())
+    } else {
+        emit_success(config.output, command, None, &results)
+    }
+}
+
+fn native_profile_control<'a>(
+    catalog: &'a ProfileCatalog,
+    device: &DiscoveredDevice,
+    firmware: Option<&str>,
+    name: &str,
+) -> Result<
+    (
+        &'a link_profiles::CatalogProfile,
+        &'a link_profiles::ProfileControl,
+    ),
+    LinkError,
+> {
+    let entry = catalog
+        .matching(&device.identity, device.mode(), firmware)?
+        .ok_or_else(|| native_unmapped_error(name, "no exact profile matches the device"))?;
+    let control = entry.profile.control(name).ok_or_else(|| {
+        native_unmapped_error(
+            name,
+            "the matching profile has no verified semantic mapping",
+        )
+    })?;
+    Ok((entry, control))
+}
+
+fn run_native_vendor_set(
+    config: &Config,
+    command: &'static str,
+    control_name: &str,
+    value: &str,
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    let (device, _, inventory, catalog, session) = selected_xu_context(config, false)?;
+    let (entry, firmware) = resolve_firmware_profile(&device, &inventory, &catalog, &session)?;
+    let entry = entry.ok_or_else(|| {
+        native_unmapped_error(
+            control_name,
+            &format!(
+                "no verified profile matches firmware {}",
+                firmware.as_deref().unwrap_or("unknown")
+            ),
+        )
+    })?;
+    let _ = entry.profile.control(control_name).ok_or_else(|| {
+        native_unmapped_error(
+            control_name,
+            "the matching profile has no verified semantic mapping",
+        )
+    })?;
+    if !entry.semantic_write_authorized() {
+        return Err(native_unmapped_error(
+            control_name,
+            "the mapping is not a trusted built-in verified profile control",
+        ));
+    }
+    run_xu_semantic_set(config, command, control_name, value, dry_run)
+}
+
+fn run_native_vendor_transaction(
+    config: &Config,
+    command: &'static str,
+    writes: &[(&str, &str)],
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    let (device, _, inventory, catalog, session) = selected_xu_context(config, false)?;
+    let (entry, firmware) = resolve_firmware_profile(&device, &inventory, &catalog, &session)?;
+    let entry = entry.ok_or_else(|| {
+        native_unmapped_error(
+            writes.first().map_or("vendor-control", |(name, _)| *name),
+            &format!(
+                "no verified profile matches firmware {}",
+                firmware.as_deref().unwrap_or("unknown")
+            ),
+        )
+    })?;
+    for (control_name, _) in writes {
+        let _ = entry.profile.control(control_name).ok_or_else(|| {
+            native_unmapped_error(
+                control_name,
+                "the matching profile has no verified semantic mapping",
+            )
+        })?;
+    }
+    if !entry.semantic_write_authorized() {
+        return Err(native_unmapped_error(
+            writes.first().map_or("vendor-control", |(name, _)| *name),
+            "the mapping is not a trusted built-in verified profile control",
+        ));
+    }
+    run_xu_semantic_transaction(config, command, writes, dry_run)
+}
+
+fn read_native_vendor_value(config: &Config, control_name: &str) -> Result<Value, LinkError> {
+    let (device, _, inventory, catalog, session) = selected_xu_context(config, false)?;
+    let (_, firmware) = resolve_firmware_profile(&device, &inventory, &catalog, &session)?;
+    let (entry, control) =
+        native_profile_control(&catalog, &device, firmware.as_deref(), control_name)?;
+    if !control.readable {
+        return Err(LinkError::new(
+            ErrorKind::CapabilityUnsupported,
+            "the verified semantic control is not readable",
+        )
+        .with_detail("capability", control_name.to_owned()));
+    }
+    let value = link_uvc_xu::read_value(
+        &session,
+        &inventory,
+        Some(&control.entity_guid),
+        None,
+        control.selector,
+        Some(control.length),
+        Some(&entry.profile),
+    )?;
+    value.decoded.get(control_name).cloned().ok_or_else(|| {
+        LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "the matched profile did not decode its semantic control",
+        )
+        .with_detail("capability", control_name.to_owned())
+    })
+}
+
+fn native_unmapped_error(capability: &str, evidence: &str) -> LinkError {
+    LinkError::new(
+        ErrorKind::CapabilityUnsupported,
+        "camera-native capability is not verified for the selected device",
+    )
+    .with_detail("capability", capability.to_owned())
+    .with_detail("state", "discovered-unmapped")
+    .with_detail("evidence", evidence.to_owned())
+}
+
+fn validate_normalized_coordinate(name: &'static str, value: f64) -> Result<(), LinkError> {
+    if value.is_finite() && (0.0..=1.0).contains(&value) {
+        Ok(())
+    } else {
+        Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "frame coordinates must be finite values from 0.0 to 1.0",
+        )
+        .with_detail("coordinate", name)
+        .with_detail("value", value))
+    }
+}
+
+fn run_frame(config: &Config, command: FrameCommand, dry_run: bool) -> Result<(), LinkError> {
+    match command {
+        FrameCommand::Status => run_native_status(config, "frame.status", &["frame.position"]),
+        FrameCommand::Set { x, y } => {
+            validate_normalized_coordinate("x", x)?;
+            validate_normalized_coordinate("y", y)?;
+            run_native_vendor_set(
+                config,
+                "frame.set",
+                "frame.position",
+                &format!("x={x},y={y}"),
+                dry_run,
+            )
+        }
+        FrameCommand::Move { x, y } => {
+            if !x.is_finite() || !y.is_finite() {
+                return Err(LinkError::new(
+                    ErrorKind::InvalidInvocation,
+                    "frame deltas must be finite",
+                ));
+            }
+            let current = read_native_vendor_value(config, "frame.position")?;
+            let current_x = current.get("x").and_then(Value::as_f64).ok_or_else(|| {
+                LinkError::new(
+                    ErrorKind::ProtocolProfileMismatch,
+                    "frame profile did not decode an x coordinate",
+                )
+            })?;
+            let current_y = current.get("y").and_then(Value::as_f64).ok_or_else(|| {
+                LinkError::new(
+                    ErrorKind::ProtocolProfileMismatch,
+                    "frame profile did not decode a y coordinate",
+                )
+            })?;
+            let target_x = current_x + x;
+            let target_y = current_y + y;
+            validate_normalized_coordinate("x", target_x)?;
+            validate_normalized_coordinate("y", target_y)?;
+            run_native_vendor_set(
+                config,
+                "frame.move",
+                "frame.position",
+                &format!("x={target_x},y={target_y}"),
+                dry_run,
+            )
+        }
+        FrameCommand::Center => run_native_vendor_set(
+            config,
+            "frame.center",
+            "frame.position",
+            "x=0.5,y=0.5",
+            dry_run,
+        ),
+    }
+}
+
+fn run_auto_framing(
+    config: &Config,
+    command: AutoFramingCommand,
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    match command {
+        AutoFramingCommand::Status => run_native_status(
+            config,
+            "auto-framing.status",
+            &["auto-framing.enabled", "auto-framing.style"],
+        ),
+        AutoFramingCommand::On => run_native_vendor_set(
+            config,
+            "auto-framing.on",
+            "auto-framing.enabled",
+            "on",
+            dry_run,
+        ),
+        AutoFramingCommand::Off => run_native_vendor_set(
+            config,
+            "auto-framing.off",
+            "auto-framing.enabled",
+            "off",
+            dry_run,
+        ),
+        AutoFramingCommand::Style { style } => run_native_vendor_transaction(
+            config,
+            "auto-framing.style",
+            &[
+                ("auto-framing.smart-composition", "on"),
+                (
+                    "auto-framing.style",
+                    match style {
+                        AutoFramingStyle::Head => "head",
+                        AutoFramingStyle::HalfBody => "half-body",
+                    },
+                ),
+            ],
+            dry_run,
+        ),
+    }
+}
+
+fn run_mode(config: &Config, command: ModeCommand, dry_run: bool) -> Result<(), LinkError> {
+    match command {
+        ModeCommand::Normal => {
+            run_native_vendor_set(config, "mode.normal", "mode.normal", "on", dry_run)
+        }
+        ModeCommand::Whiteboard { command } => match command {
+            ToggleStatusCommand::Status => {
+                run_native_status(config, "mode.whiteboard", &["mode.whiteboard"])
+            }
+            ToggleStatusCommand::On => {
+                run_native_vendor_set(config, "mode.whiteboard", "mode.whiteboard", "on", dry_run)
+            }
+            ToggleStatusCommand::Off => {
+                run_native_vendor_set(config, "mode.whiteboard", "mode.whiteboard", "off", dry_run)
+            }
+        },
+        ModeCommand::Compatibility { command } => match command {
+            CompatibilityCommand::Status => {
+                run_native_status(config, "mode.compatibility", &["mode.compatibility"])
+            }
+            CompatibilityCommand::Set { value } => run_native_vendor_set(
+                config,
+                "mode.compatibility",
+                "mode.compatibility",
+                match value {
+                    CompatibilityMode::Standard => "standard",
+                    CompatibilityMode::LowResolution => "low-resolution",
+                    CompatibilityMode::Yuy2 => "yuy2",
+                },
+                dry_run,
+            ),
+        },
+    }
+}
+
+fn run_gesture(config: &Config, command: GestureCommand, dry_run: bool) -> Result<(), LinkError> {
+    match command {
+        GestureCommand::Status => run_native_status(
+            config,
+            "gesture.status",
+            &[
+                "gesture.enabled",
+                "gesture.palm",
+                "gesture.v-sign",
+                "gesture.l-sign",
+            ],
+        ),
+        GestureCommand::Enable => {
+            run_native_vendor_set(config, "gesture.enable", "gesture.enabled", "on", dry_run)
+        }
+        GestureCommand::Disable => {
+            run_native_vendor_set(config, "gesture.disable", "gesture.enabled", "off", dry_run)
+        }
+        GestureCommand::Set { gesture, action } => {
+            let (control, expected) = match gesture {
+                GestureKind::Palm => ("gesture.palm", GestureAction::AutoFraming),
+                GestureKind::VSign => ("gesture.v-sign", GestureAction::Whiteboard),
+                GestureKind::LSign => ("gesture.l-sign", GestureAction::Zoom),
+            };
+            let value = if matches!(action, GestureAction::Disabled) {
+                "off"
+            } else if std::mem::discriminant(&action) == std::mem::discriminant(&expected) {
+                "on"
+            } else {
+                return Err(LinkError::new(
+                    ErrorKind::InvalidInvocation,
+                    "camera gestures cannot be rebound to a different action",
+                ));
+            };
+            run_native_vendor_set(config, "gesture.set", control, value, dry_run)
+        }
+    }
+}
+
+fn run_portrait(config: &Config, command: PortraitCommand, dry_run: bool) -> Result<(), LinkError> {
+    match command {
+        PortraitCommand::Status => run_native_status(
+            config,
+            "portrait.status",
+            &[
+                "portrait.native",
+                "portrait.horizontal-correction",
+                "portrait.vertical-correction",
+            ],
+        ),
+        PortraitCommand::Native { command } => match command {
+            PortraitNativeCommand::Disable => {
+                run_native_vendor_set(config, "portrait.native", "portrait.native", "off", dry_run)
+            }
+            PortraitNativeCommand::Enable {
+                horizontal_correction,
+                vertical_correction,
+            } => {
+                if horizontal_correction.is_some() || vertical_correction.is_some() {
+                    return Err(LinkError::new(
+                        ErrorKind::CapabilityUnsupported,
+                        "portrait correction options require verified correction mappings",
+                    )
+                    .with_detail("state", "discovered-unmapped"));
+                }
+                run_native_vendor_set(config, "portrait.native", "portrait.native", "on", dry_run)
+            }
+        },
+    }
+}
+
+#[derive(Serialize)]
+struct PrivacyStatusResult {
+    physical_shutter: &'static str,
+    video_streaming: bool,
+    audio_hardware_muted: Option<bool>,
+    audio_host_muted: Option<bool>,
+    logical_privacy: bool,
+    physical_status_source: &'static str,
+}
+
+fn run_privacy(config: &Config, command: PrivacyCommand) -> Result<(), LinkError> {
+    match command {
+        PrivacyCommand::Status => {
+            let (device, _) = selected_video_device(config)?;
+            let (audio, _) = discover_audio()?;
+            let endpoint = audio.endpoints.iter().find(|endpoint| {
+                endpoint.associated_camera.as_deref() == Some(&device.identity.stable_id())
+                    && endpoint.direction == link_core::audio::AudioDirection::Capture
+            });
+            let state = endpoint.and_then(|endpoint| {
+                audio
+                    .states
+                    .iter()
+                    .find(|state| state.endpoint_id == endpoint.id)
+            });
+            let result = PrivacyStatusResult {
+                physical_shutter: "unknown",
+                video_streaming: false,
+                audio_hardware_muted: state
+                    .and_then(|state| state.hardware.as_ref())
+                    .and_then(|state| state.muted),
+                audio_host_muted: state
+                    .and_then(|state| state.host.as_ref())
+                    .and_then(|state| state.muted),
+                logical_privacy: false,
+                physical_status_source: "no verified hardware readback",
+            };
+            if config.output == OutputFormat::Human {
+                println!("physical shutter: unknown (manual)");
+                println!("video streaming: false (no daemon ownership)");
+                println!(
+                    "audio hardware muted: {}",
+                    result
+                        .audio_hardware_muted
+                        .map_or_else(|| "unknown".into(), |value| value.to_string())
+                );
+                Ok(())
+            } else {
+                emit_success(
+                    config.output,
+                    "privacy.status",
+                    Some(device_summary(&device)),
+                    &result,
+                )
+            }
+        }
+    }
+}
+
+fn run_firmware(config: &Config, command: FirmwareCommand) -> Result<(), LinkError> {
+    match command {
+        FirmwareCommand::Info => run_native_status(
+            config,
+            "firmware.info",
+            &["firmware.version", "hardware.version"],
+        ),
+    }
+}
+
+#[derive(Serialize)]
+struct DeviceStateResult {
+    availability: DeviceState,
+    usb_mode: DeviceMode,
+    daemon_owns_stream: bool,
+    mode: CapabilityRecord,
+    error: CapabilityRecord,
+    indicator: CapabilityRecord,
+}
+
+fn run_device_state(config: &Config) -> Result<(), LinkError> {
+    let devices = selected_devices(config, true)?;
+    let mut results = Vec::with_capacity(devices.len());
+    for device in &devices {
+        let mut capabilities = native_capabilities(config, device)?.semantic;
+        let mode = capabilities
+            .remove("device.mode-state")
+            .expect("declared capability");
+        let error = capabilities
+            .remove("device.error-state")
+            .expect("declared capability");
+        let indicator = capabilities
+            .remove("device.indicator-state")
+            .expect("declared capability");
+        results.push(PerDeviceResult {
+            device: device_summary(device),
+            result: DeviceStateResult {
+                availability: link_linux::availability_state(device),
+                usb_mode: device.mode(),
+                daemon_owns_stream: false,
+                mode,
+                error,
+                indicator,
+            },
+        });
+    }
+    if config.output == OutputFormat::Human {
+        for result in &results {
+            println!(
+                "{}\t{:?}\t{:?}",
+                result.device.stable_id, result.result.availability, result.result.usb_mode
+            );
+        }
+        Ok(())
+    } else {
+        emit_success(config.output, "device.state", None, &results)
+    }
 }
 
 fn run_device_info(config: &Config, include_serial: bool) -> Result<(), LinkError> {
@@ -6062,8 +7833,9 @@ fn ensure_watch_format(format: OutputFormat) -> Result<(), LinkError> {
 
 #[derive(Serialize)]
 struct ImageStatusResult {
-    capabilities: ControlCapabilities,
-    values: BTreeMap<String, Option<ControlValue>>,
+    capabilities: BTreeMap<String, CapabilityRecord>,
+    values: BTreeMap<String, Option<Value>>,
+    raw_controls: Vec<ControlDescriptor>,
 }
 
 fn run_image(
@@ -6073,6 +7845,66 @@ fn run_image(
     dry_run: bool,
     yes: bool,
 ) -> Result<(), LinkError> {
+    if backend_choice == Some(BackendChoice::Host) {
+        return Err(LinkError::new(
+            ErrorKind::CapabilityUnsupported,
+            "host image controls require the daemon and effects pipeline",
+        ));
+    }
+    if backend_choice == Some(BackendChoice::Vendor) {
+        return match command {
+            ImageCommand::Status => run_native_status(
+                config,
+                "image.status",
+                &[
+                    "image.exposure",
+                    "image.exposure_compensation",
+                    "image.white_balance",
+                    "image.gain",
+                    "image.hdr",
+                    "image.mirror",
+                    "image.flip",
+                ],
+            ),
+            ImageCommand::Hdr { value } => run_native_vendor_set(
+                config,
+                "image.hdr",
+                "image.hdr",
+                if matches!(value, ToggleChoice::On) {
+                    "on"
+                } else {
+                    "off"
+                },
+                dry_run,
+            ),
+            ImageCommand::Mirror { value } => run_native_vendor_set(
+                config,
+                "image.mirror",
+                "image.mirror",
+                if matches!(value, ToggleChoice::On) {
+                    "on"
+                } else {
+                    "off"
+                },
+                dry_run,
+            ),
+            ImageCommand::Flip { value } => run_native_vendor_set(
+                config,
+                "image.flip",
+                "image.flip",
+                if matches!(value, ToggleChoice::On) {
+                    "on"
+                } else {
+                    "off"
+                },
+                dry_run,
+            ),
+            _ => Err(native_unmapped_error(
+                "image",
+                "the requested vendor image adapter is not verified",
+            )),
+        };
+    }
     ensure_standard_backend(config, backend_choice)?;
     match command {
         ImageCommand::Status => run_image_status(config),
@@ -6250,19 +8082,92 @@ fn run_image(
             })
         }
         ImageCommand::Hdr { value } => {
-            run_semantic_builder(config, dry_run, yes, "image.hdr", move |backend| {
-                let descriptor = backend.resolve("wide_dynamic_range").or_else(|error| {
-                    if error.kind() == ErrorKind::CapabilityUnsupported {
-                        backend.resolve("hdr_sensor_mode")
-                    } else {
-                        Err(error)
-                    }
-                })?;
-                Ok(vec![raw_request(
-                    &descriptor.id.to_string(),
+            let vendor_value = if matches!(value, ToggleChoice::On) {
+                "on"
+            } else {
+                "off"
+            };
+            let standard =
+                run_semantic_builder(config, dry_run, yes, "image.hdr", move |backend| {
+                    let descriptor = backend.resolve("wide_dynamic_range").or_else(|error| {
+                        if error.kind() == ErrorKind::CapabilityUnsupported {
+                            backend.resolve("hdr_sensor_mode")
+                        } else {
+                            Err(error)
+                        }
+                    })?;
+                    Ok(vec![raw_request(
+                        &descriptor.id.to_string(),
+                        i64::from(matches!(value, ToggleChoice::On)),
+                    )])
+                });
+            match standard {
+                Err(error)
+                    if error.kind() == ErrorKind::CapabilityUnsupported
+                        && matches!(backend_choice, None | Some(BackendChoice::Auto)) =>
+                {
+                    run_native_vendor_set(config, "image.hdr", "image.hdr", vendor_value, dry_run)
+                }
+                result => result,
+            }
+        }
+        ImageCommand::Mirror { value } => {
+            let vendor_value = if matches!(value, ToggleChoice::On) {
+                "on"
+            } else {
+                "off"
+            };
+            let standard = run_semantic_requests(
+                config,
+                dry_run,
+                yes,
+                "image.mirror",
+                vec![raw_request(
+                    "horizontal_flip",
                     i64::from(matches!(value, ToggleChoice::On)),
-                )])
-            })
+                )],
+            );
+            match standard {
+                Err(error)
+                    if error.kind() == ErrorKind::CapabilityUnsupported
+                        && matches!(backend_choice, None | Some(BackendChoice::Auto)) =>
+                {
+                    run_native_vendor_set(
+                        config,
+                        "image.mirror",
+                        "image.mirror",
+                        vendor_value,
+                        dry_run,
+                    )
+                }
+                result => result,
+            }
+        }
+        ImageCommand::Flip { value } => {
+            let vendor_value = if matches!(value, ToggleChoice::On) {
+                "on"
+            } else {
+                "off"
+            };
+            let standard = run_semantic_requests(
+                config,
+                dry_run,
+                yes,
+                "image.flip",
+                vec![raw_request(
+                    "vertical_flip",
+                    i64::from(matches!(value, ToggleChoice::On)),
+                )],
+            );
+            match standard {
+                Err(error)
+                    if error.kind() == ErrorKind::CapabilityUnsupported
+                        && matches!(backend_choice, None | Some(BackendChoice::Auto)) =>
+                {
+                    run_native_vendor_set(config, "image.flip", "image.flip", vendor_value, dry_run)
+                }
+                result => result,
+            }
         }
         ImageCommand::Reset => run_image_reset(config, dry_run, yes),
     }
@@ -6272,38 +8177,35 @@ fn run_image_status(config: &Config) -> Result<(), LinkError> {
     let devices = selected_devices(config, true)?;
     let mut results = Vec::new();
     for device in &devices {
-        let node = control_node(device, config.default_device.as_deref())?;
-        let backend = link_v4l2::production::ControlDevice::open_read(&node.path)?;
-        let capabilities = control_capabilities(device, backend.controls()?)?;
-        let values = capabilities
+        let all = native_capabilities(config, device)?;
+        let capabilities = all
             .semantic
+            .into_iter()
+            .filter(|(name, _)| name.starts_with("image."))
+            .collect::<BTreeMap<_, _>>();
+        let values = capabilities
             .iter()
-            .map(|(name, capability)| {
-                let value = capability
-                    .control
-                    .as_ref()
-                    .and_then(|control| backend.get(control.id).ok().map(|(_, value)| value));
-                (name.clone(), value)
-            })
+            .map(|(name, capability)| (name.clone(), capability.current.clone()))
             .collect();
         results.push(PerDeviceResult {
             device: device_summary(device),
             result: ImageStatusResult {
                 capabilities,
                 values,
+                raw_controls: all.raw_controls,
             },
         });
     }
     if config.output == OutputFormat::Human {
         for result in &results {
             println!("{} ({})", result.device.model, result.device.stable_id);
-            for (name, capability) in &result.result.capabilities.semantic {
+            for (name, capability) in &result.result.capabilities {
                 let value = result
                     .result
                     .values
                     .get(name)
                     .and_then(Option::as_ref)
-                    .map_or_else(|| "-".into(), |value| value.raw.to_string());
+                    .map_or_else(|| "-".into(), Value::to_string);
                 println!("{name}\t{:?}\t{value}", capability.state);
             }
         }
@@ -7249,8 +9151,8 @@ mod tests {
     use super::{
         Cli, ErrorKind, LinkError, TRANSACTION_SCHEMA_VERSION, TransactionOutcome, TransactionPlan,
         TransactionReport, TransactionStepKind, TransactionStepPlan, TransactionStepReport,
-        TransactionStepStatus, parse_fps, parse_size, record_rollback_result, rollback_order_for,
-        shutter_to_v4l2, validate_preset_requirements,
+        TransactionStepStatus, parse_fps, parse_size, parse_zoom_factor, record_rollback_result,
+        rollback_order_for, shutter_to_v4l2, validate_preset_requirements,
     };
 
     #[test]
@@ -7273,6 +9175,15 @@ mod tests {
         assert_eq!(parse_fps("30000/1001").unwrap().numerator, 30000);
         assert_eq!(parse_fps("29.97").unwrap().denominator, 100);
         assert!(parse_fps("0").is_err());
+    }
+
+    #[test]
+    fn zoom_factors_accept_explicit_units_and_signed_steps() {
+        assert_eq!(parse_zoom_factor("1.5x", false).unwrap(), 1.5);
+        assert_eq!(parse_zoom_factor("+0.1x", true).unwrap(), 0.1);
+        assert_eq!(parse_zoom_factor("-0.1", true).unwrap(), -0.1);
+        assert!(parse_zoom_factor("0x", false).is_err());
+        assert!(parse_zoom_factor("NaN", true).is_err());
     }
 
     #[test]
