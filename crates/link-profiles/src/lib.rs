@@ -1601,6 +1601,44 @@ firmware = ["v1.2.3"]
             [0xd4, 0x01]
         );
 
+        let mirror = matched.profile.control("image.mirror").unwrap();
+        assert!(mirror.writable);
+        assert!(mirror.read_modify_write);
+        assert_eq!(mirror.write_mask, Some(8));
+        assert_eq!(mirror.stream_requirement, super::StreamRequirement::Open);
+        assert_eq!(mirror.stream_warmup_delay_ms, 1_000);
+        assert_eq!(mirror.verification_delay_ms, 500);
+        assert_eq!(mirror.write_prelude, super::WritePrelude::GetLengthTwice);
+        assert_eq!(decode_control(mirror, &[0xd5, 0x01]).unwrap(), json!("off"));
+        assert_eq!(decode_control(mirror, &[0xdd, 0x01]).unwrap(), json!("on"));
+        assert_eq!(
+            encode_control(mirror, "on", Some(&[0xd5, 0x11])).unwrap(),
+            [0xdd, 0x11]
+        );
+        assert_eq!(
+            encode_control(mirror, "off", Some(&[0xdd, 0x11])).unwrap(),
+            [0xd5, 0x11]
+        );
+
+        let flip = matched.profile.control("image.flip").unwrap();
+        assert!(flip.writable);
+        assert!(flip.read_modify_write);
+        assert_eq!(flip.write_mask, Some(4096));
+        assert_eq!(flip.stream_requirement, super::StreamRequirement::Open);
+        assert_eq!(flip.stream_warmup_delay_ms, 1_000);
+        assert_eq!(flip.verification_delay_ms, 500);
+        assert_eq!(flip.write_prelude, super::WritePrelude::GetLengthTwice);
+        assert_eq!(decode_control(flip, &[0xd5, 0x01]).unwrap(), json!("off"));
+        assert_eq!(decode_control(flip, &[0xd5, 0x11]).unwrap(), json!("on"));
+        assert_eq!(
+            encode_control(flip, "on", Some(&[0xdd, 0x01])).unwrap(),
+            [0xdd, 0x11]
+        );
+        assert_eq!(
+            encode_control(flip, "off", Some(&[0xdd, 0x11])).unwrap(),
+            [0xdd, 0x01]
+        );
+
         let exposure = matched.profile.control("image.exposure").unwrap();
         assert_eq!(exposure.selector, 30);
         assert_eq!(exposure.length, 1);

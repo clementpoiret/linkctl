@@ -14,6 +14,8 @@ provenance = [
   "Linux hardware validation on the same firmware and descriptor verified 250-millisecond scalar readback, three complete manual/auto cycles, ISO 100/3200 and shutter 1/8000/requested 1/30 endpoints, intermediate and partial updates, reverse rollback after readback mismatches, and a final ISO 320 plus shutter 1/100 restoration sequence before returning to auto; fractional-rate shutters quantized one denominator lower while exact-rate values matched, and snapshot mean luma changed from 16.0 to 234.945 across the endpoint pair without exposure-curve writes (2026-08-29)",
   "Link 2C Pro USBPcap exposure-compensation capture on firmware v0.2.9.8_build3, SHA-256 4579fac93178dee2dcd2b7473c965c11458c577185552e33534dad1872b99ab9; three repeated -3.0/0.0/+3.0 EV cycles established selector 9 as a signed little-endian hundredths-of-an-EV value with direct readback (2026-08-29)",
   "Linux hardware validation on the same firmware and descriptor verified three complete -3.0/0.0/+3.0/0.0 EV cycles with 250-millisecond readback, exact +/-0.7 EV intermediates, pre-write rejection of out-of-range, off-step, and non-finite values, snapshot mean-luma movement from 57.4054 to 230.644 across the endpoints, and final restoration to 0.0 EV (2026-08-29)",
+  "Link 2C Pro USBPcap horizontal-mirror and vertical-flip capture on firmware v0.2.9.8_build3, SHA-256 2d36337eb00d67a7aa5bb838d26f2301f1abebbfca50a2d1e85ffe38fed450db; repeated transitions established selector 27 masks 0x0008 and 0x1000 respectively, with direct GET_CUR confirmation and both controls restored off (2026-08-29)",
+  "Linux hardware validation on the same firmware and descriptor verified three complete on/off cycles for each flip control with exact dd01/d501 and d511/d501 readback, followed by the combined dd01/dd11/d511/d501 sequence proving cross-bit preservation; HDR remained on and both flip controls were restored off (2026-08-29)",
 ]
 
 [[match]]
@@ -115,6 +117,60 @@ verification_delay_ms = 500
 persistence = "volatile"
 rollback = "readback"
 trace_ids = ["image-pipeline-1-hdr-84929e39612a"]
+safety = "normal"
+
+[[controls]]
+name = "image.mirror"
+entity_guid = "faf1672d-b71b-4793-8c91-7b1c9b7f95f8"
+selector = 27
+length = 2
+readable = true
+writable = true
+codec = "enum"
+offset = 0
+width = 2
+byte_order = "little"
+values = { off = 0, on = 8 }
+read_modify_write = true
+write_mask = 8
+tail_policy = { kind = "preserve" }
+verification = "readback"
+stream_requirement = "open"
+stream_format = { fourcc = "MJPG", width = 1920, height = 1080, fps_numerator = 30, fps_denominator = 1 }
+stream_warmup_delay_ms = 1000
+write_prelude = "get-length-twice"
+minimum_write_interval_ms = 250
+verification_delay_ms = 500
+persistence = "volatile"
+rollback = "readback"
+trace_ids = ["misc-options-1-flips-2d36337eb00d"]
+safety = "normal"
+
+[[controls]]
+name = "image.flip"
+entity_guid = "faf1672d-b71b-4793-8c91-7b1c9b7f95f8"
+selector = 27
+length = 2
+readable = true
+writable = true
+codec = "enum"
+offset = 0
+width = 2
+byte_order = "little"
+values = { off = 0, on = 4096 }
+read_modify_write = true
+write_mask = 4096
+tail_policy = { kind = "preserve" }
+verification = "readback"
+stream_requirement = "open"
+stream_format = { fourcc = "MJPG", width = 1920, height = 1080, fps_numerator = 30, fps_denominator = 1 }
+stream_warmup_delay_ms = 1000
+write_prelude = "get-length-twice"
+minimum_write_interval_ms = 250
+verification_delay_ms = 500
+persistence = "volatile"
+rollback = "readback"
+trace_ids = ["misc-options-1-flips-2d36337eb00d"]
 safety = "normal"
 
 [[controls]]

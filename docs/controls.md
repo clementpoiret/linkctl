@@ -34,6 +34,8 @@ linkctl --device link2cpro-… image white-balance 5000K
 linkctl --device link2cpro-… image focus manual 0.5
 linkctl --device link2cpro-… image brightness 0.55
 linkctl --device link2cpro-… image anti-flicker 50hz
+linkctl --device link2cpro-… image mirror on
+linkctl --device link2cpro-… image flip on
 linkctl --device link2cpro-… image reset
 ```
 
@@ -50,6 +52,8 @@ On the Link 2C Pro, the official controller capture confirms that white balance 
 Focus uses the standard UVC Camera Terminal controls `focus_automatic_continuous` and `focus_absolute`. The Controller capture confirms that manual focus disables autofocus before writing a direct 0–100 absolute value. The semantic command exposes this as a normalized 0.0–1.0 position derived from the live descriptor. Status reports autofocus/manual mode and normalized position together; JSON retains the underlying raw control descriptor and value. Linux hardware tests verified three endpoint/autofocus cycles, exact `0.37` conversion, rejection before write, and restoration of the original autofocus state.
 
 Anti-flicker uses the standard UVC Processing Unit `power_line_frequency` control. The Controller capture maps raw `1`, `2`, and `3` to 50 Hz, 60 Hz, and automatic respectively. The target Linux descriptor advertises disabled (`0`), 50 Hz (`1`), and 60 Hz (`2`), while inconsistently reporting automatic (`3`) as an out-of-range default. Semantic status and capability output use stable `disabled`, `50hz`, and `60hz` names for the advertised values. Requests for `auto` fail with exit code 4 before writing because the kernel does not expose that captured mode as writable.
+
+Horizontal mirror and vertical flip are verified camera-native controls on the exact Link 2C Pro firmware profile. They occupy masks `0x0008` and `0x1000` in the same two-byte selector used by HDR and Smart Composition. Each command reads the current payload, changes only its own mask, writes under the captured stream conditions, verifies exact readback, and restores the previous payload on failure. Status reports both values independently as `on` or `off`.
 
 ## Digital zoom
 

@@ -9,7 +9,7 @@ The following outcomes are established for the currently recorded landscape desc
 | Digital zoom | `zoom get/set/step/ramp/reset` | Verified standard V4L2 `zoom_absolute`, 1.00x–4.00x in 0.01x steps; write/readback/restore verified on hardware. |
 | Frame translation | `frame status/set/move/center` | Discovered, vendor transport unmapped. No pan/tilt substitution. |
 | Auto Framing | `auto-framing on/off/status/style` | Status, on/off, and Head/Half-body selection are verified for firmware `v0.2.9.8_build3`. No tracking-zone commands are exposed. |
-| Image pipeline | existing `image` commands plus `hdr`, `mirror`, and `flip` | Exposure auto/manual mode, ISO, shutter, exposure compensation, and HDR are verified for firmware `v0.2.9.8_build3`. White balance, focus, and anti-flicker are verified through standard UVC controls. Other camera-native image items remain explicitly unmapped. |
+| Image pipeline | existing `image` commands plus `hdr`, `mirror`, and `flip` | Exposure auto/manual mode, ISO, shutter, exposure compensation, HDR, horizontal mirror, and vertical flip are verified for firmware `v0.2.9.8_build3`. White balance, focus, and anti-flicker are verified through standard UVC controls. Other camera-native image items remain explicitly unmapped. |
 | Pickup mode | `audio mode status/standard/wide/focus/original` | Discovered, transport unmapped. Host gain/mute/filter controls remain separate. |
 | Regular Whiteboard Mode | `mode whiteboard on/off/status` | Discovered, vendor transport unmapped. |
 | Gestures | `gesture status/enable/disable/set` | Discovered, global/per-gesture mappings pending. |
@@ -38,6 +38,12 @@ Smart Composition and framing style are separate controls on the same XU. Smart 
 HDR shares selector 27 with Smart Composition and occupies bit 2. The reviewed controller capture began at `d5 01` with both settings enabled, then repeated `d1 01` for HDR off and `d5 01` for HDR on three times. Periodic `GET_CUR` responses confirmed each resulting value. Every mutation was preceded by a current-value read and two `GET_LEN` requests, and the video stream remained open throughout.
 
 The two profile controls therefore use masked read-modify-write encoding. `image hdr` changes only bit 2, and Auto Framing style's Smart Composition prerequisite changes only bit 0; both preserve the rest of the freshly read two-byte value. The HDR path uses the trace-matched MJPEG 1920×1080 at 30 fps stream, the hardware-validated one-second warm-up and 500-millisecond readback delay, and semantic rollback on a mismatch. Automatic backend selection still prefers a standard V4L2 HDR control if one is advertised.
+
+## Flip mappings
+
+The reviewed `flips.pcap` Controller capture (SHA-256 `2d36337eb00d67a7aa5bb838d26f2301f1abebbfca50a2d1e85ffe38fed450db`) maps both camera-native flip settings onto the same selector 27 value. Starting from the default-off `d5 01` payload, horizontal mirror set bit 3 of the little-endian word (`dd 01`) and vertical flip set bit 12 (`d5 11`). Repeated writes returned to `d5 01`, and later `GET_CUR` samples confirmed every on and off state.
+
+`image mirror` and `image flip` use positive masks `0x0008` and `0x1000` respectively, merge into a freshly read baseline, preserve the other selector fields, and require exact delayed readback. They use the same trace-matched stream and timing as the already validated selector-27 controls. Linux hardware validation completed three on/off cycles for each direction, then verified the combined `dd01 → dd11 → d511 → d501` sequence. HDR stayed on throughout, and both flip controls were restored off. No standard V4L2 flip controls were advertised on the target camera.
 
 ## Exposure mapping
 
