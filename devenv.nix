@@ -26,4 +26,11 @@
     pkgs.wireshark-cli
     pkgs.wireplumber
   ];
+
+  profiles.vcam-test.module = { pkgs, ... }: {
+    packages = [
+      pkgs.chromium
+      pkgs.obs-studio
+    ];
+  };
 }

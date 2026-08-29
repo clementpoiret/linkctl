@@ -62,6 +62,9 @@ fn help_and_version_advertise_only_implemented_commands() {
     assert!(stdout.contains("snapshot"));
     assert!(stdout.contains("capture"));
     assert!(stdout.contains("record"));
+    assert!(stdout.contains("daemon"));
+    assert!(stdout.contains("pipeline"));
+    assert!(stdout.contains("vcam"));
     assert!(stdout.contains("preset"));
     assert!(stdout.contains("xu"));
     assert!(stdout.contains("doctor"));
@@ -72,6 +75,46 @@ fn help_and_version_advertise_only_implemented_commands() {
 
     let unsafe_help = run(&["--unsafe-xu", "--help"]);
     assert!(unsafe_help.status.success());
+}
+
+#[test]
+fn daemon_commands_and_virtual_camera_contract_are_exposed_offline() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let unavailable = run_with_xdg(&["--format", "json", "daemon", "status"], directory.path());
+    assert_eq!(unavailable.status.code(), Some(12));
+    let value: Value = serde_json::from_slice(&unavailable.stdout).expect("JSON daemon error");
+    assert_eq!(value["error"]["code"], "daemon-unavailable");
+
+    let dry_run = run_with_xdg(
+        &[
+            "--format",
+            "json",
+            "--dry-run",
+            "vcam",
+            "start",
+            "--name",
+            "conference",
+            "--output-device",
+            "/dev/video20",
+            "--profile",
+            "mirrored",
+            "--size",
+            "1280x720",
+            "--crop",
+            "0.1,0.2,0.8,0.6",
+        ],
+        directory.path(),
+    );
+    assert!(
+        dry_run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dry_run.stderr)
+    );
+    let value: Value = serde_json::from_slice(&dry_run.stdout).expect("JSON vcam plan");
+    assert_eq!(value["command"], "vcam.start");
+    assert_eq!(value["result"]["specification"]["name"], "conference");
+    assert_eq!(value["result"]["specification"]["horizontal_flip"], true);
+    assert_eq!(value["result"]["specification"]["width"], 1280);
 }
 
 #[test]

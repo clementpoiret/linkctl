@@ -12,7 +12,7 @@ Trust boundaries are:
 
 1. USB descriptors, kernel-returned structures, and device control payloads entering the process.
 2. User and system configuration, device profiles, presets, and research fixtures entering typed parsers.
-3. A future local client crossing a Unix-socket boundary into `linkd`.
+3. A local `linkctl` client crossing the private Unix-socket boundary into `linkd`.
 4. Media frames crossing capture, processing, encoder, file, virtual-camera, and network boundaries.
 5. Optional native multimedia libraries, model runtimes, and a vendor SDK crossing into Rust code.
 6. Dependencies, development tooling, and CI actions entering the software supply chain.
@@ -33,7 +33,7 @@ The physical camera, USB bus, kernel driver, local configuration, third-party pr
 | A preset leaks stream credentials | The current preset schema has no recording/stream target or inline credential field; unknown fields fail and future integrations must use secret references |
 | A multi-device mutation changes cameras unintentionally | Require an explicit `--device all --yes` combination and report each device independently |
 | Machine output or logs leak serials, paths, credentials, microphone levels, or media | Redact identifiers by default, keep logs on stderr, never log secrets or media buffers, and emit only explicitly requested aggregate audio levels |
-| A local process impersonates or controls the daemon | User-owned socket permissions, peer-credential checks, and protocol-version negotiation before requests |
+| A local process impersonates or controls the daemon | Owner-only runtime directory and socket, same-UID peer-credential checks on client and server, bounded frames, strict JSON decoding, and protocol-version negotiation before dispatch |
 | Untrusted pipeline text or automation executes commands | Build pipelines and automation from typed structures; arbitrary strings and external processes require explicit local trust |
 | A native media library, model runtime, or SDK crashes or corrupts memory | Feature gating, minimal bindings, version checks, and process isolation for the vendor SDK |
 | A recording or audio-capture destination follows a malicious symlink | Canonicalization, regular-file checks, bounded destinations, same-directory temporary output, atomic finalization where possible, and explicit sync semantics |
@@ -48,9 +48,9 @@ Linux discovery and control backends perform bounded device I/O through kernel U
 
 Preset and direct media/control operations share a user-owned cross-process lease. Preset files use atomic no-clobber writes with owner-only directories and files. An apply journal is updated after each verified or rolled-back stage and removed only after success or complete restoration; incomplete journals block another apply and are reported by `doctor`.
 
-Typed GStreamer pipelines now accept video and audio buffers from selected kernel/PipeWire endpoints and write only explicit recording, snapshot, audio-capture, standard-output, playback, or RTP destinations. Pipeline text is never accepted from configuration or the command line. Binary standard output contains only media bytes; diagnostics use stderr. Single-file recordings and audio captures use same-directory temporary files and are renamed only after clean finalization. Monitoring selects an existing playback route and does not create a network listener.
+Typed GStreamer pipelines now accept video and audio buffers from selected kernel/PipeWire endpoints and write only explicit recording, snapshot, audio-capture, standard-output, playback, virtual-camera, or RTP destinations. Pipeline text is never accepted from configuration or the command line. Virtual sinks must be writable V4L2 output nodes, and daemon recordings reject symbolic-link destinations. Binary standard output contains only media bytes; diagnostics use stderr. Direct single-file recordings and audio captures use same-directory temporary files and are renamed only after clean finalization. Monitoring selects an existing playback route and does not create a network listener.
 
-There is no daemon listener, general network listener, or native SDK loading. External profiles are research-only input and cannot authorize semantic writes. Diagnostic archives are owner-only, no-clobber, checksummed, serial-redacted, and enumerate omitted fields; raw payloads are never added to their audit log.
+The daemon listens only on its local Unix socket and exposes no general network listener. It serializes graph changes through one bounded actor and limits JSON and binary frame sizes. There is no native SDK loading. External profiles are research-only input and cannot authorize semantic writes. Diagnostic archives are owner-only, no-clobber, checksummed, serial-redacted, and enumerate omitted fields; raw payloads are never added to their audit log.
 
 ## Review triggers
 

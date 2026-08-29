@@ -221,6 +221,24 @@ pub enum Command {
         #[command(subcommand)]
         command: RecordCommand,
     },
+    /// Inspect and control the user stream daemon.
+    #[cfg(feature = "daemon")]
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
+    /// Inspect the daemon-owned media graph and its counters.
+    #[cfg(feature = "daemon")]
+    Pipeline {
+        #[command(subcommand)]
+        command: PipelineCommand,
+    },
+    /// Manage named v4l2loopback outputs.
+    #[cfg(feature = "daemon")]
+    Vcam {
+        #[command(subcommand)]
+        command: VcamCommand,
+    },
     /// Restream video through an explicitly enabled network backend.
     #[cfg(feature = "network")]
     Stream {
@@ -923,6 +941,7 @@ pub struct CaptureArgs {
 /// Foreground recording operations.
 #[cfg(feature = "gstreamer")]
 #[derive(Clone, Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)] // clap keeps Start fields inline; boxing complicates derive parsing.
 pub enum RecordCommand {
     /// Start a blocking recording.
     Start {
@@ -966,6 +985,125 @@ pub enum RecordCommand {
         #[command(flatten)]
         audio_processing: AudioProcessingArgs,
     },
+    /// Report a background recording owned by linkd.
+    Status,
+    /// Gracefully stop and finalize a background recording.
+    Stop,
+}
+
+/// User daemon lifecycle operations.
+#[cfg(feature = "daemon")]
+#[derive(Clone, Debug, Subcommand)]
+pub enum DaemonCommand {
+    Status,
+    Reload,
+    Shutdown,
+}
+
+/// Shared media graph inspection.
+#[cfg(feature = "daemon")]
+#[derive(Clone, Debug, Subcommand)]
+pub enum PipelineCommand {
+    Status,
+    Graph,
+    Metrics,
+}
+
+/// Named virtual-camera operations.
+#[cfg(feature = "daemon")]
+#[derive(Clone, Debug, Subcommand)]
+pub enum VcamCommand {
+    /// List active daemon-owned virtual outputs.
+    List,
+    /// Start one named output with an explicit format contract.
+    Start(VcamStartArgs),
+    /// Show one named output, or every output.
+    Status {
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Stop one named output, or every output.
+    Stop {
+        #[arg(long)]
+        name: Option<String>,
+    },
+}
+
+/// Virtual-camera output contract and base transform options.
+#[cfg(feature = "daemon")]
+#[derive(Clone, Debug, clap::Args)]
+pub struct VcamStartArgs {
+    /// Stable output name.
+    #[arg(long, default_value = "clean")]
+    pub name: String,
+    /// v4l2loopback sink. This is distinct from the global physical `--device` selector.
+    #[arg(long)]
+    pub output_device: PathBuf,
+    /// Built-in transform profile.
+    #[arg(long, value_enum, default_value = "clean")]
+    pub profile: VcamProfileChoice,
+    /// Output size, such as 1920x1080.
+    #[arg(long)]
+    pub size: Option<String>,
+    /// Output frame rate as an integer, decimal, or rational.
+    #[arg(long)]
+    pub fps: Option<String>,
+    /// Raw V4L2 output format consumed by v4l2loopback.
+    #[arg(long, default_value = "YUY2")]
+    pub output_format: String,
+    /// Clockwise output rotation.
+    #[arg(long, value_enum, default_value = "none")]
+    pub rotate: RotationChoice,
+    #[arg(long)]
+    pub horizontal_flip: bool,
+    #[arg(long)]
+    pub vertical_flip: bool,
+    /// Normalized crop `x,y,width,height`.
+    #[arg(long)]
+    pub crop: Option<String>,
+    /// Output aspect-ratio fitting policy.
+    #[arg(long, value_enum, default_value = "contain")]
+    pub fit: FitChoice,
+    /// Host digital zoom, at least 1.0.
+    #[arg(long, default_value_t = 1.0)]
+    pub zoom: f64,
+    #[arg(long, default_value_t = 0.5)]
+    pub frame_x: f64,
+    #[arg(long, default_value_t = 0.5)]
+    pub frame_y: f64,
+    #[arg(long)]
+    pub text_overlay: Option<String>,
+    #[arg(long)]
+    pub image_overlay: Option<PathBuf>,
+    /// Publish a black logical privacy frame while retaining the graph.
+    #[arg(long)]
+    pub privacy_frame: bool,
+}
+
+#[cfg(feature = "daemon")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum VcamProfileChoice {
+    Clean,
+    Effects,
+    Mirrored,
+    Portrait,
+}
+
+#[cfg(feature = "daemon")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum RotationChoice {
+    None,
+    Clockwise90,
+    Rotate180,
+    Counterclockwise90,
+}
+
+#[cfg(feature = "daemon")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum FitChoice {
+    Contain,
+    Cover,
+    Stretch,
 }
 
 /// Feature-gated RTP streaming operations.
@@ -1258,6 +1396,12 @@ pub fn run(arguments: Vec<OsString>) -> u8 {
         }
         #[cfg(feature = "gstreamer")]
         Some(Command::Record { command }) => run_record(&config, cli.backend, command, cli.dry_run),
+        #[cfg(feature = "daemon")]
+        Some(Command::Daemon { command }) => run_daemon(&config, command),
+        #[cfg(feature = "daemon")]
+        Some(Command::Pipeline { command }) => run_pipeline_command(&config, command),
+        #[cfg(feature = "daemon")]
+        Some(Command::Vcam { command }) => run_vcam(&config, command, cli.dry_run),
         #[cfg(feature = "network")]
         Some(Command::Stream { command }) => run_stream(&config, cli.backend, command, cli.dry_run),
         Some(Command::Doctor(arguments)) => run_doctor(&config, arguments.bundle.as_deref()),
@@ -1338,7 +1482,11 @@ fn command_uses_device_defaults(command: Option<&Command>) -> bool {
             AudioCommand::Monitor(arguments) => arguments.stream.source == "camera",
         },
         #[cfg(feature = "gstreamer")]
-        Some(Command::Snapshot(_) | Command::Capture(_) | Command::Record { .. }) => true,
+        Some(Command::Snapshot(_) | Command::Capture(_)) => true,
+        #[cfg(feature = "gstreamer")]
+        Some(Command::Record {
+            command: RecordCommand::Start { .. },
+        }) => true,
         #[cfg(feature = "network")]
         Some(Command::Stream { .. }) => true,
         _ => false,
@@ -1492,7 +1640,30 @@ fn command_identifier(command: Option<&Command>) -> &'static str {
         #[cfg(feature = "gstreamer")]
         Some(Command::Capture(_)) => "capture",
         #[cfg(feature = "gstreamer")]
-        Some(Command::Record { .. }) => "record.start",
+        Some(Command::Record { command }) => match command {
+            RecordCommand::Start { .. } => "record.start",
+            RecordCommand::Status => "record.status",
+            RecordCommand::Stop => "record.stop",
+        },
+        #[cfg(feature = "daemon")]
+        Some(Command::Daemon { command }) => match command {
+            DaemonCommand::Status => "daemon.status",
+            DaemonCommand::Reload => "daemon.reload",
+            DaemonCommand::Shutdown => "daemon.shutdown",
+        },
+        #[cfg(feature = "daemon")]
+        Some(Command::Pipeline { command }) => match command {
+            PipelineCommand::Status => "pipeline.status",
+            PipelineCommand::Graph => "pipeline.graph",
+            PipelineCommand::Metrics => "pipeline.metrics",
+        },
+        #[cfg(feature = "daemon")]
+        Some(Command::Vcam { command }) => match command {
+            VcamCommand::List => "vcam.list",
+            VcamCommand::Start(_) => "vcam.start",
+            VcamCommand::Status { .. } => "vcam.status",
+            VcamCommand::Stop { .. } => "vcam.stop",
+        },
         #[cfg(feature = "network")]
         Some(Command::Stream { .. }) => "stream.start",
         Some(Command::Doctor(_)) => "doctor",
@@ -1508,13 +1679,15 @@ fn run_device_list(config: &Config, include_serial: bool) -> Result<(), LinkErro
         .filter(link_linux::is_listable)
         .collect::<Vec<_>>();
     let include_serial = include_serial || !config.safety.redact_serials;
+    let daemon_source = daemon_source_id(config)?;
     let mut entries = Vec::with_capacity(devices.len());
     for device in &devices {
         let profile = catalog.report(&device.identity, device.mode())?;
         entries.push(DeviceListStatus {
             device: device.list_entry(include_serial, profile.profile_id),
             state: link_linux::availability_state(device),
-            owner: None,
+            owner: (daemon_source.as_deref() == Some(&device.identity.stable_id()))
+                .then(|| "linkd".into()),
         });
     }
 
@@ -1789,11 +1962,10 @@ fn ensure_standard_backend(
     config: &Config,
     backend: Option<BackendChoice>,
 ) -> Result<(), LinkError> {
+    let _ = config;
+    #[cfg(feature = "daemon")]
     if config.daemon == DaemonMode::Always {
-        return Err(LinkError::new(
-            ErrorKind::DaemonUnavailable,
-            "the daemon is not implemented in this build",
-        ));
+        daemon_client(config)?.request(link_ipc::Operation::Status)?;
     }
     match backend.unwrap_or(BackendChoice::Auto) {
         BackendChoice::Auto | BackendChoice::Standard => Ok(()),
@@ -1816,7 +1988,15 @@ fn ensure_direct_video_backend(
     config: &Config,
     backend: Option<BackendChoice>,
 ) -> Result<(), LinkError> {
-    ensure_standard_backend(config, backend)
+    ensure_standard_backend(config, backend)?;
+    #[cfg(feature = "daemon")]
+    if should_use_daemon(config)? {
+        return Err(LinkError::new(
+            ErrorKind::DeviceBusy,
+            "linkd owns the physical stream; use a daemon-capable operation or --daemon never",
+        ));
+    }
+    Ok(())
 }
 
 fn selected_video_device(
@@ -2312,8 +2492,6 @@ fn run_xu_semantic_writes(
     let (device, node, inventory, catalog, session) = selected_xu_context(config, true)?;
     let stable_id = device.identity.stable_id();
     let _lease = acquire_operation_lease(config, &stable_id, command)?;
-    #[cfg(feature = "gstreamer")]
-    let _media_lease = link_media::MediaLease::acquire(&stable_id, command)?;
     let (entry, firmware) = resolve_firmware_profile(&device, &inventory, &catalog, &session)?;
     let entry = entry.ok_or_else(|| {
         LinkError::new(
@@ -2357,6 +2535,17 @@ fn run_xu_semantic_writes(
     }
 
     let stream_control = authorized[0].0.control();
+    #[cfg(feature = "daemon")]
+    let daemon_stream =
+        stream_control.stream_requirement == StreamRequirement::Open && daemon_owns_stream(config)?;
+    #[cfg(not(feature = "daemon"))]
+    let daemon_stream = false;
+    #[cfg(feature = "gstreamer")]
+    let _media_lease = if daemon_stream {
+        None
+    } else {
+        Some(link_media::MediaLease::acquire(&stable_id, command)?)
+    };
     let restart_write = stream_control.verification == VerificationMethod::Reenumeration
         && stream_control.stream_requirement == StreamRequirement::Restart;
     if authorized.iter().skip(1).any(|(authorization, _)| {
@@ -2370,7 +2559,13 @@ fn run_xu_semantic_writes(
             "semantic XU transaction controls require incompatible stream conditions",
         ));
     }
-    let _stream = prepare_xu_stream(stream_control, &node.path, config.timeout.get(), dry_run)?;
+    let _stream = prepare_xu_stream(
+        stream_control,
+        &node.path,
+        config.timeout.get(),
+        dry_run,
+        daemon_stream,
+    )?;
     let limiter = link_uvc_xu::RateLimiter::from_process()?;
     let mut prepared = Vec::with_capacity(authorized.len());
     for (authorization, input) in authorized {
@@ -2738,8 +2933,13 @@ fn prepare_xu_stream(
     node: &str,
     timeout: Duration,
     dry_run: bool,
+    daemon_stream: bool,
 ) -> Result<Option<link_media::ProbeStream>, LinkError> {
     if dry_run || control.stream_requirement != link_profiles::StreamRequirement::Open {
+        return Ok(None);
+    }
+    if daemon_stream {
+        thread::sleep(Duration::from_millis(control.stream_warmup_delay_ms));
         return Ok(None);
     }
     let format = control
@@ -2757,6 +2957,7 @@ fn prepare_xu_stream(
     _node: &str,
     _timeout: Duration,
     _dry_run: bool,
+    _daemon_stream: bool,
 ) -> Result<Option<()>, LinkError> {
     match control.stream_requirement {
         link_profiles::StreamRequirement::Either
@@ -2807,8 +3008,6 @@ fn run_xu_raw_set(
     let (device, node, inventory, catalog, session) = selected_xu_context(config, true)?;
     let stable_id = device.identity.stable_id();
     let _lease = acquire_operation_lease(config, &stable_id, "xu.raw-set")?;
-    #[cfg(feature = "gstreamer")]
-    let _media_lease = link_media::MediaLease::acquire(&stable_id, "xu.raw-set")?;
     let (entry, firmware) = resolve_firmware_profile(&device, &inventory, &catalog, &session)?;
     let entry = entry.ok_or_else(|| {
         LinkError::new(
@@ -2841,7 +3040,24 @@ fn run_xu_raw_set(
         })?;
     let policy = SafetyPolicy::new(config.safety.clone());
     authorize_control_safety(control.safety, &policy)?;
-    let _stream = prepare_xu_stream(control, &node.path, config.timeout.get(), dry_run)?;
+    #[cfg(feature = "daemon")]
+    let daemon_stream =
+        control.stream_requirement == StreamRequirement::Open && daemon_owns_stream(config)?;
+    #[cfg(not(feature = "daemon"))]
+    let daemon_stream = false;
+    #[cfg(feature = "gstreamer")]
+    let _media_lease = if daemon_stream {
+        None
+    } else {
+        Some(link_media::MediaLease::acquire(&stable_id, "xu.raw-set")?)
+    };
+    let _stream = prepare_xu_stream(
+        control,
+        &node.path,
+        config.timeout.get(),
+        dry_run,
+        daemon_stream,
+    )?;
     let (resolved_guid, address) =
         link_uvc_xu::resolve_address(&inventory, Some(guid), None, selector)?;
     let rate_wait = link_uvc_xu::RateLimiter::from_process()?.enforce(
@@ -5225,6 +5441,10 @@ fn run_snapshot(
     arguments: SnapshotArgs,
     dry_run: bool,
 ) -> Result<(), LinkError> {
+    #[cfg(feature = "daemon")]
+    if should_use_daemon(config)? {
+        return run_daemon_snapshot(config, arguments, dry_run);
+    }
     ensure_direct_video_backend(config, backend)?;
     let (device, node) = selected_video_device(config)?;
     let summary = device_summary(&device);
@@ -5310,6 +5530,127 @@ fn run_snapshot(
         Ok(())
     } else {
         emit_success(config.output, "snapshot", Some(summary), &result)
+    }
+}
+
+#[cfg(all(feature = "daemon", feature = "gstreamer"))]
+fn run_daemon_snapshot(
+    config: &Config,
+    arguments: SnapshotArgs,
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    if arguments.count == 0 {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "snapshot --count must be greater than zero",
+        ));
+    }
+    if arguments.raw_frame {
+        return Err(LinkError::new(
+            ErrorKind::CapabilityUnsupported,
+            "raw snapshots are unavailable from the shared decoded pipeline",
+        ));
+    }
+    if arguments.tuple.fourcc.is_some()
+        || arguments.tuple.size.is_some()
+        || arguments.tuple.fps.is_some()
+    {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "daemon snapshots use the daemon's negotiated source tuple",
+        ));
+    }
+    let stdout = arguments.output == Path::new("-");
+    if stdout && arguments.count != 1 {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "snapshot stdout supports exactly one frame",
+        ));
+    }
+    let encoding = snapshot_encoding(&arguments, stdout)?;
+    let ipc_encoding = match encoding {
+        link_media::SnapshotEncoding::Jpeg => link_ipc::SnapshotEncoding::Jpeg,
+        link_media::SnapshotEncoding::Png => link_ipc::SnapshotEncoding::Png,
+        link_media::SnapshotEncoding::Raw => unreachable!(),
+    };
+    if dry_run {
+        let result = json!({
+            "dry_run": true,
+            "owner": "linkd",
+            "encoding": encoding,
+            "count": arguments.count,
+        });
+        return emit_daemon_value(config, "snapshot", result);
+    }
+    let paths = if stdout {
+        Vec::new()
+    } else {
+        snapshot_paths(&arguments.output, arguments.count)?
+    };
+    validate_snapshot_outputs(
+        &paths,
+        !stdout && !arguments.no_metadata,
+        arguments.overwrite,
+    )?;
+    let client = daemon_client(config)?;
+    let mut captured = Vec::with_capacity(arguments.count as usize);
+    for index in 0..arguments.count {
+        let response = client.request(link_ipc::Operation::Snapshot {
+            encoding: ipc_encoding,
+        })?;
+        captured.push((response.value, response.binary));
+        if index + 1 < arguments.count && !arguments.interval.get().is_zero() {
+            thread::sleep(arguments.interval.get());
+        }
+    }
+    if stdout {
+        std::io::stdout()
+            .write_all(&captured[0].1)
+            .and_then(|()| std::io::stdout().flush())
+            .map_err(|error| {
+                LinkError::new(ErrorKind::IoFailure, "failed to write snapshot to stdout")
+                    .with_detail("reason", error.to_string())
+            })?;
+        return emit_success_to_stderr(
+            config.output,
+            "snapshot",
+            None,
+            &json!({"owner": "linkd", "encoding": encoding, "bytes": captured[0].1.len()}),
+        );
+    }
+    let mut metadata_paths = Vec::new();
+    for ((metadata, bytes), path) in captured.iter().zip(&paths) {
+        write_atomic(path, bytes, arguments.overwrite)?;
+        if !arguments.no_metadata {
+            let metadata_path = PathBuf::from(format!("{}.json", path.display()));
+            let sidecar = json!({
+                "schema_version": SCHEMA_VERSION,
+                "owner": "linkd",
+                "encoding": encoding,
+                "capture": metadata,
+            });
+            write_atomic(
+                &metadata_path,
+                &serde_json::to_vec_pretty(&sidecar).map_err(serialization_error)?,
+                arguments.overwrite,
+            )?;
+            metadata_paths.push(metadata_path);
+        }
+    }
+    let result = json!({
+        "owner": "linkd",
+        "encoding": encoding,
+        "outputs": paths,
+        "metadata": metadata_paths,
+        "count": captured.len(),
+    });
+    if config.output == OutputFormat::Human {
+        for path in &paths {
+            println!("Snapshot: {} (via linkd)", path.display());
+        }
+        Ok(())
+    } else {
+        emit_success(config.output, "snapshot", None, &result)
     }
 }
 
@@ -5531,7 +5872,27 @@ fn run_record(
     command: RecordCommand,
     dry_run: bool,
 ) -> Result<(), LinkError> {
-    ensure_direct_video_backend(config, backend)?;
+    #[cfg(feature = "daemon")]
+    match command {
+        RecordCommand::Status => {
+            return run_daemon_operation(
+                config,
+                "record.status",
+                link_ipc::Operation::RecordingStatus,
+            );
+        }
+        RecordCommand::Stop => {
+            return run_daemon_operation(config, "record.stop", link_ipc::Operation::RecordingStop);
+        }
+        RecordCommand::Start { .. } => {}
+    }
+    #[cfg(not(feature = "daemon"))]
+    if matches!(command, RecordCommand::Status | RecordCommand::Stop) {
+        return Err(LinkError::new(
+            ErrorKind::CapabilityUnsupported,
+            "this build does not include daemon recording control",
+        ));
+    }
     let RecordCommand::Start {
         output,
         tuple: tuple_arguments,
@@ -5547,7 +5908,10 @@ fn run_record(
         audio,
         audio_delay,
         audio_processing,
-    } = command;
+    } = command
+    else {
+        unreachable!("status and stop returned above")
+    };
     if rolling == Some(0) {
         return Err(LinkError::new(
             ErrorKind::InvalidInvocation,
@@ -5574,6 +5938,55 @@ fn run_record(
         .as_deref()
         .map(link_media::parse_byte_size)
         .transpose()?;
+    #[cfg(feature = "daemon")]
+    if should_use_daemon(config)? {
+        if duration.is_some()
+            || max_size.is_some()
+            || segment_duration.is_some()
+            || segment_size.is_some()
+            || rolling.is_some()
+            || audio.is_some()
+            || audio_delay != "0ms"
+            || audio_processing.gate
+            || audio_processing.compressor
+            || audio_processing.limiter
+        {
+            return Err(LinkError::new(
+                ErrorKind::CapabilityUnsupported,
+                "background recording currently supports one video-only output without limits or segmentation",
+            ));
+        }
+        if tuple_arguments.fourcc.is_some()
+            || tuple_arguments.size.is_some()
+            || tuple_arguments.fps.is_some()
+        {
+            return Err(LinkError::new(
+                ErrorKind::InvalidInvocation,
+                "daemon recording uses the daemon's negotiated source tuple",
+            ));
+        }
+        let specification = link_ipc::RecordingSpec {
+            output,
+            container: match container {
+                link_media::RecordContainer::Matroska => link_ipc::RecordingContainer::Matroska,
+                link_media::RecordContainer::Mp4 => link_ipc::RecordingContainer::Mp4,
+            },
+            overwrite,
+        };
+        if dry_run {
+            return emit_daemon_value(
+                config,
+                "record.start",
+                json!({"dry_run": true, "owner": "linkd", "recording": specification}),
+            );
+        }
+        return run_daemon_operation(
+            config,
+            "record.start",
+            link_ipc::Operation::RecordingStart { specification },
+        );
+    }
+    ensure_direct_video_backend(config, backend)?;
     let (device, node) = selected_video_device(config)?;
     let summary = device_summary(&device);
     let tuple = resolve_media_tuple(&node, config, &tuple_arguments, None)?;
@@ -5645,6 +6058,247 @@ fn parse_signed_duration_ns(value: &str) -> Result<i64, LinkError> {
         )
     })?;
     Ok(if negative { -nanoseconds } else { nanoseconds })
+}
+
+#[cfg(feature = "daemon")]
+fn daemon_client(config: &Config) -> Result<link_ipc::Client, LinkError> {
+    link_ipc::Client::connect_default(config.timeout.get().max(Duration::from_secs(10)))
+}
+
+#[cfg(feature = "daemon")]
+fn daemon_socket_present() -> Result<bool, LinkError> {
+    Ok(link_ipc::socket_path()?.exists())
+}
+
+#[cfg(feature = "daemon")]
+fn should_use_daemon(config: &Config) -> Result<bool, LinkError> {
+    match config.daemon {
+        DaemonMode::Never => Ok(false),
+        DaemonMode::Always => Ok(true),
+        DaemonMode::Auto if !daemon_socket_present()? => Ok(false),
+        DaemonMode::Auto => match daemon_client(config)?.request(link_ipc::Operation::Status) {
+            Ok(_) => Ok(true),
+            Err(error) if !error.details().contains_key("observed_protocol") => Ok(false),
+            Err(error) => Err(error),
+        },
+    }
+}
+
+#[cfg(feature = "daemon")]
+fn daemon_owns_stream(config: &Config) -> Result<bool, LinkError> {
+    Ok(daemon_source_id(config)?.is_some())
+}
+
+fn daemon_source_id(config: &Config) -> Result<Option<String>, LinkError> {
+    #[cfg(not(feature = "daemon"))]
+    {
+        let _ = config;
+        return Ok(None);
+    }
+    #[cfg(feature = "daemon")]
+    {
+        if config.daemon == DaemonMode::Never {
+            return Ok(None);
+        }
+        if !daemon_socket_present()? {
+            if config.daemon == DaemonMode::Always {
+                daemon_client(config)?.request(link_ipc::Operation::Status)?;
+            }
+            return Ok(None);
+        }
+        let status = match daemon_client(config)?.request(link_ipc::Operation::PipelineStatus) {
+            Ok(status) => status,
+            Err(error)
+                if config.daemon == DaemonMode::Auto
+                    && !error.details().contains_key("observed_protocol") =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        if status.value.get("state").and_then(Value::as_str) != Some("playing") {
+            return Ok(None);
+        }
+        Ok(status
+            .value
+            .get("source")
+            .and_then(|source| source.get("stable_id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned))
+    }
+}
+
+#[cfg(feature = "daemon")]
+fn run_daemon(config: &Config, command: DaemonCommand) -> Result<(), LinkError> {
+    let (name, operation) = match command {
+        DaemonCommand::Status => ("daemon.status", link_ipc::Operation::Status),
+        DaemonCommand::Reload => ("daemon.reload", link_ipc::Operation::Reload),
+        DaemonCommand::Shutdown => ("daemon.shutdown", link_ipc::Operation::Shutdown),
+    };
+    run_daemon_operation(config, name, operation)
+}
+
+#[cfg(feature = "daemon")]
+fn run_pipeline_command(config: &Config, command: PipelineCommand) -> Result<(), LinkError> {
+    let (name, operation) = match command {
+        PipelineCommand::Status => ("pipeline.status", link_ipc::Operation::PipelineStatus),
+        PipelineCommand::Graph => ("pipeline.graph", link_ipc::Operation::PipelineGraph),
+        PipelineCommand::Metrics => ("pipeline.metrics", link_ipc::Operation::PipelineMetrics),
+    };
+    run_daemon_operation(config, name, operation)
+}
+
+#[cfg(feature = "daemon")]
+fn run_vcam(config: &Config, command: VcamCommand, dry_run: bool) -> Result<(), LinkError> {
+    let (name, operation) = match command {
+        VcamCommand::List => ("vcam.list", link_ipc::Operation::VcamList),
+        VcamCommand::Status { name } => ("vcam.status", link_ipc::Operation::VcamStatus { name }),
+        VcamCommand::Stop { name } => {
+            if dry_run {
+                return emit_daemon_value(
+                    config,
+                    "vcam.stop",
+                    json!({"dry_run": true, "name": name}),
+                );
+            }
+            ("vcam.stop", link_ipc::Operation::VcamStop { name })
+        }
+        VcamCommand::Start(arguments) => {
+            let specification = vcam_specification(arguments)?;
+            if dry_run {
+                return emit_daemon_value(
+                    config,
+                    "vcam.start",
+                    json!({"dry_run": true, "specification": specification}),
+                );
+            }
+            (
+                "vcam.start",
+                link_ipc::Operation::VcamStart { specification },
+            )
+        }
+    };
+    run_daemon_operation(config, name, operation)
+}
+
+#[cfg(feature = "daemon")]
+fn vcam_specification(arguments: VcamStartArgs) -> Result<link_ipc::VirtualCameraSpec, LinkError> {
+    let (profile_width, profile_height, profile_rotation, profile_flip) = match arguments.profile {
+        VcamProfileChoice::Clean | VcamProfileChoice::Effects => {
+            (1920, 1080, link_ipc::Rotation::None, false)
+        }
+        VcamProfileChoice::Mirrored => (1920, 1080, link_ipc::Rotation::None, true),
+        VcamProfileChoice::Portrait => (1080, 1920, link_ipc::Rotation::Clockwise90, false),
+    };
+    let (width, height) = arguments
+        .size
+        .as_deref()
+        .map(parse_size)
+        .transpose()?
+        .unwrap_or((profile_width, profile_height));
+    let fps = arguments
+        .fps
+        .as_deref()
+        .map(parse_fps)
+        .transpose()?
+        .unwrap_or(Rational {
+            numerator: 30,
+            denominator: 1,
+        });
+    let rotation = match arguments.rotate {
+        RotationChoice::None => profile_rotation,
+        RotationChoice::Clockwise90 => link_ipc::Rotation::Clockwise90,
+        RotationChoice::Rotate180 => link_ipc::Rotation::Rotate180,
+        RotationChoice::Counterclockwise90 => link_ipc::Rotation::Counterclockwise90,
+    };
+    let crop = arguments.crop.as_deref().map(parse_crop).transpose()?;
+    Ok(link_ipc::VirtualCameraSpec {
+        name: arguments.name,
+        output_device: arguments.output_device,
+        width,
+        height,
+        fps_numerator: fps.numerator,
+        fps_denominator: fps.denominator,
+        format: arguments.output_format.to_ascii_uppercase(),
+        rotation,
+        horizontal_flip: arguments.horizontal_flip || profile_flip,
+        vertical_flip: arguments.vertical_flip,
+        crop,
+        fit: match arguments.fit {
+            FitChoice::Contain => link_ipc::FitMode::Contain,
+            FitChoice::Cover => link_ipc::FitMode::Cover,
+            FitChoice::Stretch => link_ipc::FitMode::Stretch,
+        },
+        zoom: arguments.zoom,
+        frame_x: arguments.frame_x,
+        frame_y: arguments.frame_y,
+        text_overlay: arguments.text_overlay,
+        image_overlay: arguments.image_overlay,
+        privacy_frame: arguments.privacy_frame,
+    })
+}
+
+#[cfg(feature = "daemon")]
+fn parse_crop(value: &str) -> Result<link_ipc::NormalizedCrop, LinkError> {
+    let values = value
+        .split(',')
+        .map(|part| part.trim().parse::<f64>())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            LinkError::new(
+                ErrorKind::InvalidInvocation,
+                "invalid normalized crop; expected x,y,width,height",
+            )
+            .with_detail("reason", error.to_string())
+        })?;
+    let [x, y, width, height] = values.as_slice() else {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "invalid normalized crop; expected x,y,width,height",
+        ));
+    };
+    if ![x, y, width, height].iter().all(|value| value.is_finite())
+        || *x < 0.0
+        || *y < 0.0
+        || *width <= 0.0
+        || *height <= 0.0
+        || *x + *width > 1.0
+        || *y + *height > 1.0
+    {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "normalized crop must be finite and contained within 0.0..=1.0",
+        ));
+    }
+    Ok(link_ipc::NormalizedCrop {
+        x: *x,
+        y: *y,
+        width: *width,
+        height: *height,
+    })
+}
+
+#[cfg(feature = "daemon")]
+fn run_daemon_operation(
+    config: &Config,
+    command: &str,
+    operation: link_ipc::Operation,
+) -> Result<(), LinkError> {
+    let response = daemon_client(config)?.request(operation)?;
+    emit_daemon_value(config, command, response.value)
+}
+
+#[cfg(feature = "daemon")]
+fn emit_daemon_value(config: &Config, command: &str, value: Value) -> Result<(), LinkError> {
+    if config.output == OutputFormat::Human {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).map_err(serialization_error)?
+        );
+        Ok(())
+    } else {
+        emit_success(config.output, command, None, &value)
+    }
 }
 
 #[cfg(feature = "gstreamer")]
@@ -6252,8 +6906,13 @@ fn native_capabilities_for(
         .map(|entry| profile_read_stream_requirement(&entry.profile, current_names))
         .transpose()?
         .flatten();
+    #[cfg(feature = "daemon")]
+    let daemon_stream =
+        read_requirement == Some(StreamRequirement::Open) && daemon_owns_stream(config)?;
+    #[cfg(not(feature = "daemon"))]
+    let daemon_stream = false;
     #[cfg(feature = "gstreamer")]
-    let _media_lease = if read_requirement == Some(StreamRequirement::Open) {
+    let _media_lease = if read_requirement == Some(StreamRequirement::Open) && !daemon_stream {
         Some(link_media::MediaLease::acquire(
             &device.identity.stable_id(),
             "native-status-read",
@@ -6262,7 +6921,9 @@ fn native_capabilities_for(
         None
     };
     let _read_stream = read_requirement
-        .map(|requirement| prepare_xu_read_stream(requirement, &node.path, config.timeout.get()))
+        .map(|requirement| {
+            prepare_xu_read_stream(requirement, &node.path, config.timeout.get(), daemon_stream)
+        })
         .transpose()?
         .flatten();
     let session = link_uvc_xu::XuSession::open_read(Path::new(&node.path))?;
@@ -6404,10 +7065,15 @@ fn prepare_xu_read_stream(
     requirement: StreamRequirement,
     node: &str,
     timeout: Duration,
+    daemon_stream: bool,
 ) -> Result<Option<link_media::ProbeStream>, LinkError> {
     match requirement {
         StreamRequirement::Either | StreamRequirement::Closed => Ok(None),
         StreamRequirement::Open => {
+            if daemon_stream {
+                thread::sleep(Duration::from_millis(1_000));
+                return Ok(None);
+            }
             let current = link_v4l2::video::VideoDevice::open_read(node)?
                 .status()?
                 .tuple;
@@ -6425,6 +7091,7 @@ fn prepare_xu_read_stream(
     requirement: StreamRequirement,
     _node: &str,
     _timeout: Duration,
+    _daemon_stream: bool,
 ) -> Result<Option<()>, LinkError> {
     match requirement {
         StreamRequirement::Either | StreamRequirement::Closed => Ok(None),
@@ -6991,8 +7658,13 @@ fn read_native_vendor_value(config: &Config, control_name: &str) -> Result<Value
         .with_detail("capability", control_name.to_owned()));
     }
     drop(session);
+    #[cfg(feature = "daemon")]
+    let daemon_stream =
+        control.stream_requirement == StreamRequirement::Open && daemon_owns_stream(config)?;
+    #[cfg(not(feature = "daemon"))]
+    let daemon_stream = false;
     #[cfg(feature = "gstreamer")]
-    let _media_lease = if control.stream_requirement == StreamRequirement::Open {
+    let _media_lease = if control.stream_requirement == StreamRequirement::Open && !daemon_stream {
         Some(link_media::MediaLease::acquire(
             &device.identity.stable_id(),
             "native-value-read",
@@ -7000,8 +7672,12 @@ fn read_native_vendor_value(config: &Config, control_name: &str) -> Result<Value
     } else {
         None
     };
-    let _read_stream =
-        prepare_xu_read_stream(control.stream_requirement, &node.path, config.timeout.get())?;
+    let _read_stream = prepare_xu_read_stream(
+        control.stream_requirement,
+        &node.path,
+        config.timeout.get(),
+        daemon_stream,
+    )?;
     let session = link_uvc_xu::XuSession::open_read(Path::new(&node.path))?;
     let value = link_uvc_xu::read_value(
         &session,
@@ -7340,7 +8016,8 @@ fn run_privacy(config: &Config, command: PrivacyCommand) -> Result<(), LinkError
             });
             let result = PrivacyStatusResult {
                 physical_shutter: "unknown",
-                video_streaming: false,
+                video_streaming: daemon_source_id(config)?.as_deref()
+                    == Some(&device.identity.stable_id()),
                 audio_hardware_muted: state
                     .and_then(|state| state.hardware.as_ref())
                     .and_then(|state| state.muted),
@@ -7352,7 +8029,7 @@ fn run_privacy(config: &Config, command: PrivacyCommand) -> Result<(), LinkError
             };
             if config.output == OutputFormat::Human {
                 println!("physical shutter: unknown (manual)");
-                println!("video streaming: false (no daemon ownership)");
+                println!("video streaming: {}", result.video_streaming);
                 println!(
                     "audio hardware muted: {}",
                     result
@@ -7399,6 +8076,7 @@ fn run_device_state(config: &Config) -> Result<(), LinkError> {
         "device.indicator-state",
     ];
     let devices = selected_devices(config, true)?;
+    let daemon_source = daemon_source_id(config)?;
     let mut results = Vec::with_capacity(devices.len());
     for device in &devices {
         let mut capabilities = native_capabilities_for(config, device, Some(NAMES))?.semantic;
@@ -7416,7 +8094,7 @@ fn run_device_state(config: &Config) -> Result<(), LinkError> {
             result: DeviceStateResult {
                 availability: link_linux::availability_state(device),
                 usb_mode: device.mode(),
-                daemon_owns_stream: false,
+                daemon_owns_stream: daemon_source.as_deref() == Some(&device.identity.stable_id()),
                 mode,
                 error,
                 indicator,
@@ -7440,6 +8118,7 @@ fn run_device_info(config: &Config, include_serial: bool) -> Result<(), LinkErro
     let catalog = ProfileCatalog::load(config.profile_dir.as_deref())?;
     let devices = selected_devices(config, true)?;
     let include_serial = include_serial || !config.safety.redact_serials;
+    let daemon_source = daemon_source_id(config)?;
     let mut results = Vec::with_capacity(devices.len());
     for device in &devices {
         let mut inventory = build_probe(device, &catalog, include_serial)?;
@@ -7457,8 +8136,9 @@ fn run_device_info(config: &Config, include_serial: bool) -> Result<(), LinkErro
                 inventory,
                 controls,
                 state: link_linux::availability_state(device),
-                owner: None,
-                daemon_owns_stream: false,
+                owner: (daemon_source.as_deref() == Some(&device.identity.stable_id()))
+                    .then(|| "linkd".into()),
+                daemon_owns_stream: daemon_source.as_deref() == Some(&device.identity.stable_id()),
             },
         });
     }
@@ -7547,6 +8227,13 @@ fn run_control(
     yes: bool,
 ) -> Result<(), LinkError> {
     ensure_standard_backend(config, backend_choice)?;
+    #[cfg(feature = "daemon")]
+    if !matches!(&command, ControlCommand::Watch { .. })
+        && config.default_device.as_deref() != Some("all")
+        && should_route_standard_controls(config)?
+    {
+        return run_daemon_control(config, command, dry_run);
+    }
     match command {
         ControlCommand::List => run_control_list(config),
         ControlCommand::Get { control } => run_control_get(config, &control),
@@ -7620,6 +8307,96 @@ fn run_control(
         }
         ControlCommand::Watch { controls } => run_control_watch(config, controls),
     }
+}
+
+#[cfg(feature = "daemon")]
+fn should_route_standard_controls(config: &Config) -> Result<bool, LinkError> {
+    if !should_use_daemon(config)? {
+        return Ok(false);
+    }
+    let Some(selector) = config.default_device.as_deref() else {
+        return Ok(true);
+    };
+    let selected = selected_devices(config, false)?;
+    let selected_id = selected
+        .first()
+        .map(|device| device.identity.stable_id())
+        .ok_or_else(|| LinkError::new(ErrorKind::DeviceNotFound, "no camera was selected"))?;
+    let status = daemon_client(config)?.request(link_ipc::Operation::PipelineStatus)?;
+    let daemon_id = status
+        .value
+        .get("source")
+        .and_then(|source| source.get("stable_id"))
+        .and_then(Value::as_str);
+    if daemon_id == Some(selected_id.as_str()) {
+        return Ok(true);
+    }
+    if config.daemon == DaemonMode::Always {
+        return Err(LinkError::new(
+            ErrorKind::DaemonUnavailable,
+            "linkd does not own the selected camera",
+        )
+        .with_detail("selector", selector.to_owned())
+        .with_detail("selected_device", selected_id)
+        .with_detail("daemon_device", daemon_id.unwrap_or("unavailable")));
+    }
+    Ok(false)
+}
+
+#[cfg(feature = "daemon")]
+fn run_daemon_control(
+    config: &Config,
+    command: ControlCommand,
+    dry_run: bool,
+) -> Result<(), LinkError> {
+    let (name, operation) = match command {
+        ControlCommand::List => ("control.list", link_ipc::Operation::ControlList),
+        ControlCommand::Get { control } => (
+            "control.get",
+            link_ipc::Operation::ControlGet { selector: control },
+        ),
+        ControlCommand::Set {
+            control,
+            value,
+            batch,
+            raw,
+            clamp,
+            fallback_individual,
+        } => {
+            let (requests, batched) = parse_control_requests(control, value, batch)?;
+            let writes = requests
+                .into_iter()
+                .map(|request| link_ipc::StandardControlWrite {
+                    selector: request.selector,
+                    value: match request.value {
+                        RequestedValue::Generic(value) => value,
+                        RequestedValue::Raw(value) => value.to_string(),
+                    },
+                })
+                .collect();
+            (
+                "control.set",
+                link_ipc::Operation::ControlSet {
+                    writes,
+                    raw,
+                    clamp,
+                    batched,
+                    fallback_individual,
+                    dry_run,
+                },
+            )
+        }
+        ControlCommand::Reset { control, raw } => (
+            "control.reset",
+            link_ipc::Operation::ControlReset {
+                selector: control,
+                raw,
+                dry_run,
+            },
+        ),
+        ControlCommand::Watch { .. } => unreachable!("watch commands remain direct"),
+    };
+    run_daemon_operation(config, name, operation)
 }
 
 fn run_control_list(config: &Config) -> Result<(), LinkError> {

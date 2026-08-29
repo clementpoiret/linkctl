@@ -11,6 +11,9 @@ network = []
 
 [dependencies]
 link-core.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

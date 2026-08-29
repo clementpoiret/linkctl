@@ -10,7 +10,7 @@ name = "linkctl"
 path = "src/main.rs"
 
 [features]
-default = ["gstreamer", "pipewire"]
+default = ["daemon", "gstreamer", "pipewire"]
 daemon = ["dep:link-ipc"]
 gstreamer = ["dep:link-media", "link-media/gstreamer"]
 pipewire = ["link-audio/pipewire"]

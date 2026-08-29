@@ -1,0 +1,14 @@
+[Unit]
+Description=linkctl camera stream daemon
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env linkd
+Restart=on-failure
+RestartSec=1s
+RuntimeDirectory=linkctl
+RuntimeDirectoryMode=0700
+
+[Install]
+WantedBy=default.target

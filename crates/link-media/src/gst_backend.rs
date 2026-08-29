@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     fs::{self, File, OpenOptions},
     io::{self, Write},
     os::unix::fs::PermissionsExt,
@@ -7,13 +7,14 @@ use std::{
     str::FromStr,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use gstreamer as gst;
+use gstreamer::glib;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use link_core::{
@@ -143,6 +144,115 @@ pub struct RecordRequest {
     pub audio: Option<AudioSourceRequest>,
 }
 
+/// Source selected for a long-lived daemon-owned pipeline.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SharedSource {
+    pub stable_id: String,
+    pub node: PathBuf,
+    pub tuple: VideoTuple,
+}
+
+/// One virtual-camera output and its bounded transform chain.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SharedOutput {
+    pub name: String,
+    pub device: PathBuf,
+    pub width: u32,
+    pub height: u32,
+    pub fps_numerator: u32,
+    pub fps_denominator: u32,
+    pub format: String,
+    pub rotation: SharedRotation,
+    pub horizontal_flip: bool,
+    pub vertical_flip: bool,
+    pub crop: Option<SharedCrop>,
+    pub fit: SharedFit,
+    pub zoom: f64,
+    pub frame_x: f64,
+    pub frame_y: f64,
+    pub text_overlay: Option<String>,
+    pub image_overlay: Option<PathBuf>,
+    pub privacy_frame: bool,
+}
+
+/// Aspect-ratio policy for a shared output.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SharedFit {
+    #[default]
+    Contain,
+    Cover,
+    Stretch,
+}
+
+/// Rotation for a shared output.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SharedRotation {
+    #[default]
+    None,
+    Clockwise90,
+    Rotate180,
+    Counterclockwise90,
+}
+
+/// Normalized source crop for a shared output.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SharedCrop {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Optional recording branch in a shared pipeline.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SharedRecording {
+    pub output: PathBuf,
+    pub container: RecordContainer,
+    pub overwrite: bool,
+}
+
+/// Live counters for one daemon-owned source graph.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SharedMetrics {
+    pub frames: u64,
+    pub bytes: u64,
+    pub output_frames: BTreeMap<String, u64>,
+    pub outputs: BTreeMap<String, SharedOutputMetrics>,
+    pub started_unix_ms: u128,
+    pub elapsed_ms: u64,
+    pub average_bitrate_bps: u64,
+    pub reconnects: u64,
+    pub last_error: Option<String>,
+}
+
+/// Per-output delivery, queue-pressure, and recent processing-latency measurements.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SharedOutputMetrics {
+    pub frames: u64,
+    pub dropped_buffers: u64,
+    pub latency_samples: u64,
+    pub latest_latency_us: u64,
+    pub average_latency_us: u64,
+    pub p95_latency_us: u64,
+    pub max_latency_us: u64,
+}
+
+/// Runtime description of a daemon-owned graph.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SharedGraph {
+    pub source: SharedSource,
+    pub decode: String,
+    pub outputs: Vec<SharedOutput>,
+    pub recording: Option<SharedRecording>,
+    pub snapshot_branches: Vec<String>,
+    pub queue_max_buffers: u32,
+    pub queue_policy: String,
+    pub processing_backend: String,
+    pub latency_window_samples: u32,
+}
+
 /// Raw stdout capture settings.
 #[derive(Clone, Debug)]
 pub struct CaptureRequest {
@@ -203,6 +313,12 @@ impl MediaLease {
 
 /// Ensure GStreamer and every element needed for the selected operation are available.
 pub fn initialize(required_elements: &[&str]) -> Result<(), LinkError> {
+    initialize_elements(required_elements)?;
+    install_signal_handler()?;
+    Ok(())
+}
+
+fn initialize_elements(required_elements: &[&str]) -> Result<(), LinkError> {
     gst::init().map_err(|error| {
         LinkError::new(
             ErrorKind::MediaPipelineFailure,
@@ -219,7 +335,6 @@ pub fn initialize(required_elements: &[&str]) -> Result<(), LinkError> {
             .with_detail("element", *element));
         }
     }
-    install_signal_handler()?;
     Ok(())
 }
 
@@ -736,6 +851,741 @@ pub fn record(request: &RecordRequest) -> Result<MediaRunReport, LinkError> {
         .with_detail("report", serde_json::to_value(&report).unwrap_or_default()));
     }
     Ok(report)
+}
+
+/// One continuously running source with snapshot, recording, and virtual-camera branches.
+pub struct SharedPipeline {
+    _lease: MediaLease,
+    pipeline: gst::Pipeline,
+    graph: SharedGraph,
+    jpeg_sink: gst_app::AppSink,
+    jpeg_valve: gst::Element,
+    png_sink: gst_app::AppSink,
+    png_valve: gst::Element,
+    source_frames: Arc<AtomicU64>,
+    source_bytes: Arc<AtomicU64>,
+    output_metrics: BTreeMap<String, SharedOutputTelemetry>,
+    started: Instant,
+    started_unix_ms: u128,
+}
+
+const SHARED_QUEUE_MAX_BUFFERS: u32 = 2;
+const SHARED_LATENCY_WINDOW_SAMPLES: usize = 2048;
+
+#[derive(Clone, Default)]
+struct SharedOutputTelemetry {
+    frames: Arc<AtomicU64>,
+    dropped_buffers: Arc<AtomicU64>,
+    latency_ns: Arc<Mutex<VecDeque<u64>>>,
+}
+
+impl SharedPipeline {
+    /// Build and start one physical source with every requested consumer branch.
+    pub fn start(
+        source: SharedSource,
+        outputs: Vec<SharedOutput>,
+        recording: Option<SharedRecording>,
+        timeout: Duration,
+    ) -> Result<Self, LinkError> {
+        validate_shared_contracts(&outputs, recording.as_ref())?;
+        let lease = MediaLease::acquire(&source.stable_id, "linkd")?;
+        let mut required = vec![
+            "v4l2src",
+            "capsfilter",
+            "tee",
+            "queue",
+            "videoconvert",
+            "valve",
+            "jpegenc",
+            "pngenc",
+            "appsink",
+        ];
+        match source.tuple.fourcc.to_ascii_uppercase().as_str() {
+            "MJPG" => required.extend(["jpegparse", "jpegdec"]),
+            "H264" => required.extend(["h264parse", "avdec_h264"]),
+            _ => {}
+        }
+        if !outputs.is_empty() {
+            required.extend([
+                "videoscale",
+                "videorate",
+                "videoflip",
+                "videocrop",
+                "v4l2sink",
+            ]);
+        }
+        if outputs.iter().any(|output| output.text_overlay.is_some()) {
+            required.push("textoverlay");
+        }
+        if outputs.iter().any(|output| output.image_overlay.is_some()) {
+            required.push("gdkpixbufoverlay");
+        }
+        if outputs.iter().any(|output| output.privacy_frame) {
+            required.push("videobalance");
+        }
+        if let Some(recording) = &recording {
+            required.extend([parser_name(&source.tuple)?, "filesink"]);
+            required.push(match recording.container {
+                RecordContainer::Matroska => "matroskamux",
+                RecordContainer::Mp4 => "mp4mux",
+            });
+        }
+        required.sort_unstable();
+        required.dedup();
+        initialize_elements(&required)?;
+
+        let pipeline = gst::Pipeline::new();
+        let (source_element, source_filter) = source_elements(&source.node, &source.tuple)?;
+        let encoded_tee = make("tee")?;
+        pipeline_add(&pipeline, &[&source_element, &source_filter, &encoded_tee])?;
+        gst::Element::link_many([&source_element, &source_filter, &encoded_tee])
+            .map_err(link_error)?;
+
+        let source_frames = Arc::new(AtomicU64::new(0));
+        let source_bytes = Arc::new(AtomicU64::new(0));
+        attach_atomic_stats(&source_filter, &source_frames, &source_bytes)?;
+
+        let raw_queue = queue_element()?;
+        let mut raw_front = vec![raw_queue.clone()];
+        match source.tuple.fourcc.to_ascii_uppercase().as_str() {
+            "MJPG" => raw_front.extend([make("jpegparse")?, make("jpegdec")?]),
+            "H264" => raw_front.extend([make("h264parse")?, make("avdec_h264")?]),
+            _ => {}
+        }
+        raw_front.push(make("videoconvert")?);
+        let raw_tee = make("tee")?;
+        raw_front.push(raw_tee.clone());
+        add_and_link_branch(&pipeline, &encoded_tee, &raw_front)?;
+
+        let (jpeg_sink, jpeg_valve, jpeg_elements) = snapshot_branch("jpegenc")?;
+        add_and_link_branch(&pipeline, &raw_tee, &jpeg_elements)?;
+        let (png_sink, png_valve, png_elements) = snapshot_branch("pngenc")?;
+        add_and_link_branch(&pipeline, &raw_tee, &png_elements)?;
+
+        let mut output_metrics = BTreeMap::new();
+        for output in &outputs {
+            let telemetry = SharedOutputTelemetry::default();
+            let branch = output_branch(output, &source.tuple, &telemetry)?;
+            add_and_link_branch(&pipeline, &raw_tee, &branch)?;
+            output_metrics.insert(output.name.clone(), telemetry);
+        }
+        if let Some(recording) = &recording {
+            let branch = recording_branch(recording, &source.tuple)?;
+            add_and_link_branch(&pipeline, &encoded_tee, &branch)?;
+        }
+
+        let bus = pipeline
+            .bus()
+            .ok_or_else(|| media_error("shared GStreamer pipeline has no bus"))?;
+        pipeline
+            .set_state(gst::State::Playing)
+            .map_err(state_error)?;
+        let (change, current, pending) =
+            pipeline.state(gst::ClockTime::from_nseconds(duration_ns(timeout)));
+        if let Err(error) = change.map_err(state_error).and_then(|_| {
+            if current == gst::State::Playing {
+                Ok(())
+            } else {
+                Err(LinkError::new(
+                    ErrorKind::Timeout,
+                    "shared camera pipeline did not reach Playing",
+                )
+                .with_detail("current", format!("{current:?}"))
+                .with_detail("pending", format!("{pending:?}")))
+            }
+        }) {
+            let detail = pipeline_error_detail(&bus, Duration::from_millis(200));
+            let _ = pipeline.set_state(gst::State::Null);
+            return Err(match detail {
+                Some(detail) => error.with_detail("reason", detail),
+                None => error,
+            });
+        }
+        let started_unix_ms = unix_ms()?;
+        Ok(Self {
+            _lease: lease,
+            pipeline,
+            graph: SharedGraph {
+                source,
+                decode: "decode-to-raw".into(),
+                outputs,
+                recording,
+                snapshot_branches: vec!["jpeg".into(), "png".into()],
+                queue_max_buffers: SHARED_QUEUE_MAX_BUFFERS,
+                queue_policy: "leaky-downstream".into(),
+                processing_backend: "gstreamer-cpu".into(),
+                latency_window_samples: SHARED_LATENCY_WINDOW_SAMPLES as u32,
+            },
+            jpeg_sink,
+            jpeg_valve,
+            png_sink,
+            png_valve,
+            source_frames,
+            source_bytes,
+            output_metrics,
+            started: Instant::now(),
+            started_unix_ms,
+        })
+    }
+
+    #[must_use]
+    pub fn graph(&self) -> SharedGraph {
+        self.graph.clone()
+    }
+
+    #[must_use]
+    pub fn metrics(&self, reconnects: u64, last_error: Option<String>) -> SharedMetrics {
+        let elapsed = self.started.elapsed();
+        let bytes = self.source_bytes.load(Ordering::Relaxed);
+        let average_bitrate_bps = if elapsed.is_zero() {
+            0
+        } else {
+            u64::try_from(
+                u128::from(bytes)
+                    .saturating_mul(8)
+                    .saturating_mul(1_000_000_000)
+                    / elapsed.as_nanos(),
+            )
+            .unwrap_or(u64::MAX)
+        };
+        SharedMetrics {
+            frames: self.source_frames.load(Ordering::Relaxed),
+            bytes,
+            output_frames: self
+                .output_metrics
+                .iter()
+                .map(|(name, telemetry)| (name.clone(), telemetry.frames.load(Ordering::Relaxed)))
+                .collect(),
+            outputs: self
+                .output_metrics
+                .iter()
+                .map(|(name, telemetry)| (name.clone(), shared_output_metrics(telemetry)))
+                .collect(),
+            started_unix_ms: self.started_unix_ms,
+            elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            average_bitrate_bps,
+            reconnects,
+            last_error,
+        }
+    }
+
+    /// Pull a still frame from the running decoded stream without reopening the source.
+    pub fn snapshot(
+        &self,
+        encoding: SnapshotEncoding,
+        timeout: Duration,
+    ) -> Result<SnapshotFrame, LinkError> {
+        let (sink, valve) = match encoding {
+            SnapshotEncoding::Jpeg => (&self.jpeg_sink, &self.jpeg_valve),
+            SnapshotEncoding::Png => (&self.png_sink, &self.png_valve),
+            SnapshotEncoding::Raw => {
+                return Err(LinkError::new(
+                    ErrorKind::CapabilityUnsupported,
+                    "shared raw snapshots are unavailable after decode",
+                ));
+            }
+        };
+        valve.set_property("drop", false);
+        let result = (|| {
+            let sample = sink
+                .try_pull_sample(gst::ClockTime::from_nseconds(duration_ns(timeout)))
+                .ok_or_else(|| {
+                    LinkError::new(ErrorKind::Timeout, "timed out waiting for a shared frame")
+                })?;
+            let buffer = sample
+                .buffer()
+                .ok_or_else(|| media_error("shared snapshot sample did not contain a buffer"))?;
+            let map = buffer
+                .map_readable()
+                .map_err(|_| media_error("shared snapshot buffer could not be mapped"))?;
+            Ok(SnapshotFrame {
+                bytes: map.as_slice().to_vec(),
+                captured_unix_ms: unix_ms()?,
+            })
+        })();
+        valve.set_property("drop", true);
+        result
+    }
+
+    /// Return an asynchronous pipeline failure, if one is pending.
+    pub fn poll_error(&self) -> Option<String> {
+        let bus = self.pipeline.bus()?;
+        while let Some(message) = bus.timed_pop(gst::ClockTime::ZERO) {
+            if let gst::MessageView::Error(error) = message.view() {
+                return Some(format!(
+                    "{} ({})",
+                    error.error(),
+                    error.debug().unwrap_or_default()
+                ));
+            }
+        }
+        None
+    }
+
+    /// Gracefully finalize sinks before releasing the physical source.
+    pub fn shutdown(&self, timeout: Duration) -> bool {
+        self.pipeline.send_event(gst::event::Eos::new());
+        let finalized = self.pipeline.bus().is_some_and(|bus| {
+            let deadline = Instant::now() + timeout;
+            while Instant::now() < deadline {
+                if let Some(message) = bus.timed_pop(gst::ClockTime::from_mseconds(50)) {
+                    match message.view() {
+                        gst::MessageView::Eos(..) => return true,
+                        gst::MessageView::Error(..) => return false,
+                        _ => {}
+                    }
+                }
+            }
+            false
+        });
+        let _ = self.pipeline.set_state(gst::State::Null);
+        finalized
+    }
+}
+
+fn pipeline_error_detail(bus: &gst::Bus, timeout: Duration) -> Option<String> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let Some(message) = bus.timed_pop(gst::ClockTime::from_mseconds(10)) else {
+            continue;
+        };
+        if let gst::MessageView::Error(error) = message.view() {
+            return Some(format!(
+                "{} ({})",
+                error.error(),
+                error.debug().unwrap_or_default()
+            ));
+        }
+    }
+    None
+}
+
+impl Drop for SharedPipeline {
+    fn drop(&mut self) {
+        let _ = self.pipeline.set_state(gst::State::Null);
+    }
+}
+
+fn validate_shared_contracts(
+    outputs: &[SharedOutput],
+    recording: Option<&SharedRecording>,
+) -> Result<(), LinkError> {
+    let mut names = std::collections::BTreeSet::new();
+    let mut devices = std::collections::BTreeSet::new();
+    for output in outputs {
+        if output.name.is_empty()
+            || !output.name.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            })
+        {
+            return Err(LinkError::new(
+                ErrorKind::InvalidInvocation,
+                "virtual-camera name must contain only letters, digits, '-' or '_'",
+            ));
+        }
+        if !names.insert(&output.name) {
+            return Err(LinkError::new(
+                ErrorKind::InvalidInvocation,
+                "virtual-camera name is already active",
+            )
+            .with_detail("name", output.name.clone()));
+        }
+        if !devices.insert(&output.device) {
+            return Err(LinkError::new(
+                ErrorKind::InvalidInvocation,
+                "virtual-camera output device is already active",
+            )
+            .with_detail("device", output.device.display().to_string()));
+        }
+        if output.width == 0
+            || output.height == 0
+            || output.fps_numerator == 0
+            || output.fps_denominator == 0
+            || output.zoom < 1.0
+            || !(0.0..=1.0).contains(&output.frame_x)
+            || !(0.0..=1.0).contains(&output.frame_y)
+        {
+            return Err(LinkError::new(
+                ErrorKind::InvalidInvocation,
+                "virtual-camera output contract or framing is invalid",
+            )
+            .with_detail("name", output.name.clone()));
+        }
+        if let Some(crop) = output.crop
+            && (crop.width <= 0.0
+                || crop.height <= 0.0
+                || crop.x < 0.0
+                || crop.y < 0.0
+                || crop.x + crop.width > 1.0
+                || crop.y + crop.height > 1.0)
+        {
+            return Err(LinkError::new(
+                ErrorKind::InvalidInvocation,
+                "normalized virtual-camera crop is outside the source frame",
+            )
+            .with_detail("name", output.name.clone()));
+        }
+        if let Some(image) = &output.image_overlay
+            && !image.is_file()
+        {
+            return Err(LinkError::new(
+                ErrorKind::InvalidInvocation,
+                "virtual-camera overlay image does not exist",
+            )
+            .with_detail("path", image.display().to_string()));
+        }
+    }
+    if let Some(recording) = recording {
+        validate_output_parent(&recording.output)?;
+        if let Ok(metadata) = fs::symlink_metadata(&recording.output) {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(LinkError::new(
+                    ErrorKind::InvalidInvocation,
+                    "recording output must be a regular file and never a symbolic link",
+                )
+                .with_detail("path", recording.output.display().to_string()));
+            }
+            if !recording.overwrite {
+                return Err(LinkError::new(
+                    ErrorKind::InvalidInvocation,
+                    "recording output already exists; use --overwrite to replace it",
+                )
+                .with_detail("path", recording.output.display().to_string()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn make(name: &'static str) -> Result<gst::Element, LinkError> {
+    gst::ElementFactory::make(name).build().map_err(build_error)
+}
+
+fn queue_element() -> Result<gst::Element, LinkError> {
+    let queue = gst::ElementFactory::make("queue")
+        .property("max-size-buffers", SHARED_QUEUE_MAX_BUFFERS)
+        .property("max-size-bytes", 0_u32)
+        .property("max-size-time", 0_u64)
+        .build()
+        .map_err(build_error)?;
+    set_enum_property(&queue, "leaky", "downstream")?;
+    Ok(queue)
+}
+
+fn monitored_queue(dropped_buffers: &Arc<AtomicU64>) -> Result<gst::Element, LinkError> {
+    let queue = queue_element()?;
+    let dropped_buffers = Arc::clone(dropped_buffers);
+    queue.connect_closure(
+        "overrun",
+        false,
+        glib::closure!(move |_queue: gst::Element| {
+            dropped_buffers.fetch_add(1, Ordering::Relaxed);
+        }),
+    );
+    Ok(queue)
+}
+
+fn add_and_link_branch(
+    pipeline: &gst::Pipeline,
+    tee: &gst::Element,
+    elements: &[gst::Element],
+) -> Result<(), LinkError> {
+    pipeline.add_many(elements.iter()).map_err(pipeline_error)?;
+    let first = elements
+        .first()
+        .ok_or_else(|| media_error("shared pipeline branch was empty"))?;
+    tee.link(first).map_err(link_error)?;
+    gst::Element::link_many(elements).map_err(link_error)
+}
+
+fn snapshot_branch(
+    encoder_name: &'static str,
+) -> Result<(gst_app::AppSink, gst::Element, Vec<gst::Element>), LinkError> {
+    let queue = queue_element()?;
+    let valve = gst::ElementFactory::make("valve")
+        .property("drop", true)
+        .build()
+        .map_err(build_error)?;
+    let convert = make("videoconvert")?;
+    let encoder = make(encoder_name)?;
+    let sink_element = gst::ElementFactory::make("appsink")
+        .property("sync", false)
+        .property("async", false)
+        .property("max-buffers", 1_u32)
+        .property("drop", true)
+        .build()
+        .map_err(build_error)?;
+    let sink = sink_element
+        .clone()
+        .downcast::<gst_app::AppSink>()
+        .map_err(|_| media_error("shared appsink had an unexpected type"))?;
+    Ok((
+        sink,
+        valve.clone(),
+        vec![queue, valve, convert, encoder, sink_element],
+    ))
+}
+
+fn output_branch(
+    output: &SharedOutput,
+    source: &VideoTuple,
+    telemetry: &SharedOutputTelemetry,
+) -> Result<Vec<gst::Element>, LinkError> {
+    let mut branch = vec![
+        monitored_queue(&telemetry.dropped_buffers)?,
+        make("videoconvert")?,
+    ];
+    let (left, right, top, bottom) = crop_pixels(output, source);
+    if left > 0 || right > 0 || top > 0 || bottom > 0 {
+        branch.push(
+            gst::ElementFactory::make("videocrop")
+                .property("left", left)
+                .property("right", right)
+                .property("top", top)
+                .property("bottom", bottom)
+                .build()
+                .map_err(build_error)?,
+        );
+    }
+    for method in flip_methods(output) {
+        let flip = make("videoflip")?;
+        set_enum_property(&flip, "method", method)?;
+        branch.push(flip);
+    }
+    if output.privacy_frame {
+        branch.push(
+            gst::ElementFactory::make("videobalance")
+                .property("contrast", 0.0_f64)
+                .property("brightness", -1.0_f64)
+                .build()
+                .map_err(build_error)?,
+        );
+    }
+    let scale = gst::ElementFactory::make("videoscale")
+        .property("add-borders", output.fit == SharedFit::Contain)
+        .build()
+        .map_err(build_error)?;
+    branch.extend([scale, make("videorate")?]);
+    let caps = gst::Caps::builder("video/x-raw")
+        .field("format", output.format.as_str())
+        .field("width", i32::try_from(output.width).unwrap_or(i32::MAX))
+        .field("height", i32::try_from(output.height).unwrap_or(i32::MAX))
+        .field(
+            "framerate",
+            gst::Fraction::new(
+                i32::try_from(output.fps_numerator).unwrap_or(i32::MAX),
+                i32::try_from(output.fps_denominator).unwrap_or(i32::MAX),
+            ),
+        )
+        .build();
+    branch.push(
+        gst::ElementFactory::make("capsfilter")
+            .property("caps", caps)
+            .build()
+            .map_err(build_error)?,
+    );
+    if let Some(text) = &output.text_overlay {
+        let overlay = gst::ElementFactory::make("textoverlay")
+            .property("text", text)
+            .build()
+            .map_err(build_error)?;
+        set_enum_property(&overlay, "valignment", "bottom")?;
+        branch.push(overlay);
+    }
+    if let Some(image) = &output.image_overlay {
+        branch.push(
+            gst::ElementFactory::make("gdkpixbufoverlay")
+                .property("location", image.display().to_string())
+                .build()
+                .map_err(build_error)?,
+        );
+    }
+    let sink = gst::ElementFactory::make("v4l2sink")
+        .property("device", output.device.display().to_string())
+        .property("sync", false)
+        .build()
+        .map_err(build_error)?;
+    set_enum_property(&sink, "io-mode", "mmap")?;
+    attach_output_telemetry(&sink, telemetry)?;
+    branch.push(sink);
+    Ok(branch)
+}
+
+fn recording_branch(
+    recording: &SharedRecording,
+    source: &VideoTuple,
+) -> Result<Vec<gst::Element>, LinkError> {
+    let muxer = match recording.container {
+        RecordContainer::Matroska => "matroskamux",
+        RecordContainer::Mp4 => "mp4mux",
+    };
+    Ok(vec![
+        queue_element()?,
+        make(parser_name(source)?)?,
+        make(muxer)?,
+        gst::ElementFactory::make("filesink")
+            .property("location", recording.output.display().to_string())
+            .property("sync", false)
+            .build()
+            .map_err(build_error)?,
+    ])
+}
+
+fn crop_pixels(output: &SharedOutput, source: &VideoTuple) -> (i32, i32, i32, i32) {
+    let crop = output.crop.unwrap_or(SharedCrop {
+        x: 0.0,
+        y: 0.0,
+        width: 1.0,
+        height: 1.0,
+    });
+    let mut zoom_width = crop.width / output.zoom;
+    let mut zoom_height = crop.height / output.zoom;
+    if output.fit == SharedFit::Cover {
+        let source_aspect =
+            zoom_width * f64::from(source.width) / (zoom_height * f64::from(source.height));
+        let output_aspect = f64::from(output.width) / f64::from(output.height);
+        if source_aspect > output_aspect {
+            zoom_width *= output_aspect / source_aspect;
+        } else {
+            zoom_height *= source_aspect / output_aspect;
+        }
+    }
+    let available_x = (crop.width - zoom_width).max(0.0);
+    let available_y = (crop.height - zoom_height).max(0.0);
+    let x = crop.x + available_x * output.frame_x;
+    let y = crop.y + available_y * output.frame_y;
+    let left = (x * f64::from(source.width)).round() as i32;
+    let top = (y * f64::from(source.height)).round() as i32;
+    let right = ((1.0 - x - zoom_width).max(0.0) * f64::from(source.width)).round() as i32;
+    let bottom = ((1.0 - y - zoom_height).max(0.0) * f64::from(source.height)).round() as i32;
+    (left, right, top, bottom)
+}
+
+fn flip_methods(output: &SharedOutput) -> Vec<&'static str> {
+    let mut methods = Vec::new();
+    methods.push(match output.rotation {
+        SharedRotation::None => "none",
+        SharedRotation::Clockwise90 => "clockwise",
+        SharedRotation::Rotate180 => "rotate-180",
+        SharedRotation::Counterclockwise90 => "counterclockwise",
+    });
+    if output.horizontal_flip {
+        methods.push("horizontal-flip");
+    }
+    if output.vertical_flip {
+        methods.push("vertical-flip");
+    }
+    methods
+}
+
+fn set_enum_property(
+    element: &gst::Element,
+    property: &'static str,
+    nick: &'static str,
+) -> Result<(), LinkError> {
+    let specification = element.find_property(property).ok_or_else(|| {
+        media_error("required GStreamer enum property is unavailable")
+            .with_detail("element", element.type_().name())
+            .with_detail("property", property)
+    })?;
+    let enumeration = glib::EnumClass::with_type(specification.value_type()).ok_or_else(|| {
+        media_error("required GStreamer property is not an enum")
+            .with_detail("element", element.type_().name())
+            .with_detail("property", property)
+    })?;
+    let value = enumeration.value_by_nick(nick).ok_or_else(|| {
+        media_error("GStreamer enum value is unavailable")
+            .with_detail("element", element.type_().name())
+            .with_detail("property", property)
+            .with_detail("value", nick)
+    })?;
+    element.set_property_from_value(property, &value.to_value(&enumeration));
+    Ok(())
+}
+
+fn attach_atomic_stats(
+    element: &gst::Element,
+    frames: &Arc<AtomicU64>,
+    bytes: &Arc<AtomicU64>,
+) -> Result<(), LinkError> {
+    let frames = Arc::clone(frames);
+    let bytes = Arc::clone(bytes);
+    let pad = element
+        .static_pad("src")
+        .ok_or_else(|| media_error("shared source filter has no source pad"))?;
+    pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+        if let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_ref() {
+            frames.fetch_add(1, Ordering::Relaxed);
+            bytes.fetch_add(buffer.size() as u64, Ordering::Relaxed);
+        }
+        gst::PadProbeReturn::Ok
+    });
+    Ok(())
+}
+
+fn attach_output_telemetry(
+    element: &gst::Element,
+    telemetry: &SharedOutputTelemetry,
+) -> Result<(), LinkError> {
+    let frames = Arc::clone(&telemetry.frames);
+    let latency_ns = Arc::clone(&telemetry.latency_ns);
+    let element = element.downgrade();
+    let pad = element
+        .upgrade()
+        .and_then(|element| element.static_pad("sink"))
+        .ok_or_else(|| media_error("shared output sink has no sink pad"))?;
+    pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+        if let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_ref() {
+            frames.fetch_add(1, Ordering::Relaxed);
+            if let (Some(pts), Some(element)) = (buffer.pts(), element.upgrade())
+                && let Some(running_time) = element.current_running_time()
+                && let Some(latency) = running_time.checked_sub(pts)
+            {
+                let mut samples = latency_ns
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if samples.len() == SHARED_LATENCY_WINDOW_SAMPLES {
+                    samples.pop_front();
+                }
+                samples.push_back(latency.nseconds());
+            }
+        }
+        gst::PadProbeReturn::Ok
+    });
+    Ok(())
+}
+
+fn shared_output_metrics(telemetry: &SharedOutputTelemetry) -> SharedOutputMetrics {
+    let samples = telemetry
+        .latency_ns
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut sorted = samples.iter().copied().collect::<Vec<_>>();
+    sorted.sort_unstable();
+    let sample_count = sorted.len();
+    let latest = samples.back().copied().unwrap_or_default();
+    let average = if sample_count == 0 {
+        0
+    } else {
+        u64::try_from(
+            sorted.iter().map(|value| u128::from(*value)).sum::<u128>() / sample_count as u128,
+        )
+        .unwrap_or(u64::MAX)
+    };
+    let p95 = if sample_count == 0 {
+        0
+    } else {
+        sorted[(sample_count * 95).div_ceil(100).saturating_sub(1)]
+    };
+    SharedOutputMetrics {
+        frames: telemetry.frames.load(Ordering::Relaxed),
+        dropped_buffers: telemetry.dropped_buffers.load(Ordering::Relaxed),
+        latency_samples: sample_count as u64,
+        latest_latency_us: latest / 1_000,
+        average_latency_us: average / 1_000,
+        p95_latency_us: p95 / 1_000,
+        max_latency_us: sorted.last().copied().unwrap_or_default() / 1_000,
+    }
 }
 
 /// Send a compressed stream as RTP over UDP.
@@ -2033,11 +2883,20 @@ fn filesystem_error(message: &'static str, path: &Path, error: &io::Error) -> Li
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        path::PathBuf,
+        sync::{Arc, Mutex, atomic::Ordering},
+    };
 
+    use super::gst;
     use link_core::audio::AudioProcessing;
 
-    use super::{AvSyncState, audio_processing_elements, finish_av_sync, parse_byte_size};
+    use super::{
+        AvSyncState, SharedCrop, SharedFit, SharedOutput, SharedOutputTelemetry, SharedRotation,
+        audio_processing_elements, crop_pixels, finish_av_sync, make, parse_byte_size,
+        set_enum_property, shared_output_metrics, validate_shared_contracts,
+    };
+    use link_core::{media::VideoTuple, probe::Rational};
 
     #[test]
     fn binary_and_decimal_byte_sizes_are_explicit() {
@@ -2075,5 +2934,106 @@ mod tests {
         assert!((report.drift_ms - 1.0).abs() < f64::EPSILON);
         assert!((report.drift_ppm - 1_000.0).abs() < f64::EPSILON);
         assert!(report.corrected);
+    }
+
+    fn shared_output(name: &str) -> SharedOutput {
+        SharedOutput {
+            name: name.into(),
+            device: PathBuf::from(format!("/dev/{name}")),
+            width: 1280,
+            height: 720,
+            fps_numerator: 30,
+            fps_denominator: 1,
+            format: "YUY2".into(),
+            rotation: SharedRotation::None,
+            horizontal_flip: false,
+            vertical_flip: false,
+            crop: None,
+            fit: SharedFit::Contain,
+            zoom: 1.0,
+            frame_x: 0.5,
+            frame_y: 0.5,
+            text_overlay: None,
+            image_overlay: None,
+            privacy_frame: false,
+        }
+    }
+
+    #[test]
+    fn shared_output_contract_rejects_duplicate_names_and_devices() {
+        let first = shared_output("clean");
+        let mut duplicate_name = shared_output("clean");
+        duplicate_name.device = PathBuf::from("/dev/other");
+        assert!(validate_shared_contracts(&[first.clone(), duplicate_name], None).is_err());
+
+        let mut duplicate_device = shared_output("effects");
+        duplicate_device.device = first.device.clone();
+        assert!(validate_shared_contracts(&[first, duplicate_device], None).is_err());
+    }
+
+    #[test]
+    fn cover_fit_crops_source_to_output_aspect() {
+        let mut output = shared_output("portrait");
+        output.width = 1080;
+        output.height = 1920;
+        output.fit = SharedFit::Cover;
+        output.crop = Some(SharedCrop {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        });
+        let source = VideoTuple {
+            fourcc: "MJPG".into(),
+            width: 1920,
+            height: 1080,
+            fps: Rational {
+                numerator: 30,
+                denominator: 1,
+            },
+        };
+        let (left, right, top, bottom) = crop_pixels(&output, &source);
+        assert!(left > 0 && right > 0);
+        assert_eq!(top, 0);
+        assert_eq!(bottom, 0);
+    }
+
+    #[test]
+    fn shared_metrics_report_recent_p95_latency_and_drops() {
+        let telemetry = SharedOutputTelemetry::default();
+        telemetry.frames.store(20, Ordering::Relaxed);
+        telemetry.dropped_buffers.store(2, Ordering::Relaxed);
+        telemetry
+            .latency_ns
+            .lock()
+            .unwrap()
+            .extend((1_u64..=20).map(|milliseconds| milliseconds * 1_000_000));
+
+        let metrics = shared_output_metrics(&telemetry);
+        assert_eq!(metrics.frames, 20);
+        assert_eq!(metrics.dropped_buffers, 2);
+        assert_eq!(metrics.latest_latency_us, 20_000);
+        assert_eq!(metrics.average_latency_us, 10_500);
+        assert_eq!(metrics.p95_latency_us, 19_000);
+        assert_eq!(metrics.max_latency_us, 20_000);
+    }
+
+    #[test]
+    fn shared_transform_enum_values_are_validated_without_panicking() {
+        gst::init().unwrap();
+        let flip = make("videoflip").unwrap();
+        for method in [
+            "none",
+            "clockwise",
+            "rotate-180",
+            "counterclockwise",
+            "horizontal-flip",
+            "vertical-flip",
+        ] {
+            set_enum_property(&flip, "method", method).unwrap();
+        }
+        assert!(set_enum_property(&flip, "method", "invalid").is_err());
+        let sink = make("v4l2sink").unwrap();
+        set_enum_property(&sink, "io-mode", "mmap").unwrap();
     }
 }

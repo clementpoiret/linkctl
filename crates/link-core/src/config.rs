@@ -217,7 +217,7 @@ impl Default for MediaConfig {
     }
 }
 
-/// Virtual-camera defaults retained until that backend is implemented.
+/// Virtual-camera installation preferences.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct VirtualCameraConfig {

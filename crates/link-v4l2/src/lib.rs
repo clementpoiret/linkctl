@@ -3,7 +3,10 @@
 pub mod production;
 pub mod video;
 
-use std::fs::File;
+use std::{
+    fs::{File, OpenOptions},
+    path::Path,
+};
 
 use link_core::probe::{
     ControlMenuItem, ControlReport, CurrentFormatReport, FrameInterval, FrameSize, NodeAssociation,
@@ -16,6 +19,37 @@ use v4l2r::ioctl::{
     QueryCtrlError, QueryCtrlFlags,
 };
 use v4l2r::{Format, PixelFormat, QueueType};
+
+/// Return whether a node advertises a V4L2 video-output queue suitable for `v4l2sink`.
+pub fn is_video_output(path: impl AsRef<Path>) -> Result<bool, link_core::LinkError> {
+    let path = path.as_ref();
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| {
+            link_core::LinkError::new(
+                if error.kind() == std::io::ErrorKind::PermissionDenied {
+                    link_core::ErrorKind::PermissionDenied
+                } else {
+                    link_core::ErrorKind::IoFailure
+                },
+                "failed to open V4L2 output node",
+            )
+            .with_detail("path", path.display().to_string())
+            .with_detail("reason", error.to_string())
+        })?;
+    let capability: Capability = v4l2r::ioctl::querycap(&file).map_err(|error| {
+        link_core::LinkError::new(
+            link_core::ErrorKind::IoFailure,
+            "VIDIOC_QUERYCAP failed for V4L2 output node",
+        )
+        .with_detail("path", path.display().to_string())
+        .with_detail("reason", error.to_string())
+    })?;
+    let capabilities = capability.device_caps();
+    Ok(capabilities.intersects(Capabilities::VIDEO_OUTPUT | Capabilities::VIDEO_OUTPUT_MPLANE))
+}
 
 /// Inspect one V4L2 node without changing controls, formats, or stream state.
 #[must_use]
