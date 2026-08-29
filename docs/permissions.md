@@ -21,7 +21,7 @@ linkctl --device link2cpro-… control get brightness
 
 If access remains denied, confirm that the graphical session is active, inspect `getfacl /dev/videoN`, and check membership in the distribution's `video` group. Log out and back in after adding group membership. Avoid running `linkctl` with `sudo`: doing so changes configuration paths and can hide a missing user-session ACL.
 
-The rule intentionally does not grant access to unrelated Insta360 products, generic webcams, USB devices, firmware interfaces, storage nodes, or raw USB endpoints. Audio access remains governed by the distribution's normal PipeWire/ALSA session policy. Run PipeWire commands in the logged-in user's session so the client can reach that user's PipeWire socket and routing metadata. On ALSA-only systems, the user may also need membership in the distribution's `audio` group or an equivalent logind ACL. Verify access without elevation:
+The rule intentionally does not grant access to unrelated Insta360 products, generic webcams, USB devices, firmware interfaces, storage nodes, or raw USB endpoints. Firmware staging relies on the desktop session's ordinary removable-media mount and access policy; `linkctl` does not broaden block-device permissions or mount the U-Disk itself. Audio access remains governed by the distribution's normal PipeWire/ALSA session policy. Run PipeWire commands in the logged-in user's session so the client can reach that user's PipeWire socket and routing metadata. On ALSA-only systems, the user may also need membership in the distribution's `audio` group or an equivalent logind ACL. Verify access without elevation:
 
 ```sh
 linkctl audio devices

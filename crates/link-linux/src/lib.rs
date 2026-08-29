@@ -4,6 +4,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
     fs, io,
+    os::unix::{
+        ffi::OsStringExt,
+        fs::{FileTypeExt, MetadataExt},
+    },
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -415,18 +419,89 @@ fn discovered_node(device: &udev::Device) -> Option<DiscoveredNode> {
 
 fn volume_report(device: &udev::Device) -> Option<VolumeReport> {
     let path = device.devnode()?.to_string_lossy().into_owned();
-    let mounted = fs::read_to_string("/proc/self/mounts").is_ok_and(|mounts| {
-        mounts
-            .lines()
-            .filter_map(|line| line.split_ascii_whitespace().next())
-            .any(|source| source == path)
-    });
+    let mounted = mounted_volume_path(Path::new(&path))
+        .ok()
+        .flatten()
+        .is_some();
     Some(VolumeReport {
         path,
         label: property_text(device, "ID_FS_LABEL"),
         filesystem: property_text(device, "ID_FS_TYPE"),
         mounted,
     })
+}
+
+/// Resolve the current mount point for a block device using its kernel device number.
+pub fn mounted_volume_path(block_device: &Path) -> Result<Option<PathBuf>, LinkError> {
+    let metadata = match fs::metadata(block_device) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(
+                LinkError::new(ErrorKind::IoFailure, "failed to inspect block device")
+                    .with_detail("path", block_device.display().to_string())
+                    .with_detail("reason", error.to_string()),
+            );
+        }
+    };
+    if !metadata.file_type().is_block_device() {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "volume path is not a block device",
+        )
+        .with_detail("path", block_device.display().to_string()));
+    }
+    let major = rustix::fs::major(metadata.rdev());
+    let minor = rustix::fs::minor(metadata.rdev());
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo").map_err(|error| {
+        LinkError::new(ErrorKind::IoFailure, "failed to read process mount table")
+            .with_detail("reason", error.to_string())
+    })?;
+    Ok(parse_mountinfo(&mountinfo, major, minor))
+}
+
+fn parse_mountinfo(mountinfo: &str, expected_major: u32, expected_minor: u32) -> Option<PathBuf> {
+    for line in mountinfo.lines() {
+        let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+        if fields.len() < 6 {
+            continue;
+        }
+        let Some((major, minor)) = fields[2].split_once(':') else {
+            continue;
+        };
+        if fields[3] != "/"
+            || major.parse::<u32>().ok() != Some(expected_major)
+            || minor.parse::<u32>().ok() != Some(expected_minor)
+        {
+            continue;
+        }
+        return decode_mount_field(fields[4]);
+    }
+    None
+}
+
+fn decode_mount_field(value: &str) -> Option<PathBuf> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && index + 3 < bytes.len() {
+            let digits = &bytes[index + 1..index + 4];
+            if digits.iter().all(|digit| (b'0'..=b'7').contains(digit)) {
+                let value = u16::from(digits[0] - b'0') * 64
+                    + u16::from(digits[1] - b'0') * 8
+                    + u16::from(digits[2] - b'0');
+                if let Ok(byte) = u8::try_from(value) {
+                    decoded.push(byte);
+                    index += 4;
+                    continue;
+                }
+            }
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    Some(PathBuf::from(std::ffi::OsString::from_vec(decoded)))
 }
 
 fn parse_hex_attribute(device: &udev::Device, name: &str) -> Option<u16> {
@@ -547,7 +622,7 @@ pub fn validate_bundle_parent(path: &Path) -> Result<&Path, LinkError> {
 mod tests {
     use link_core::probe::UsbIdentity;
 
-    use super::{DiscoveredDevice, is_listable};
+    use super::{DiscoveredDevice, is_listable, parse_mountinfo};
 
     fn device() -> DiscoveredDevice {
         DiscoveredDevice {
@@ -614,5 +689,18 @@ mod tests {
         device.identity.vendor_id = 0x070a;
         device.identity.product_id = 0x4026;
         assert!(is_listable(&device));
+    }
+
+    #[test]
+    fn mountinfo_resolution_uses_device_numbers_and_decodes_paths() {
+        let mountinfo = concat!(
+            "33 25 8:1 / /run/media/test/LINK\\0402C rw,nosuid - vfat /dev/sda1 rw\n",
+            "34 25 8:2 / /run/media/test/other rw,nosuid - vfat /dev/sda2 rw\n",
+        );
+        assert_eq!(
+            parse_mountinfo(mountinfo, 8, 1).unwrap(),
+            std::path::PathBuf::from("/run/media/test/LINK 2C")
+        );
+        assert!(parse_mountinfo(mountinfo, 8, 3).is_none());
     }
 }

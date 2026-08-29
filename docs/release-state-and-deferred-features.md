@@ -12,8 +12,8 @@ apply to that tested combination unless a broader compatibility matrix says othe
 
 The first release is a Linux camera-control, capture, and automation-ready CLI with a local single-camera stream
 daemon. It includes verified camera-native controls, standard video and audio support, direct and daemon-owned media
-operations, configuration and transactional presets, safe research tools, diagnostics, and the foundations of a
-virtual-camera graph.
+operations, configuration and transactional presets, safe research tools, diagnostics, the official manual firmware
+staging workflow, and the foundations of a virtual-camera graph.
 
 It does not include computer-vision host modes, advanced live effects, multi-camera daemon supervision, or remote
 control services. Virtual-camera production is implemented, but OBS and WebRTC compatibility is not supported on the
@@ -25,8 +25,8 @@ tested host because the installed v4l2loopback module does not provide reliable 
 
 | Component | Current responsibility and status |
 |---|---|
-| `link-core` | Shared configuration, errors and exit codes, output envelopes, device/media/control types, safety policy, presets, transaction planning, rollback journals, and application paths. Implemented and hardware-independent. |
-| `link-linux` | USB identity, sysfs and udev discovery, stable selectors, node association, hot-plug observation, and U-Disk volume discovery. Implemented. |
+| `link-core` | Shared configuration, errors and exit codes, output envelopes, device/media/control types, safety policy, presets, transaction planning, rollback journals, firmware staging primitives and operation reports, and application paths. Implemented and hardware-independent. |
+| `link-linux` | USB identity, sysfs and udev discovery, stable selectors, node association, hot-plug observation, U-Disk volume discovery, and mount resolution by block-device number. Implemented. |
 | `link-v4l2` | V4L2 inventory, exact format negotiation, capture-node status, standard and extended controls, semantic value handling, dependency ordering, batching, readback, and rollback support. Implemented. |
 | `link-audio` | ALSA and optional PipeWire discovery, camera association, gain and mute control, capture, metering, monitoring, resampling, basic processing, and A/V synchronization support. Implemented. |
 | `link-profiles` | Strict profile loading and matching, trust classification, typed vendor codecs, exact descriptor and firmware guards, stream requirements, tail policies, and built-in verified Link 2C Pro mappings. Implemented. |
@@ -35,7 +35,7 @@ tested host because the installed v4l2loopback module does not provide reliable 
 | `link-media` | Typed GStreamer pipelines for capture, snapshots, recording, audio muxing, pipes, optional RTP output, and the daemon's shared source graph. Implemented. |
 | `link-ipc` | Versioned, length-bounded JSON and binary framing over a Unix socket with same-user peer authentication. Protocol version 1 is implemented. |
 | `link-daemon` | One selected physical source, a serialized control actor, bounded graph requests, source ownership, recovery, snapshots, background recording, and named virtual-output branches. Implemented for one camera per daemon. |
-| `link-cli` | User-facing discovery, controls, native modes, media, audio, presets, diagnostics, daemon, pipeline, and virtual-camera commands with human, JSON, and JSON Lines output. Implemented for the exposed command set. |
+| `link-cli` | User-facing discovery, controls, native modes, media, audio, presets, diagnostics, firmware maintenance, daemon, pipeline, and virtual-camera commands with human, JSON, and JSON Lines output. Implemented for the exposed command set. |
 | `link-effects` | Reserved host transformation and computer-vision boundary. The crate and feature gate exist, but no host vision or AI implementation is present. |
 | `link-sdk-bridge` | Reserved isolated vendor SDK boundary. The crate and feature gate exist, but no Link-compatible SDK integration is present. |
 
@@ -60,6 +60,13 @@ camera pickup controls.
 Configuration and presets are strict, versioned, and validated before mutation. Direct operations use per-device
 leases; `linkd` uses the same lease so a second physical capture stream is rejected rather than opened accidentally.
 `doctor --bundle` already creates a private, redacted, checksummed diagnostic archive.
+
+Firmware maintenance implements the official manual U-Disk flow without an undocumented device-control write. It
+watches the exact normal and maintenance personalities at one USB topology, validates an explicitly supplied official
+file and the recorded mounted volume, performs a no-clobber synchronized copy with progress and post-copy hashing,
+retains a private operation log, waits for manual reconnect, and compares firmware versions when readable. Normal
+camera commands are blocked in U-Disk mode. Hardware validation covers identity and volume detection only; no firmware
+file has been staged during project validation.
 
 ### Daemon and shared media graph
 

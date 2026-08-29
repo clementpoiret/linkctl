@@ -78,6 +78,50 @@ fn help_and_version_advertise_only_implemented_commands() {
 }
 
 #[test]
+fn firmware_help_exposes_only_safe_manual_maintenance_commands() {
+    let help = run(&["firmware", "--help"]);
+    assert!(help.status.success());
+    let stdout = String::from_utf8(help.stdout).expect("UTF-8 help");
+    for command in ["info", "watch", "stage"] {
+        assert!(stdout.contains(command));
+    }
+    for prohibited in ["bootloader", "flash", "factory-reset", "force"] {
+        assert!(!stdout.contains(prohibited));
+    }
+
+    let stage = run(&["firmware", "stage", "--help"]);
+    assert!(stage.status.success());
+    let stdout = String::from_utf8(stage.stdout).expect("UTF-8 help");
+    assert!(stdout.contains("OFFICIAL_FILE"));
+    assert!(stdout.contains("--sha256"));
+    assert!(stdout.contains("--transition-timeout"));
+}
+
+#[test]
+fn firmware_watch_rejects_single_json_and_staging_uses_validation_exit_code() {
+    let watch = run(&["--format", "json", "firmware", "watch"]);
+    assert_eq!(watch.status.code(), Some(2));
+    let value: Value = serde_json::from_slice(&watch.stdout).expect("JSON watch error");
+    assert_eq!(value["command"], "firmware.watch");
+
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let firmware = directory.path().join("wrong-name.bin");
+    fs::write(&firmware, b"not firmware").expect("write invalid fixture");
+    let staged = run(&[
+        "--format",
+        "json",
+        "--dry-run",
+        "firmware",
+        "stage",
+        &firmware.to_string_lossy(),
+    ]);
+    assert_eq!(staged.status.code(), Some(14));
+    let value: Value = serde_json::from_slice(&staged.stdout).expect("JSON staging error");
+    assert_eq!(value["command"], "firmware.stage");
+    assert_eq!(value["error"]["code"], "firmware-validation-failure");
+}
+
+#[test]
 fn daemon_commands_and_virtual_camera_contract_are_exposed_offline() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let unavailable = run_with_xdg(&["--format", "json", "daemon", "status"], directory.path());

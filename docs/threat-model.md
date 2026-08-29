@@ -37,14 +37,23 @@ The physical camera, USB bus, kernel driver, local configuration, third-party pr
 | Untrusted pipeline text or automation executes commands | Build pipelines and automation from typed structures; arbitrary strings and external processes require explicit local trust |
 | A native media library, model runtime, or SDK crashes or corrupts memory | Feature gating, minimal bindings, version checks, and process isolation for the vendor SDK |
 | A recording or audio-capture destination follows a malicious symlink | Canonicalization, regular-file checks, bounded destinations, same-directory temporary output, atomic finalization where possible, and explicit sync semantics |
+| A spoofed source or unrelated mounted volume receives firmware | Require the exact official filename, regular-file/no-symlink input, bounded size and optional trusted checksum, exact USB revision/descriptor/profile/topology matching, and the exact filesystem label and type |
+| A firmware copy is replaced, truncated, duplicated, or interrupted | Reject existing and abandoned destinations, use no-follow/create-new temporary output and no-replace rename, hash while copying, sync the file and directory, verify the final hash, retain a private operation log, and distinguish pre-sync failure from post-sync partial success |
 | A network facade exposes camera control | No listener by default; loopback-only defaults, authentication, origin/CSRF controls, and explicit opt-in |
 | A dependency or CI action is compromised | Locked Rust dependencies, `cargo deny`, read-only CI permissions, pinned action major versions, and reviewed upgrades |
 
 ## Current enforcement
 
-The compiled safety policy admits read-only operations, validated standard V4L2 writes, and semantic XU writes only for compiled-in trusted verified profiles. Unknown XU writes, driver detach, USB reset, firmware/flash/boot writes, calibration writes, and motor operations are denied. The separately compiled research transport additionally requires explicit acknowledgement, configuration opt-in, an exact experimental/verified profile and payload classification, fresh device-reported length/capabilities, conservative pacing, and device/media leases. Pan and tilt IDs remain readable inventory but are denied by the standard write backend. Configuration cannot enable a backend that is not compiled.
+The compiled safety policy admits read-only operations, validated standard V4L2 writes, and semantic XU writes only for compiled-in trusted verified profiles. Unknown XU writes, driver detach, USB reset, firmware/flash/boot device-control writes, calibration writes, and motor operations are denied. Firmware staging is a separate filesystem-only workflow: it accepts an explicit local file, follows the official manual U-Disk transition, and cannot download firmware, synthesize touch input, mount or unmount storage, disconnect USB, or send a firmware control. The separately compiled research transport additionally requires explicit acknowledgement, configuration opt-in, an exact experimental/verified profile and payload classification, fresh device-reported length/capabilities, conservative pacing, and device/media leases. Pan and tilt IDs remain readable inventory but are denied by the standard write backend. Configuration cannot enable a backend that is not compiled.
 
 Linux discovery and control backends perform bounded device I/O through kernel UVC/V4L2 interfaces. The locally isolated XU ABI code asserts the kernel structure layout, keeps one file descriptor open per transaction, obtains `GET_INFO` and little-endian `GET_LEN` before reads, validates the length immediately before writes using the matched profile's reviewed prelude, and turns typed `errno` failures into stable errors. Mutations read previous values, prefer related-control transactions, verify readback, and report rollback outcomes. Discovery, read watches, probes, snapshots, diffs, and `doctor` remain device-read-only; explicitly requested artifacts use no-clobber semantics and bounded destinations.
+
+Firmware maintenance follows the same physical camera by USB topology while it changes personality. The accepted
+U-Disk identity is constrained by the built-in read-only profile, and the associated block volume must have the
+recorded label and filesystem. Staging takes the device and media leases, validates and hashes the source before the
+power/disconnect warning, copies only to the fixed official destination name, synchronizes before reporting success,
+and records every state transition in an owner-only log. Normal camera commands are centrally rejected in U-Disk
+mode. The path still relies on the user's mounted filesystem and kernel storage stack, which are untrusted inputs.
 
 Preset and direct media/control operations share a user-owned cross-process lease. Preset files use atomic no-clobber writes with owner-only directories and files. An apply journal is updated after each verified or rolled-back stage and removed only after success or complete restoration; incomplete journals block another apply and are reported by `doctor`.
 
@@ -54,4 +63,4 @@ The daemon listens only on its local Unix socket and exposes no general network 
 
 ## Review triggers
 
-Update this document before adding a new device-write class, writable profile format, daemon IPC, arbitrary file destination, native library, model download, external process execution, network listener, firmware workflow, or diagnostic bundle containing device data.
+Update this document before adding or changing a device-write class, writable profile format, daemon IPC, arbitrary file destination, native library, model download, external process execution, network listener, firmware workflow, or diagnostic bundle containing device data.

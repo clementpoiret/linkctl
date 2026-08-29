@@ -32,6 +32,11 @@ Existing destinations are rejected. If bundle creation fails, the partially crea
 
 The report records USB `bcdDevice` separately from firmware and never treats that revision as a firmware version. For the verified landscape, Low resolution, and portrait descriptors, `firmware info` reads a bounded UTF-8 field from XU selector 3 and currently reports `v0.2.9.8_build3`. Profile selection first uses an exact descriptor/device bootstrap profile, decodes `firmware.version` when that profile supplies it, and then performs a second match in which an exact firmware guard outranks the bootstrap profile. Unknown firmware therefore retains standard and read-only discovery capabilities without authorizing vendor writes.
 
+`firmware watch` follows the camera's physical topology across the normal and U-Disk identities and reports the
+validated volume without disclosing its mount path. `firmware stage` uses the same exact profile guard plus the
+recorded `LINK_2C_PRO`/`vfat` volume identity before it can copy the fixed official filename. See
+[Firmware maintenance](firmware.md) for the operator workflow and failure semantics.
+
 Build with the `pipewire` feature to include native PipeWire registry correlation. ALSA discovery remains available in every build.
 
 ## Recorded hardware evidence

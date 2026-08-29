@@ -6,6 +6,10 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -31,6 +35,12 @@ use link_core::{
         ControlSetReport, ControlValue, RollbackReport, SemanticRange,
     },
     device::{DeviceEvent, DeviceState, DoctorCheck, DoctorReport, DoctorStatus},
+    firmware::{
+        FirmwareOperationState, FirmwareOperationStore, FirmwareStageEvent, FirmwareStageReport,
+        FirmwareVersionComparison, FirmwareVolumeIdentity, FirmwareWatchEvent,
+        OFFICIAL_FIRMWARE_FILENAME, copy_firmware_to_volume, new_firmware_operation_id,
+        validate_firmware_destination, validate_firmware_file,
+    },
     logging,
     media::VideoTuple,
     output::{DeviceSummary, Envelope},
@@ -52,8 +62,8 @@ use link_core::{
 };
 use link_linux::DiscoveredDevice;
 use link_profiles::{
-    CodecKind, Persistence, ProfileCatalog, RollbackPolicy, SafetyClass, StreamRequirement,
-    VerificationMethod,
+    CodecKind, Persistence, ProfileCatalog, ProfileTrust, RollbackPolicy, SafetyClass,
+    StreamRequirement, VerificationMethod,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -550,6 +560,20 @@ pub enum PrivacyCommand {
 #[derive(Clone, Debug, Subcommand)]
 pub enum FirmwareCommand {
     Info,
+    /// Watch the camera's normal and U-Disk maintenance personalities.
+    Watch,
+    /// Stage an explicitly supplied official firmware file through the mounted U-Disk.
+    Stage {
+        /// Official Link 2C Pro firmware file supplied by the user.
+        #[arg(value_name = "OFFICIAL_FILE")]
+        official_file: PathBuf,
+        /// Expected SHA-256 from trusted metadata.
+        #[arg(long)]
+        sha256: Option<String>,
+        /// Maximum wait for each manual USB personality transition.
+        #[arg(long, default_value = "5m")]
+        transition_timeout: DurationValue,
+    },
 }
 
 /// V4L2 video format and direct stream statistics operations.
@@ -1338,7 +1362,8 @@ pub fn run(arguments: Vec<OsString>) -> u8 {
 
     let command_id = command_identifier(cli.command.as_ref());
     let binary_stdout = uses_binary_stdout(cli.command.as_ref());
-    let result = match cli.command {
+    let maintenance_check = ensure_command_allowed_in_maintenance(&config, cli.command.as_ref());
+    let result = maintenance_check.and_then(|()| match cli.command {
         Some(Command::Device {
             command: DeviceCommand::List { include_serial },
         }) => run_device_list(&config, include_serial),
@@ -1379,7 +1404,7 @@ pub fn run(arguments: Vec<OsString>) -> u8 {
         Some(Command::Gesture { command }) => run_gesture(&config, command, cli.dry_run),
         Some(Command::Portrait { command }) => run_portrait(&config, command, cli.dry_run),
         Some(Command::Privacy { command }) => run_privacy(&config, command),
-        Some(Command::Firmware { command }) => run_firmware(&config, command),
+        Some(Command::Firmware { command }) => run_firmware(&config, command, cli.dry_run, cli.yes),
         Some(Command::Video { command }) => run_video(&config, cli.backend, command, cli.dry_run),
         Some(Command::Audio { command }) => run_audio(&config, cli.backend, command, cli.dry_run),
         Some(Command::Preset { command }) => run_preset(&config, cli.backend, command, cli.dry_run),
@@ -1408,7 +1433,7 @@ pub fn run(arguments: Vec<OsString>) -> u8 {
             ErrorKind::InvalidInvocation,
             "a command is required",
         )),
-    };
+    });
     match result {
         Ok(()) => ProcessExit::Success.code(),
         Err(error) if binary_stdout => {
@@ -1489,6 +1514,39 @@ fn command_uses_device_defaults(command: Option<&Command>) -> bool {
         Some(Command::Stream { .. }) => true,
         _ => false,
     }
+}
+
+fn ensure_command_allowed_in_maintenance(
+    config: &Config,
+    command: Option<&Command>,
+) -> Result<(), LinkError> {
+    if !command_requires_normal_camera(command) {
+        return Ok(());
+    }
+    let devices = selected_devices(config, true)?;
+    if let Some(device) = devices
+        .iter()
+        .find(|device| device.mode() == DeviceMode::UDisk)
+    {
+        return Err(LinkError::new(
+            ErrorKind::CapabilityUnsupported,
+            "normal camera commands are unavailable while the selected device is in U-Disk mode",
+        )
+        .with_detail("stable_id", device.identity.stable_id())
+        .with_detail("topology", device.identity.topology.clone())
+        .with_detail("mode", "u-disk")
+        .with_detail(
+            "guidance",
+            "use device inspection or firmware maintenance commands, or reconnect the camera to return to normal mode",
+        ));
+    }
+    Ok(())
+}
+
+fn command_requires_normal_camera(command: Option<&Command>) -> bool {
+    matches!(command, Some(Command::Caps { .. }))
+        || (command_uses_device_defaults(command)
+            && !matches!(command, Some(Command::Firmware { .. })))
 }
 
 fn uses_binary_stdout(command: Option<&Command>) -> bool {
@@ -1587,7 +1645,11 @@ fn command_identifier(command: Option<&Command>) -> &'static str {
             PortraitCommand::Native { .. } => "portrait.native",
         },
         Some(Command::Privacy { .. }) => "privacy.status",
-        Some(Command::Firmware { .. }) => "firmware.info",
+        Some(Command::Firmware { command }) => match command {
+            FirmwareCommand::Info => "firmware.info",
+            FirmwareCommand::Watch => "firmware.watch",
+            FirmwareCommand::Stage { .. } => "firmware.stage",
+        },
         Some(Command::Video { command }) => match command {
             VideoCommand::Formats(_) => "video.formats",
             VideoCommand::Status => "video.status",
@@ -8041,13 +8103,817 @@ fn run_privacy(config: &Config, command: PrivacyCommand) -> Result<(), LinkError
     }
 }
 
-fn run_firmware(config: &Config, command: FirmwareCommand) -> Result<(), LinkError> {
+fn run_firmware(
+    config: &Config,
+    command: FirmwareCommand,
+    dry_run: bool,
+    yes: bool,
+) -> Result<(), LinkError> {
     match command {
         FirmwareCommand::Info => run_native_status(
             config,
             "firmware.info",
             &["firmware.version", "hardware.version"],
         ),
+        FirmwareCommand::Watch => run_firmware_watch(config),
+        FirmwareCommand::Stage {
+            official_file,
+            sha256,
+            transition_timeout,
+        } => run_firmware_stage(
+            config,
+            &official_file,
+            sha256.as_deref(),
+            transition_timeout.get(),
+            dry_run,
+            yes,
+        ),
+    }
+}
+
+static FIRMWARE_INTERRUPTED: AtomicBool = AtomicBool::new(false);
+static FIRMWARE_SIGNAL_HANDLER: OnceLock<Result<(), String>> = OnceLock::new();
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct FirmwareWatchSnapshot {
+    topology: String,
+    stable_id: String,
+    model: String,
+    mode: DeviceMode,
+    volume: Option<FirmwareVolumeIdentity>,
+    mounted: bool,
+}
+
+fn prepare_firmware_signal_handler() -> Result<(), LinkError> {
+    let result = FIRMWARE_SIGNAL_HANDLER.get_or_init(|| {
+        ctrlc::set_handler(|| {
+            FIRMWARE_INTERRUPTED.store(true, Ordering::SeqCst);
+        })
+        .map_err(|error| error.to_string())
+    });
+    result.as_ref().map_err(|reason| {
+        LinkError::new(
+            ErrorKind::IoFailure,
+            "failed to install firmware interruption handler",
+        )
+        .with_detail("reason", reason.clone())
+    })?;
+    FIRMWARE_INTERRUPTED.store(false, Ordering::SeqCst);
+    Ok(())
+}
+
+fn run_firmware_watch(config: &Config) -> Result<(), LinkError> {
+    ensure_watch_format(config.output)?;
+    let catalog = ProfileCatalog::load(config.profile_dir.as_deref())?;
+    let initial = firmware_watch_devices(&catalog)?;
+    let selected_topologies = if let Some(selector) = config.default_device.as_deref() {
+        link_linux::select_devices(&initial, selector)?
+            .into_iter()
+            .map(|device| device.identity.topology.clone())
+            .collect::<BTreeSet<_>>()
+    } else {
+        BTreeSet::new()
+    };
+    let watch_all = selected_topologies.is_empty();
+    let mut previous = firmware_watch_snapshots(&initial, &selected_topologies)?;
+    let mut sequence = 0_u64;
+    if previous.is_empty() && config.output == OutputFormat::Human {
+        println!("waiting for a Link 2C Pro normal or U-Disk personality");
+    }
+    for snapshot in previous.values() {
+        sequence += 1;
+        emit_firmware_watch_event(config.output, sequence, "initial", Some(snapshot))?;
+    }
+
+    loop {
+        thread::sleep(Duration::from_millis(250));
+        let devices = firmware_watch_devices(&catalog)?;
+        let current = if watch_all {
+            firmware_watch_snapshots(&devices, &BTreeSet::new())?
+        } else {
+            firmware_watch_snapshots(&devices, &selected_topologies)?
+        };
+        for (topology, old) in &previous {
+            if !current.contains_key(topology) {
+                sequence += 1;
+                emit_firmware_watch_event(config.output, sequence, "removed", Some(old))?;
+            }
+        }
+        for (topology, new) in &current {
+            match previous.get(topology) {
+                None => {
+                    sequence += 1;
+                    emit_firmware_watch_event(config.output, sequence, "added", Some(new))?;
+                }
+                Some(old) if old != new => {
+                    let kind = if old.mode != new.mode {
+                        "mode-changed"
+                    } else if !old.mounted && new.mounted {
+                        "volume-mounted"
+                    } else if old.mounted && !new.mounted {
+                        "volume-unmounted"
+                    } else {
+                        "changed"
+                    };
+                    sequence += 1;
+                    emit_firmware_watch_event(config.output, sequence, kind, Some(new))?;
+                }
+                Some(_) => {}
+            }
+        }
+        previous = current;
+    }
+}
+
+fn firmware_watch_devices(catalog: &ProfileCatalog) -> Result<Vec<DiscoveredDevice>, LinkError> {
+    let mut devices = Vec::new();
+    for device in discovered_devices()? {
+        let matches_profile = catalog
+            .matching(&device.identity, device.mode(), None)?
+            .is_some_and(|profile| profile.profile.profile_id == "insta360-link-2c-pro");
+        if is_link_2c_pro_personality(&device) || matches_profile {
+            devices.push(device);
+        }
+    }
+    devices.sort_by(|left, right| left.identity.topology.cmp(&right.identity.topology));
+    Ok(devices)
+}
+
+fn firmware_watch_snapshots(
+    devices: &[DiscoveredDevice],
+    selected_topologies: &BTreeSet<String>,
+) -> Result<BTreeMap<String, FirmwareWatchSnapshot>, LinkError> {
+    let mut snapshots = BTreeMap::new();
+    for device in devices {
+        if !selected_topologies.is_empty()
+            && !selected_topologies.contains(&device.identity.topology)
+        {
+            continue;
+        }
+        let volume = firmware_volume_candidate(device)?.map(|candidate| candidate.0);
+        let mounted = volume.as_ref().is_some_and(|volume| {
+            link_linux::mounted_volume_path(Path::new(&volume.block_device))
+                .ok()
+                .flatten()
+                .is_some()
+        });
+        snapshots.insert(
+            device.identity.topology.clone(),
+            FirmwareWatchSnapshot {
+                topology: device.identity.topology.clone(),
+                stable_id: device.identity.stable_id(),
+                model: device.model(),
+                mode: device.mode(),
+                volume,
+                mounted,
+            },
+        );
+    }
+    Ok(snapshots)
+}
+
+fn emit_firmware_watch_event(
+    format: OutputFormat,
+    sequence: u64,
+    kind: &str,
+    snapshot: Option<&FirmwareWatchSnapshot>,
+) -> Result<(), LinkError> {
+    let event = FirmwareWatchEvent {
+        sequence,
+        observed_unix_ms: now_unix_ms()?,
+        kind: kind.into(),
+        topology: snapshot.map_or_else(String::new, |snapshot| snapshot.topology.clone()),
+        stable_id: snapshot.map(|snapshot| snapshot.stable_id.clone()),
+        model: snapshot.map(|snapshot| snapshot.model.clone()),
+        mode: snapshot.map(|snapshot| match snapshot.mode {
+            DeviceMode::Camera => "camera".into(),
+            DeviceMode::UDisk => "u-disk".into(),
+            DeviceMode::Unknown => "unknown".into(),
+        }),
+        volume: snapshot.and_then(|snapshot| snapshot.volume.clone()),
+        mounted: snapshot.is_some_and(|snapshot| snapshot.mounted),
+    };
+    match format {
+        OutputFormat::Human => {
+            println!(
+                "{}\t{}\t{}\t{}\t{}",
+                event.sequence,
+                event.kind,
+                event.topology,
+                event.mode.as_deref().unwrap_or("absent"),
+                if event.mounted {
+                    "mounted"
+                } else {
+                    "unmounted"
+                }
+            );
+            Ok(())
+        }
+        OutputFormat::Jsonl => emit_success(format, "firmware.watch", None, &event),
+        OutputFormat::Json => unreachable!("watch format is validated"),
+    }
+}
+
+fn run_firmware_stage(
+    config: &Config,
+    official_file: &Path,
+    expected_sha256: Option<&str>,
+    transition_timeout: Duration,
+    dry_run: bool,
+    yes: bool,
+) -> Result<(), LinkError> {
+    if transition_timeout.is_zero() {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "--transition-timeout must be greater than zero",
+        ));
+    }
+    let source = validate_firmware_file(official_file, expected_sha256)?;
+    let devices = selected_devices(config, false)?;
+    let initial = devices
+        .first()
+        .expect("selected_devices returns one device")
+        .clone();
+    let catalog = ProfileCatalog::load(config.profile_dir.as_deref())?;
+    ensure_firmware_personality(&catalog, &initial)?;
+    let topology = initial.identity.topology.clone();
+    let normal_stable_id =
+        (initial.mode() == DeviceMode::Camera).then(|| initial.identity.stable_id());
+    let pre_version = if initial.mode() == DeviceMode::Camera {
+        read_firmware_version(config, &initial).unwrap_or_default()
+    } else {
+        None
+    };
+    let operation_id = new_firmware_operation_id(&topology);
+    let mut report = FirmwareStageReport::new(
+        operation_id,
+        topology.clone(),
+        normal_stable_id.clone(),
+        pre_version,
+        dry_run,
+    );
+    report.source = Some(source.clone());
+
+    if dry_run {
+        if initial.mode() == DeviceMode::UDisk {
+            let (volume, mount_root) = require_mounted_firmware_volume(&initial)?;
+            validate_firmware_destination(&mount_root, source.size_bytes)?;
+            report.maintenance_stable_id = Some(initial.identity.stable_id());
+            report.volume = Some(volume);
+            report.destination_name = Some(OFFICIAL_FIRMWARE_FILENAME.into());
+        } else {
+            report.guidance.push(
+                "live U-Disk identity, mount, and destination checks will run after the physical transition"
+                    .into(),
+            );
+        }
+        report.guidance.push(
+            "dry-run validated the available inputs and did not copy or create an operation log"
+                .into(),
+        );
+        report.transition(FirmwareOperationState::DryRun);
+        report.events.push(FirmwareStageEvent::new(
+            FirmwareOperationState::DryRun,
+            "dry-run validation completed without copying firmware",
+            0,
+            Some(source.size_bytes),
+        ));
+        return emit_firmware_stage_report(config.output, &report);
+    }
+    if !yes {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "firmware staging requires --yes after reviewing the power and disconnect warning",
+        )
+        .with_detail("warning", report.warning.clone())
+        .with_detail("source_sha256", source.sha256.clone()));
+    }
+    if initial.mode() == DeviceMode::Camera
+        && daemon_source_id(config)?.as_deref() == normal_stable_id.as_deref()
+    {
+        return Err(LinkError::new(
+            ErrorKind::DeviceBusy,
+            "linkd owns the selected camera; stop the daemon stream before firmware maintenance",
+        )
+        .with_detail("stable_id", initial.identity.stable_id()));
+    }
+
+    prepare_firmware_signal_handler()?;
+    let lease_key = normal_stable_id
+        .clone()
+        .unwrap_or_else(|| initial.identity.stable_id());
+    let _operation_lease = acquire_operation_lease(config, &lease_key, "firmware.stage")?;
+    #[cfg(feature = "gstreamer")]
+    let _media_lease = normal_stable_id
+        .as_deref()
+        .map(|stable_id| link_media::MediaLease::acquire(stable_id, "firmware.stage"))
+        .transpose()?;
+
+    let store = FirmwareOperationStore::from_process()?;
+    report.log_path = Some(store.path(&report.operation_id));
+    let warning_event = FirmwareStageEvent::new(
+        FirmwareOperationState::Validating,
+        report.warning.clone(),
+        0,
+        Some(source.size_bytes),
+    );
+    report.events.push(warning_event.clone());
+    store.write(&report)?;
+    emit_firmware_stage_event(config.output, &warning_event)?;
+
+    let maintenance = if initial.mode() == DeviceMode::UDisk {
+        initial
+    } else {
+        if let Err(error) = transition_firmware_stage(
+            config.output,
+            &store,
+            &mut report,
+            FirmwareOperationState::AwaitingUDisk,
+            "triple-tap the camera touch key, then hold it for five seconds until the blue indicator is solid",
+        ) {
+            return Err(record_firmware_failure(
+                &store,
+                &mut report,
+                error,
+                FirmwareOperationState::Failed,
+            ));
+        }
+        match wait_for_firmware_mode(&catalog, &topology, DeviceMode::UDisk, transition_timeout) {
+            Ok(device) => device,
+            Err(error) => {
+                return Err(record_firmware_failure(
+                    &store,
+                    &mut report,
+                    error,
+                    interrupted_state(false),
+                ));
+            }
+        }
+    };
+    report.maintenance_stable_id = Some(maintenance.identity.stable_id());
+
+    if let Err(error) = transition_firmware_stage(
+        config.output,
+        &store,
+        &mut report,
+        FirmwareOperationState::AwaitingMount,
+        "waiting for the exact Link 2C Pro U-Disk volume to be mounted",
+    ) {
+        return Err(record_firmware_failure(
+            &store,
+            &mut report,
+            error,
+            FirmwareOperationState::Failed,
+        ));
+    }
+    let (volume, mount_root) =
+        match wait_for_mounted_firmware_volume(&catalog, &topology, transition_timeout) {
+            Ok(volume) => volume,
+            Err(error) => {
+                return Err(record_firmware_failure(
+                    &store,
+                    &mut report,
+                    error,
+                    interrupted_state(false),
+                ));
+            }
+        };
+    report.volume = Some(volume);
+    if let Err(error) = transition_firmware_stage(
+        config.output,
+        &store,
+        &mut report,
+        FirmwareOperationState::Copying,
+        "copying the validated firmware file to the U-Disk",
+    ) {
+        return Err(record_firmware_failure(
+            &store,
+            &mut report,
+            error,
+            FirmwareOperationState::Failed,
+        ));
+    }
+    let operation_id = report.operation_id.clone();
+    let copy = copy_firmware_to_volume(
+        official_file,
+        &mount_root,
+        &source,
+        &operation_id,
+        &FIRMWARE_INTERRUPTED,
+        |bytes_copied| {
+            report.bytes_copied = bytes_copied;
+            report.updated_unix_ms = now_unix_ms()?;
+            let event = FirmwareStageEvent::new(
+                FirmwareOperationState::Copying,
+                "firmware copy progress",
+                bytes_copied,
+                Some(source.size_bytes),
+            );
+            report.events.push(event.clone());
+            store.write(&report)?;
+            emit_firmware_stage_event(config.output, &event)
+        },
+    );
+    let copy = match copy {
+        Ok(copy) => copy,
+        Err(error) => {
+            let error = redact_firmware_volume_paths(error);
+            let destination_finalized = if error.kind() == ErrorKind::PartialSuccess {
+                report.synchronized = error
+                    .details()
+                    .get("synchronized")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                report.destination_name = Some(OFFICIAL_FIRMWARE_FILENAME.into());
+                error
+                    .details()
+                    .get("destination_finalized")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            let failure_state = if destination_finalized {
+                report.guidance.push(if report.synchronized {
+                    "do not reconnect the camera to apply the file; inspect the staged destination because post-copy checksum verification failed"
+                        .into()
+                } else {
+                    "do not reconnect the camera to apply the file; the destination was finalized but volume-directory synchronization was not confirmed"
+                        .into()
+                });
+                FirmwareOperationState::Partial
+            } else {
+                report.guidance.push(
+                    "do not disconnect until the operating system has finished cleaning up the failed copy"
+                        .into(),
+                );
+                interrupted_state(false)
+            };
+            return Err(record_firmware_failure(
+                &store,
+                &mut report,
+                error,
+                failure_state,
+            ));
+        }
+    };
+    report.bytes_copied = copy.bytes_copied;
+    report.destination_name = Some(copy.destination_name);
+    report.synchronized = copy.synchronized;
+    transition_firmware_stage(
+        config.output,
+        &store,
+        &mut report,
+        FirmwareOperationState::Synchronized,
+        "firmware copy and volume directory are synchronized",
+    )?;
+    report.guidance.push(
+        "the staged file is synchronized; now disconnect and reconnect the USB cable to let the camera apply it"
+            .into(),
+    );
+    transition_firmware_stage(
+        config.output,
+        &store,
+        &mut report,
+        FirmwareOperationState::AwaitingReconnect,
+        "disconnect and reconnect the camera; do not operate it while the firmware is being applied",
+    )?;
+    let reconnected = match wait_for_firmware_mode(
+        &catalog,
+        &topology,
+        DeviceMode::Camera,
+        transition_timeout,
+    ) {
+        Ok(device) => device,
+        Err(error) => {
+            report.guidance.push(
+                "the file was staged and synchronized, but normal-mode return was not observed; follow the camera indicator and official recovery guidance"
+                    .into(),
+            );
+            return Err(record_firmware_failure(
+                &store,
+                &mut report,
+                LinkError::new(
+                    ErrorKind::PartialSuccess,
+                    "firmware was staged, but post-update re-enumeration was not verified",
+                )
+                .with_detail("cause", error.message().to_owned())
+                .with_detail("synchronized", true),
+                interrupted_state(true),
+            ));
+        }
+    };
+    report.normal_stable_id = Some(reconnected.identity.stable_id());
+    report.post_version = read_firmware_version(config, &reconnected).unwrap_or_default();
+    report.compare_versions();
+    if report.version_comparison == FirmwareVersionComparison::Unavailable {
+        report.guidance.push(
+            "the camera returned to normal mode, but the firmware version was not readable from the verified bootstrap control"
+                .into(),
+        );
+    }
+    transition_firmware_stage(
+        config.output,
+        &store,
+        &mut report,
+        FirmwareOperationState::Complete,
+        "camera returned to normal mode; firmware staging workflow completed",
+    )?;
+    emit_firmware_stage_report(config.output, &report)
+}
+
+fn redact_firmware_volume_paths(error: LinkError) -> LinkError {
+    let mut redacted = LinkError::new(error.kind(), error.message());
+    let mut removed_path = false;
+    for (key, value) in error.details() {
+        if matches!(key.as_str(), "path" | "destination") {
+            removed_path = true;
+        } else {
+            redacted = redacted.with_detail(key, value.clone());
+        }
+    }
+    if removed_path {
+        redacted = redacted.with_detail("volume_path_redacted", true);
+    }
+    redacted
+}
+
+fn transition_firmware_stage(
+    output: OutputFormat,
+    store: &FirmwareOperationStore,
+    report: &mut FirmwareStageReport,
+    state: FirmwareOperationState,
+    message: &str,
+) -> Result<(), LinkError> {
+    report.transition(state);
+    let event = FirmwareStageEvent::new(
+        state,
+        message,
+        report.bytes_copied,
+        report.source.as_ref().map(|source| source.size_bytes),
+    );
+    report.events.push(event.clone());
+    store.write(report)?;
+    emit_firmware_stage_event(output, &event)
+}
+
+fn record_firmware_failure(
+    store: &FirmwareOperationStore,
+    report: &mut FirmwareStageReport,
+    error: LinkError,
+    state: FirmwareOperationState,
+) -> LinkError {
+    report.record_error(state, &error);
+    let log_result = store.write(report);
+    let mut error = error
+        .with_detail("operation_id", report.operation_id.clone())
+        .with_detail("synchronized", report.synchronized);
+    if let Some(path) = &report.log_path {
+        error = error.with_detail("operation_log", path.display().to_string());
+    }
+    if let Err(log_error) = log_result {
+        error = error.with_detail("operation_log_error", log_error.message().to_owned());
+    }
+    error
+}
+
+fn interrupted_state(after_sync: bool) -> FirmwareOperationState {
+    if FIRMWARE_INTERRUPTED.load(Ordering::SeqCst) {
+        if after_sync {
+            FirmwareOperationState::Partial
+        } else {
+            FirmwareOperationState::Interrupted
+        }
+    } else if after_sync {
+        FirmwareOperationState::Partial
+    } else {
+        FirmwareOperationState::Failed
+    }
+}
+
+fn wait_for_firmware_mode(
+    catalog: &ProfileCatalog,
+    topology: &str,
+    mode: DeviceMode,
+    timeout: Duration,
+) -> Result<DiscoveredDevice, LinkError> {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if FIRMWARE_INTERRUPTED.load(Ordering::SeqCst) {
+            return Err(LinkError::new(
+                ErrorKind::FirmwareValidationFailure,
+                "firmware maintenance was interrupted while waiting for re-enumeration",
+            ));
+        }
+        if let Some(device) = discovered_devices()?
+            .into_iter()
+            .find(|device| device.identity.topology == topology && device.mode() == mode)
+        {
+            ensure_firmware_personality(catalog, &device)?;
+            return Ok(device);
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    Err(LinkError::new(
+        ErrorKind::Timeout,
+        "timed out waiting for the camera USB personality transition",
+    )
+    .with_detail("topology", topology.to_owned())
+    .with_detail(
+        "expected_mode",
+        if mode == DeviceMode::UDisk {
+            "u-disk"
+        } else {
+            "camera"
+        },
+    )
+    .with_detail("timeout_ms", timeout.as_millis() as u64))
+}
+
+fn wait_for_mounted_firmware_volume(
+    catalog: &ProfileCatalog,
+    topology: &str,
+    timeout: Duration,
+) -> Result<(FirmwareVolumeIdentity, PathBuf), LinkError> {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if FIRMWARE_INTERRUPTED.load(Ordering::SeqCst) {
+            return Err(LinkError::new(
+                ErrorKind::FirmwareValidationFailure,
+                "firmware maintenance was interrupted while waiting for the U-Disk mount",
+            ));
+        }
+        if let Some(device) = discovered_devices()?.into_iter().find(|device| {
+            device.identity.topology == topology && device.mode() == DeviceMode::UDisk
+        }) {
+            ensure_firmware_personality(catalog, &device)?;
+            if let Some((identity, mount_root)) = firmware_volume_candidate(&device)?
+                && let Some(mount_root) = mount_root
+            {
+                return Ok((identity, mount_root));
+            }
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    Err(LinkError::new(
+        ErrorKind::Timeout,
+        "timed out waiting for the validated Link 2C Pro U-Disk volume to be mounted",
+    )
+    .with_detail("topology", topology.to_owned())
+    .with_detail("expected_label", "LINK_2C_PRO")
+    .with_detail("expected_filesystem", "vfat")
+    .with_detail("timeout_ms", timeout.as_millis() as u64))
+}
+
+fn ensure_firmware_personality(
+    catalog: &ProfileCatalog,
+    device: &DiscoveredDevice,
+) -> Result<(), LinkError> {
+    let profile = catalog.matching(&device.identity, device.mode(), None)?;
+    if !profile.is_some_and(|profile| {
+        profile.trust == ProfileTrust::BuiltIn
+            && profile.profile.profile_id == "insta360-link-2c-pro"
+    }) {
+        return Err(LinkError::new(
+            ErrorKind::FirmwareValidationFailure,
+            "selected USB personality does not match the exact Link 2C Pro profile",
+        )
+        .with_detail("stable_id", device.identity.stable_id())
+        .with_detail("topology", device.identity.topology.clone())
+        .with_detail(
+            "descriptor_sha256",
+            device.identity.descriptor_sha256.clone(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_link_2c_pro_personality(device: &DiscoveredDevice) -> bool {
+    matches!(
+        (device.identity.vendor_id, device.identity.product_id),
+        (0x2e1a, 0x4c05) | (0x070a, 0x4026)
+    )
+}
+
+fn firmware_volume_candidate(
+    device: &DiscoveredDevice,
+) -> Result<Option<(FirmwareVolumeIdentity, Option<PathBuf>)>, LinkError> {
+    let matching = device
+        .volumes
+        .iter()
+        .filter(|volume| {
+            volume.label.as_deref() == Some("LINK_2C_PRO")
+                && volume.filesystem.as_deref() == Some("vfat")
+        })
+        .collect::<Vec<_>>();
+    match matching.as_slice() {
+        [] if device
+            .volumes
+            .iter()
+            .any(|volume| volume.label.is_some() && volume.filesystem.is_some()) =>
+        {
+            Err(LinkError::new(
+                ErrorKind::FirmwareValidationFailure,
+                "U-Disk volume label or filesystem does not match the Link 2C Pro staging policy",
+            )
+            .with_detail("expected_label", "LINK_2C_PRO")
+            .with_detail("expected_filesystem", "vfat"))
+        }
+        [] => Ok(None),
+        [volume] => {
+            let mount_root = link_linux::mounted_volume_path(Path::new(&volume.path))?;
+            Ok(Some((
+                FirmwareVolumeIdentity {
+                    block_device: volume.path.clone(),
+                    label: "LINK_2C_PRO".into(),
+                    filesystem: "vfat".into(),
+                },
+                mount_root,
+            )))
+        }
+        _ => Err(LinkError::new(
+            ErrorKind::FirmwareValidationFailure,
+            "multiple Link 2C Pro firmware partitions were discovered",
+        )
+        .with_detail("matches", matching.len() as u64)),
+    }
+}
+
+fn require_mounted_firmware_volume(
+    device: &DiscoveredDevice,
+) -> Result<(FirmwareVolumeIdentity, PathBuf), LinkError> {
+    match firmware_volume_candidate(device)? {
+        Some((identity, Some(mount_root))) => Ok((identity, mount_root)),
+        Some((_, None)) => Err(LinkError::new(
+            ErrorKind::FirmwareValidationFailure,
+            "the validated Link 2C Pro U-Disk partition is not mounted",
+        )),
+        None => Err(LinkError::new(
+            ErrorKind::FirmwareValidationFailure,
+            "no validated Link 2C Pro U-Disk partition was discovered",
+        )),
+    }
+}
+
+fn read_firmware_version(
+    config: &Config,
+    device: &DiscoveredDevice,
+) -> Result<Option<String>, LinkError> {
+    if device.mode() != DeviceMode::Camera {
+        return Ok(None);
+    }
+    let node = control_node(device, None)?;
+    let inventory = link_uvc_xu::parse_descriptors(&device.descriptors)?;
+    let catalog = ProfileCatalog::load(config.profile_dir.as_deref())?;
+    let session = link_uvc_xu::XuSession::open_read(Path::new(&node.path))?;
+    let (_, firmware) = resolve_firmware_profile(device, &inventory, &catalog, &session)?;
+    Ok(firmware)
+}
+
+fn emit_firmware_stage_event(
+    format: OutputFormat,
+    event: &FirmwareStageEvent,
+) -> Result<(), LinkError> {
+    match format {
+        OutputFormat::Human => {
+            if let Some(percent) = event.percent {
+                eprintln!("{} ({}%)", event.message, percent);
+            } else {
+                eprintln!("{}", event.message);
+            }
+            Ok(())
+        }
+        OutputFormat::Jsonl => emit_success(format, "firmware.stage", None, event),
+        OutputFormat::Json => Ok(()),
+    }
+}
+
+fn emit_firmware_stage_report(
+    format: OutputFormat,
+    report: &FirmwareStageReport,
+) -> Result<(), LinkError> {
+    if format == OutputFormat::Human {
+        println!("Firmware staging state: {:?}", report.state);
+        if let Some(source) = &report.source {
+            println!("Source: {} ({} bytes)", source.name, source.size_bytes);
+            println!("SHA-256: {}", source.sha256);
+        }
+        println!("Synchronized: {}", report.synchronized);
+        println!(
+            "Version: {} -> {} ({:?})",
+            report.pre_version.as_deref().unwrap_or("unknown"),
+            report.post_version.as_deref().unwrap_or("unknown"),
+            report.version_comparison
+        );
+        if let Some(path) = &report.log_path {
+            println!("Operation log: {}", path.display());
+        }
+        for guidance in &report.guidance {
+            println!("Next: {guidance}");
+        }
+        Ok(())
+    } else {
+        emit_success(format, "firmware.stage", None, report)
     }
 }
 
@@ -10730,10 +11596,11 @@ mod tests {
     use super::{
         Cli, ErrorKind, LinkError, TRANSACTION_SCHEMA_VERSION, TransactionOutcome, TransactionPlan,
         TransactionReport, TransactionStepKind, TransactionStepPlan, TransactionStepReport,
-        TransactionStepStatus, anti_flicker_status_value, exposure_compensation_status_value,
-        exposure_compensation_to_vendor_hundredths, exposure_status_value, focus_status_value,
-        parse_fps, parse_size, parse_zoom_factor, profile_read_stream_requirement,
-        record_rollback_result, rollback_order_for, semantic_readback_matches, shutter_to_v4l2,
+        TransactionStepStatus, anti_flicker_status_value, command_requires_normal_camera,
+        exposure_compensation_status_value, exposure_compensation_to_vendor_hundredths,
+        exposure_status_value, focus_status_value, parse_fps, parse_size, parse_zoom_factor,
+        profile_read_stream_requirement, record_rollback_result, redact_firmware_volume_paths,
+        rollback_order_for, semantic_readback_matches, shutter_to_v4l2,
         shutter_to_vendor_denominator, validate_preset_requirements, validate_vendor_iso,
         white_balance_status_value,
     };
@@ -10742,6 +11609,34 @@ mod tests {
     fn command_graph_excludes_mechanical_movement_commands() {
         let prohibited = ["pan", "tilt", "gimbal", "center-gimbal", "motor"];
         assert_command_names_are_absent(&Cli::command(), &prohibited);
+    }
+
+    #[test]
+    fn maintenance_command_graph_blocks_normal_camera_operations() {
+        let control = Cli::try_parse_from(["linkctl", "control", "list"]).unwrap();
+        assert!(command_requires_normal_camera(control.command.as_ref()));
+
+        let stage = Cli::try_parse_from([
+            "linkctl",
+            "firmware",
+            "stage",
+            "Insta360LINK2CPROFW_HOST.bin",
+        ])
+        .unwrap();
+        assert!(!command_requires_normal_camera(stage.command.as_ref()));
+    }
+
+    #[test]
+    fn firmware_volume_paths_are_redacted_from_reported_errors() {
+        let error = LinkError::new(ErrorKind::IoFailure, "copy failed")
+            .with_detail("path", "/run/media/user/LINK_2C_PRO")
+            .with_detail("destination", "/run/media/user/LINK_2C_PRO/file.bin")
+            .with_detail("bytes_copied", 42_u64);
+        let redacted = redact_firmware_volume_paths(error);
+        assert!(!redacted.details().contains_key("path"));
+        assert!(!redacted.details().contains_key("destination"));
+        assert_eq!(redacted.details()["bytes_copied"], 42);
+        assert_eq!(redacted.details()["volume_path_redacted"], true);
     }
 
     #[test]

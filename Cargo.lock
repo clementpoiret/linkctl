@@ -815,6 +815,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "clap_complete",
+ "ctrlc",
  "humantime",
  "link-audio",
  "link-core",

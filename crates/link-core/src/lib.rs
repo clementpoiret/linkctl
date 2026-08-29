@@ -5,6 +5,7 @@ pub mod config;
 pub mod control;
 pub mod device;
 pub mod error;
+pub mod firmware;
 pub mod logging;
 pub mod media;
 pub mod output;
