@@ -244,7 +244,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           set -euo pipefail
-          pacman -Syu --needed --noconfirm \
+          pacman --disable-sandbox-filesystem -Syu --needed --noconfirm \
             alsa-lib base-devel clang gst-libav gst-plugins-bad gst-plugins-base \
             gst-plugins-good gstreamer help2man libpipewire namcap pkgconf rustup systemd
           useradd --create-home builder
