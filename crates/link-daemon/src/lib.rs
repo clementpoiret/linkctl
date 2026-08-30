@@ -196,6 +196,8 @@ mod runtime {
         pipeline: Option<SharedPipeline>,
         outputs: BTreeMap<String, VirtualCameraSpec>,
         recording: Option<link_ipc::RecordingSpec>,
+        recording_root: Option<PathBuf>,
+        recording_segment: u64,
         started_unix_ms: u128,
         reloads: u64,
         reconnects: u64,
@@ -213,6 +215,8 @@ mod runtime {
                 pipeline: None,
                 outputs: BTreeMap::new(),
                 recording: None,
+                recording_root: None,
+                recording_segment: 0,
                 started_unix_ms: unix_ms().unwrap_or_default(),
                 reloads: 0,
                 reconnects: 0,
@@ -228,7 +232,14 @@ mod runtime {
             {
                 previous.shutdown(self.timeout.min(Duration::from_secs(2)));
             }
-            let source = resolve_source(self.selector.as_deref())?;
+            let source = source_for_rebuild(
+                resolve_source(self.selector.as_deref())?,
+                self.source.as_ref(),
+                recovery,
+            );
+            if recovery {
+                self.advance_recording_segment()?;
+            }
             let outputs = self
                 .outputs
                 .values()
@@ -254,6 +265,22 @@ mod runtime {
             }
         }
 
+        fn advance_recording_segment(&mut self) -> Result<(), LinkError> {
+            let Some(recording) = self.recording.as_mut() else {
+                return Ok(());
+            };
+            if !recording.output.exists() {
+                return Ok(());
+            }
+            let root = self.recording_root.as_ref().unwrap_or(&recording.output);
+            let (output, segment) =
+                next_recovery_recording_path(root, self.recording_segment.saturating_add(1))?;
+            recording.output = output;
+            recording.overwrite = false;
+            self.recording_segment = segment;
+            Ok(())
+        }
+
         fn poll(&mut self) {
             if let Some(error) = self.pipeline.as_ref().and_then(SharedPipeline::poll_error) {
                 tracing::warn!(reason = %error, "shared pipeline failed; waiting for recovery");
@@ -274,6 +301,7 @@ mod runtime {
         fn status(&self) -> Value {
             json!({
                 "version": env!("CARGO_PKG_VERSION"),
+                "source_revision": link_core::source_revision(),
                 "protocol_version": link_ipc::PROTOCOL_VERSION,
                 "pid": std::process::id(),
                 "started_unix_ms": self.started_unix_ms,
@@ -349,6 +377,8 @@ mod runtime {
                 }
                 state.outputs.clear();
                 state.recording = None;
+                state.recording_root = None;
+                state.recording_segment = 0;
                 stopping.store(true, Ordering::SeqCst);
                 Ok((json!({"state": "stopping"}), Vec::new()))
             }
@@ -520,9 +550,13 @@ mod runtime {
                     ));
                 }
                 let original = specification.clone();
+                state.recording_root = Some(specification.output.clone());
+                state.recording_segment = 0;
                 state.recording = Some(specification);
                 if let Err(error) = state.rebuild(false) {
                     state.recording = None;
+                    state.recording_root = None;
+                    state.recording_segment = 0;
                     let _ = state.rebuild(false);
                     return Err(error);
                 }
@@ -545,6 +579,8 @@ mod runtime {
                         "no daemon recording is active",
                     ));
                 }
+                state.recording_root = None;
+                state.recording_segment = 0;
                 state.rebuild(false)?;
                 Ok((json!({"state": "stopped"}), Vec::new()))
             }
@@ -982,6 +1018,58 @@ mod runtime {
         })
     }
 
+    fn source_for_rebuild(
+        mut discovered: SharedSource,
+        previous: Option<&SharedSource>,
+        recovery: bool,
+    ) -> SharedSource {
+        if recovery
+            && let Some(previous) = previous
+            && previous.stable_id == discovered.stable_id
+        {
+            discovered.tuple = previous.tuple.clone();
+        }
+        discovered
+    }
+
+    fn next_recovery_recording_path(
+        root: &Path,
+        first_segment: u64,
+    ) -> Result<(PathBuf, u64), LinkError> {
+        let mut segment = first_segment.max(1);
+        loop {
+            let candidate = recovery_recording_path(root, segment)?;
+            if !candidate.exists() {
+                return Ok((candidate, segment));
+            }
+            segment = segment.checked_add(1).ok_or_else(|| {
+                LinkError::new(
+                    ErrorKind::IoFailure,
+                    "recording recovery segment number overflowed",
+                )
+                .with_detail("path", root.display().to_string())
+            })?;
+        }
+    }
+
+    fn recovery_recording_path(root: &Path, segment: u64) -> Result<PathBuf, LinkError> {
+        let stem = root.file_stem().ok_or_else(|| {
+            LinkError::new(
+                ErrorKind::InvalidInvocation,
+                "recording output has no valid file stem",
+            )
+            .with_detail("path", root.display().to_string())
+        })?;
+        let parent = root.parent().unwrap_or_else(|| Path::new("."));
+        let mut name = stem.to_os_string();
+        name.push(format!(".reconnect-{segment:03}"));
+        if let Some(extension) = root.extension() {
+            name.push(".");
+            name.push(extension);
+        }
+        Ok(parent.join(name))
+    }
+
     fn validate_output_device(path: &Path) -> Result<(), LinkError> {
         use std::os::unix::fs::FileTypeExt;
         let metadata = fs::metadata(path).map_err(|error| {
@@ -1063,6 +1151,7 @@ mod runtime {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use link_core::{media::VideoTuple, probe::Rational};
         use link_ipc::{FitMode, NormalizedCrop};
 
         #[test]
@@ -1087,6 +1176,45 @@ mod runtime {
             assert_eq!(mapped.width, 1280);
             assert!(mapped.horizontal_flip);
             assert_eq!(mapped.crop.unwrap().x, 0.1);
+        }
+
+        #[test]
+        fn recovery_preserves_the_active_source_contract() {
+            let active = SharedSource {
+                stable_id: "camera-a".into(),
+                node: PathBuf::from("/dev/video0"),
+                tuple: VideoTuple {
+                    fourcc: "H264".into(),
+                    width: 1920,
+                    height: 1080,
+                    fps: Rational {
+                        numerator: 60,
+                        denominator: 1,
+                    },
+                },
+            };
+            let discovered = SharedSource {
+                stable_id: active.stable_id.clone(),
+                node: PathBuf::from("/dev/video2"),
+                tuple: VideoTuple {
+                    fourcc: "MJPG".into(),
+                    width: 1920,
+                    height: 1080,
+                    fps: Rational {
+                        numerator: 30,
+                        denominator: 1,
+                    },
+                },
+            };
+            let recovered = source_for_rebuild(discovered, Some(&active), true);
+            assert_eq!(recovered.node, PathBuf::from("/dev/video2"));
+            assert_eq!(recovered.tuple, active.tuple);
+        }
+
+        #[test]
+        fn recording_recovery_uses_a_deterministic_sibling() {
+            let recovered = recovery_recording_path(Path::new("/tmp/meeting.mkv"), 2).unwrap();
+            assert_eq!(recovered, PathBuf::from("/tmp/meeting.reconnect-002.mkv"));
         }
     }
 }

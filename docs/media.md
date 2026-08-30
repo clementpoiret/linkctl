@@ -28,7 +28,7 @@ Direct media commands take a per-device advisory lock. `linkd` takes the same lo
 
 ## Recording and pipes
 
-With no daemon, foreground recording blocks until its duration/size limit, Ctrl-C, a disk guard, or an error stops it. Video-only recording remains the default. `--audio` opts in to a microphone source without changing camera controls. When `linkd` is running, `record start` adds a background pass-through branch; inspect and finalize it with `record status` and `record stop`. Use `--daemon never` when the direct recorder's audio, segmentation, rolling, duration, or size options are required.
+With no daemon, foreground recording blocks until its duration/size limit, Ctrl-C, a disk guard, or an error stops it. Video-only recording remains the default. `--audio` opts in to a microphone source without changing camera controls. When `linkd` is running, `record start` adds a background pass-through branch; inspect and finalize it with `record status` and `record stop`. On camera recovery, an active daemon recording continues in the next unused `<stem>.reconnect-NNN.<ext>` sibling without overwriting the finalized earlier segment. Use `--daemon never` when the direct recorder's audio, segmentation, rolling, duration, or size options are required.
 
 ```sh
 linkctl record start meeting.mkv --video-copy
@@ -41,7 +41,7 @@ linkctl capture --video h264 --stdout | consumer
 
 Matroska is the default container. MP4 uses short fragments and is finalized on EOS. A successful single-file recording is atomically renamed from a same-directory temporary path; an abnormal interruption may leave a clearly named `.linkctl-part-*` recovery candidate. Segmented recordings use `name-00000.ext` siblings. Rolling mode deletes only older siblings generated for that explicit recording prefix.
 
-Matroska audio is encoded as FLAC; MP4 audio is encoded as AAC. The audio branch converts channel layout and sample rate, uses monotonic timestamps, and applies `audiorate` correction. The final report includes audio buffers/bytes, clipping and discontinuity counts, dropped/added samples, levels, and measured A/V offset and drift. `--audio-delay` applies a signed timestamp offset. `--gate`, `--compressor`, and `--limiter` enable fixed conservative host presets and are disabled by default.
+Matroska audio is encoded as FLAC; MP4 audio is encoded as AAC. The live video and audio paths have separate bounded two-second queues before the muxer so either source can advance without blocking the other. The audio branch converts channel layout and sample rate, uses monotonic timestamps, and applies `audiorate` correction. The final report includes audio buffers/bytes, clipping and discontinuity counts, dropped/added samples, levels, and measured A/V offset and drift from independently sampled stream clocks. `--audio-delay` applies a signed timestamp offset. `--gate`, `--compressor`, and `--limiter` enable fixed conservative host presets and are disabled by default.
 
 See [audio](audio.md) for source selection, standalone capture, monitoring, and gain/mute behavior.
 

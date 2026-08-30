@@ -27,6 +27,12 @@ Controls declare a typed codec, byte order, exact payload length, read-modify-wr
 
 An external directory can be loaded with `--profile-dir`. External profiles remain research input even if their document says `verified`; they cannot authorize `xu set`. Semantic writes require a matching, compiled-in, reviewed `verified` profile. The generic Link 2C Pro bootstrap profile remains read-only and decodes the hardware-verified firmware field for the landscape, Low resolution, and native portrait descriptors. A separate exact-firmware profile verifies its listed camera-native controls—including Auto Framing, image settings, audio pickup, regular Whiteboard, DeskView, gesture switches, 360p compatibility, and native portrait resolution—under their captured stream, timing, transfer, and restart preconditions. Unknown firmware continues to match only the generic bootstrap and cannot authorize the templates.
 
+Writable profile trust is intentionally a build-time decision, not an installed-file signature policy. A proposed
+writable mapping must enter the source tree with reviewed evidence and tests; compilation then embeds its exact bytes.
+Packages install `profiles.sha256`, while `release-manifest.json` binds the same source profile hashes to the source
+revision and attested release artifacts. Replacing or adding a TOML file after installation cannot expand write
+authority. There is no runtime trust-store enrollment path for third-party writable profiles.
+
 ## Experimental write boundary
 
 The `xu raw-set` command is present so scripts and help remain stable, but its transport is absent from normal builds. An operational raw write requires all of the following:

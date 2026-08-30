@@ -883,10 +883,7 @@ fn control_flag_names(flags: u32) -> Vec<String> {
         ),
         (bindings::V4L2_CTRL_FLAG_MODIFY_LAYOUT, "modify-layout"),
         (bindings::V4L2_CTRL_FLAG_DYNAMIC_ARRAY, "dynamic-array"),
-        (
-            bindings::V4L2_CTRL_FLAG_HAS_WHICH_MIN_MAX,
-            "has-which-min-max",
-        ),
+        (crate::V4L2_CTRL_FLAG_HAS_WHICH_MIN_MAX, "has-which-min-max"),
     ]
     .into_iter()
     .filter(|(bit, _)| flags & bit != 0)

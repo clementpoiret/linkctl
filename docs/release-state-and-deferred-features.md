@@ -4,9 +4,10 @@ This page is the maintainer handoff for the first `linkctl` release. It records 
 validated, what is deliberately not included, and where future development should resume. It is intentionally
 self-contained so that the release boundary does not depend on historical planning material.
 
-The status below was last validated on 2026-08-29 with an Insta360 Link 2C Pro running firmware
-`v0.2.9.8_build3`, Linux `7.2.1-cachyos-lto`, GStreamer 1.28, and v4l2loopback 0.15.4. Hardware-dependent claims
-apply to that tested combination unless a broader compatibility matrix says otherwise.
+The physical-camera status below was last validated on 2026-08-30 with an Insta360 Link 2C Pro running firmware
+`v0.2.9.8_build3`, Linux `7.2.1-cachyos-lto`, and GStreamer 1.28.5. Virtual-camera interoperability was last
+validated on 2026-08-29 with v4l2loopback 0.15.4. Hardware-dependent claims apply to those tested combinations unless
+a broader compatibility matrix says otherwise.
 
 ## Release boundary
 
@@ -37,7 +38,6 @@ tested host because the installed v4l2loopback module does not provide reliable 
 | `link-daemon` | One selected physical source, a serialized control actor, bounded graph requests, source ownership, recovery, snapshots, background recording, and named virtual-output branches. Implemented for one camera per daemon. |
 | `link-cli` | User-facing discovery, controls, native modes, media, audio, presets, diagnostics, firmware maintenance, daemon, pipeline, and virtual-camera commands with human, JSON, and JSON Lines output. Implemented for the exposed command set. |
 | `link-effects` | Reserved host transformation and computer-vision boundary. The crate and feature gate exist, but no host vision or AI implementation is present. |
-| `link-sdk-bridge` | Reserved isolated vendor SDK boundary. The crate and feature gate exist, but no Link-compatible SDK integration is present. |
 
 ### Camera and control support
 
@@ -55,7 +55,8 @@ Unknown firmware falls back to read-only or standard controls instead of inherit
 Direct video supports exact advertised tuples, H.264/MJPEG pass-through, JPEG/PNG and raw snapshots, Matroska and MP4
 recording, segmentation and rolling retention, disk guards, standard output, statistics, optional audio muxing, and
 optional typed RTP/UDP output. Audio supports camera and explicitly selected third-party sources without rewriting
-camera pickup controls.
+camera pickup controls. Foreground A/V recording isolates the live video and audio paths with bounded two-second queues
+before muxing and measures synchronization from independently sampled stream clocks.
 
 Configuration and presets are strict, versioned, and validated before mutation. Direct operations use per-device
 leases; `linkd` uses the same lease so a second physical capture stream is rejected rather than opened accidentally.
@@ -80,14 +81,33 @@ leaky downstream queues so they cannot accumulate unbounded latency. Direct snap
 route through the daemon when appropriate, while `--daemon never` keeps the direct path available.
 
 The supervisor detects source errors and device removal, retries discovery with bounded exponential backoff, and
-rebuilds the same runtime graph after the stable camera identity returns. Hardware validation confirmed recovery after
-an unplug/replug without restarting the daemon: the process retained its PID, found the same stable ID on a different
-video node, incremented its reconnect counter, and resumed frame delivery.
+rebuilds the same runtime graph after the stable camera identity returns. It preserves the active source tuple even if
+the camera returns on a different video node. If recording is active, the current file is finalized and recovery uses
+the next unused `<stem>.reconnect-NNN.<ext>` sibling instead of overwriting an existing segment.
 
 Graph and metrics commands expose the negotiated source and output contracts, queue bound and policy, processing
 backend, source and per-output frames, bytes, drops, recent latency, bitrate, reconnect count, and the latest error.
 The recent latency window contains 2,048 samples. The tested clean and transformed outputs measured approximately
 37–39 ms p95 processing latency, below the current 150 ms target.
+
+### Hardware endurance and recovery validation
+
+The 2026-08-30 physical-camera gate covered standard and verified vendor controls, restart-dependent modes, sustained
+capture, synchronization, and daemon recovery. Temporary control changes were read back and the camera was restored to
+its original MJPG 1920×1080 at 30 fps landscape and Standard-compatibility state. Low-resolution mode advertised
+MJPG, H.264, and YUYV 640×360 at 24/25/30 fps and produced a valid frame. Native portrait, with the camera physically
+rotated, advertised the expected 1080×1920 tuples and produced a valid portrait frame before landscape restoration.
+
+A 4K30 H.264 pass-through run completed 1,800.089 seconds with 53,928 frames, 17,974,829,692 bytes, and one sequence
+drop. A separate H.264 1920×1080 at 60 fps plus 48 kHz mono FLAC run completed 3,600.085 seconds with 215,931 video
+frames, one sequence drop, no QoS drops, and no video timestamp discontinuities. Audio reported no dropped samples or
+timestamp discontinuities. Measured A/V drift was 5.205 ms, below one 60 fps frame (16.667 ms), and the finalized file
+was independently probed as playable H.264/FLAC media with a 3,598.500-second container duration.
+
+Daemon snapshots advanced the running graph without interrupting frame delivery. Preview and recording unplug/replug
+tests retained the daemon process and stable camera ID, incremented the reconnect counter, preserved the active H.264
+1920×1080 at 60 fps tuple, and resumed frames. The recording test produced two independently playable files: the
+21.387-second original and a 27.944-second `.reconnect-001` sibling.
 
 ### Virtual-camera implementation
 

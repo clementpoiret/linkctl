@@ -717,7 +717,14 @@ pub fn record(request: &RecordRequest) -> Result<MediaRunReport, LinkError> {
         RecordContainer::Matroska => "matroskamux",
         RecordContainer::Mp4 => "mp4mux",
     };
-    let mut required = vec!["v4l2src", "capsfilter", parser_name, "splitmuxsink", muxer];
+    let mut required = vec![
+        "v4l2src",
+        "capsfilter",
+        "queue",
+        parser_name,
+        "splitmuxsink",
+        muxer,
+    ];
     if let Some(audio) = &request.audio {
         required.extend(audio_source_elements_required(audio));
         required.extend(["audioconvert", "audioresample", "audiorate", "identity"]);
@@ -740,6 +747,7 @@ pub fn record(request: &RecordRequest) -> Result<MediaRunReport, LinkError> {
 
     let pipeline = gst::Pipeline::new();
     let (source, filter) = source_elements(&request.source.node, &request.source.tuple)?;
+    let video_queue = recording_queue()?;
     let parser = gst::ElementFactory::make(parser_name)
         .build()
         .map_err(build_error)?;
@@ -762,8 +770,9 @@ pub fn record(request: &RecordRequest) -> Result<MediaRunReport, LinkError> {
             .property("muxer-properties", properties);
     }
     let sink = sink_builder.build().map_err(build_error)?;
-    pipeline_add(&pipeline, &[&source, &filter, &parser, &sink])?;
-    gst::Element::link_many([&source, &filter, &parser, &sink]).map_err(link_error)?;
+    pipeline_add(&pipeline, &[&source, &filter, &video_queue, &parser, &sink])?;
+    gst::Element::link_many([&source, &filter, &video_queue, &parser, &sink])
+        .map_err(link_error)?;
     let stats = attach_stats(&filter)?;
     let (audio_runtime, av_sync) = if let Some(audio) = &request.audio {
         let (audio_tail, audio_rate) = add_audio_front(&pipeline, audio)?;
@@ -780,7 +789,8 @@ pub fn record(request: &RecordRequest) -> Result<MediaRunReport, LinkError> {
         let encoder = gst::ElementFactory::make(encoder_name)
             .build()
             .map_err(build_error)?;
-        pipeline.add(&encoder).map_err(pipeline_error)?;
+        let audio_queue = recording_queue()?;
+        pipeline_add(&pipeline, &[&audio_queue, &encoder])?;
         if request.container == RecordContainer::Mp4 {
             let convert = gst::ElementFactory::make("audioconvert")
                 .build()
@@ -799,10 +809,10 @@ pub fn record(request: &RecordRequest) -> Result<MediaRunReport, LinkError> {
                 .build()
                 .map_err(build_error)?;
             pipeline_add(&pipeline, &[&convert, &filter])?;
-            gst::Element::link_many([&audio_tail, &convert, &filter, &encoder])
+            gst::Element::link_many([&audio_tail, &convert, &filter, &audio_queue, &encoder])
                 .map_err(link_error)?;
         } else {
-            audio_tail.link(&encoder).map_err(link_error)?;
+            gst::Element::link_many([&audio_tail, &audio_queue, &encoder]).map_err(link_error)?;
         }
         let encoder_pad = encoder
             .static_pad("src")
@@ -1261,6 +1271,15 @@ fn make(name: &'static str) -> Result<gst::Element, LinkError> {
     gst::ElementFactory::make(name).build().map_err(build_error)
 }
 
+fn recording_queue() -> Result<gst::Element, LinkError> {
+    gst::ElementFactory::make("queue")
+        .property("max-size-buffers", 0_u32)
+        .property("max-size-bytes", 0_u32)
+        .property("max-size-time", 2_000_000_000_u64)
+        .build()
+        .map_err(build_error)
+}
+
 fn queue_element() -> Result<gst::Element, LinkError> {
     let queue = gst::ElementFactory::make("queue")
         .property("max-size-buffers", SHARED_QUEUE_MAX_BUFFERS)
@@ -1683,18 +1702,54 @@ struct AudioStatsState {
 
 #[derive(Default)]
 struct AvSyncState {
-    video_clock_bias_ns: Option<i128>,
-    audio_clock_bias_ns: Option<i128>,
+    video: AvSyncSeries,
+    audio: AvSyncSeries,
     first_pair_time_ns: Option<u64>,
     measurement_first_time_ns: Option<u64>,
     last_pair_time_ns: Option<u64>,
     raw_initial_offset_ns: Option<i128>,
     raw_final_offset_ns: Option<i128>,
-    initial_offset_sum_ns: i128,
-    initial_offset_samples: u32,
-    recent_offsets_ns: VecDeque<i128>,
     raw_max_abs_offset_ns: u128,
     max_abs_offset_ns: u128,
+}
+
+#[derive(Default)]
+struct AvSyncSeries {
+    raw_first_bias_ns: Option<i128>,
+    raw_latest_bias_ns: Option<i128>,
+    initial_bias_sum_ns: i128,
+    initial_bias_samples: u32,
+    recent_biases_ns: VecDeque<i128>,
+}
+
+impl AvSyncSeries {
+    fn observe_raw(&mut self, bias: i128) {
+        self.raw_first_bias_ns.get_or_insert(bias);
+        self.raw_latest_bias_ns = Some(bias);
+    }
+
+    fn observe_measured(&mut self, bias: i128) {
+        if self.initial_bias_samples < AV_SYNC_WINDOW_SAMPLES as u32 {
+            self.initial_bias_sum_ns += bias;
+            self.initial_bias_samples += 1;
+        }
+        self.recent_biases_ns.push_back(bias);
+        if self.recent_biases_ns.len() > AV_SYNC_WINDOW_SAMPLES {
+            self.recent_biases_ns.pop_front();
+        }
+    }
+
+    fn initial_bias(&self) -> Option<i128> {
+        (self.initial_bias_samples > 0)
+            .then(|| self.initial_bias_sum_ns / i128::from(self.initial_bias_samples))
+    }
+
+    fn recent_bias(&self) -> Option<i128> {
+        (!self.recent_biases_ns.is_empty()).then(|| {
+            self.recent_biases_ns.iter().sum::<i128>()
+                / i128::try_from(self.recent_biases_ns.len()).unwrap_or(1)
+        })
+    }
 }
 
 const AV_SYNC_WARMUP_NS: u64 = 500_000_000;
@@ -2101,13 +2156,14 @@ fn attach_sync_pad(
             let elapsed = u64::try_from(epoch.elapsed().as_nanos()).unwrap_or(u64::MAX);
             let clock_bias = i128::from(pts.nseconds()) - i128::from(elapsed);
             if video {
-                state.video_clock_bias_ns = Some(clock_bias);
+                state.video.observe_raw(clock_bias);
             } else {
-                state.audio_clock_bias_ns = Some(clock_bias);
+                state.audio.observe_raw(clock_bias);
             }
-            if let (Some(video_bias), Some(audio_bias)) =
-                (state.video_clock_bias_ns, state.audio_clock_bias_ns)
-            {
+            if let (Some(video_bias), Some(audio_bias)) = (
+                state.video.raw_latest_bias_ns,
+                state.audio.raw_latest_bias_ns,
+            ) {
                 let offset = audio_bias - video_bias;
                 let first_pair = *state.first_pair_time_ns.get_or_insert(elapsed);
                 state.raw_initial_offset_ns.get_or_insert(offset);
@@ -2117,17 +2173,20 @@ fn attach_sync_pad(
                 if elapsed.saturating_sub(first_pair) < AV_SYNC_WARMUP_NS {
                     return gst::PadProbeReturn::Ok;
                 }
-                state.measurement_first_time_ns.get_or_insert(elapsed);
-                state.last_pair_time_ns = Some(elapsed);
-                if state.initial_offset_samples < AV_SYNC_WINDOW_SAMPLES as u32 {
-                    state.initial_offset_sum_ns += offset;
-                    state.initial_offset_samples += 1;
+                if video {
+                    state.video.observe_measured(clock_bias);
+                } else {
+                    state.audio.observe_measured(clock_bias);
                 }
-                state.recent_offsets_ns.push_back(offset);
-                if state.recent_offsets_ns.len() > AV_SYNC_WINDOW_SAMPLES {
-                    state.recent_offsets_ns.pop_front();
+                if let (Some(video_bias), Some(audio_bias)) =
+                    (state.video.recent_bias(), state.audio.recent_bias())
+                {
+                    let averaged_offset = audio_bias - video_bias;
+                    state.measurement_first_time_ns.get_or_insert(elapsed);
+                    state.last_pair_time_ns = Some(elapsed);
+                    state.max_abs_offset_ns =
+                        state.max_abs_offset_ns.max(averaged_offset.unsigned_abs());
                 }
-                state.max_abs_offset_ns = state.max_abs_offset_ns.max(offset.unsigned_abs());
             }
         }
         gst::PadProbeReturn::Ok
@@ -2139,17 +2198,23 @@ fn finish_av_sync(state: &Arc<Mutex<AvSyncState>>) -> AvSyncStats {
     let state = state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let measured = state.initial_offset_samples > 0 && !state.recent_offsets_ns.is_empty();
-    let initial = if measured {
-        state.initial_offset_sum_ns / i128::from(state.initial_offset_samples)
-    } else {
-        state.raw_initial_offset_ns.unwrap_or_default()
-    };
-    let final_offset = if measured {
-        state.recent_offsets_ns.iter().sum::<i128>() / state.recent_offsets_ns.len() as i128
-    } else {
-        state.raw_final_offset_ns.unwrap_or(initial)
-    };
+    let measured_initial = state
+        .audio
+        .initial_bias()
+        .zip(state.video.initial_bias())
+        .map(|(audio, video)| audio - video);
+    let measured_final = state
+        .audio
+        .recent_bias()
+        .zip(state.video.recent_bias())
+        .map(|(audio, video)| audio - video);
+    let measured = measured_initial.is_some() && measured_final.is_some();
+    let initial = measured_initial
+        .or(state.raw_initial_offset_ns)
+        .unwrap_or_default();
+    let final_offset = measured_final
+        .or(state.raw_final_offset_ns)
+        .unwrap_or(initial);
     let drift = final_offset - initial;
     let elapsed = state
         .last_pair_time_ns
@@ -2892,9 +2957,9 @@ mod tests {
     use link_core::audio::AudioProcessing;
 
     use super::{
-        AvSyncState, SharedCrop, SharedFit, SharedOutput, SharedOutputTelemetry, SharedRotation,
-        audio_processing_elements, crop_pixels, finish_av_sync, make, parse_byte_size,
-        set_enum_property, shared_output_metrics, validate_shared_contracts,
+        AvSyncSeries, AvSyncState, SharedCrop, SharedFit, SharedOutput, SharedOutputTelemetry,
+        SharedRotation, audio_processing_elements, crop_pixels, finish_av_sync, make,
+        parse_byte_size, set_enum_property, shared_output_metrics, validate_shared_contracts,
     };
     use link_core::{media::VideoTuple, probe::Rational};
 
@@ -2934,6 +2999,31 @@ mod tests {
         assert!((report.drift_ms - 1.0).abs() < f64::EPSILON);
         assert!((report.drift_ppm - 1_000.0).abs() < f64::EPSILON);
         assert!(report.corrected);
+    }
+
+    #[test]
+    fn sync_report_averages_each_stream_clock_independently() {
+        let mut video = AvSyncSeries::default();
+        let mut audio = AvSyncSeries::default();
+        for _ in 0..64 {
+            video.observe_measured(1_000_000);
+        }
+        for _ in 0..48 {
+            audio.observe_measured(6_000_000);
+        }
+        let state = Arc::new(Mutex::new(AvSyncState {
+            video,
+            audio,
+            measurement_first_time_ns: Some(0),
+            last_pair_time_ns: Some(1_000_000_000),
+            max_abs_offset_ns: 5_000_000,
+            ..AvSyncState::default()
+        }));
+        let report = finish_av_sync(&state);
+        assert!((report.initial_offset_ms - 5.0).abs() < f64::EPSILON);
+        assert!((report.final_offset_ms - 5.0).abs() < f64::EPSILON);
+        assert!(report.drift_ms.abs() < f64::EPSILON);
+        assert!(report.drift_ppm.abs() < f64::EPSILON);
     }
 
     fn shared_output(name: &str) -> SharedOutput {

@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 repository.workspace = true
 publish.workspace = true
+license.workspace = true
+rust-version.workspace = true
 
 [[bin]]
 name = "linkd"
@@ -11,13 +13,12 @@ path = "src/main.rs"
 required-features = ["daemon", "gstreamer"]
 
 [features]
-default = ["daemon", "gstreamer"]
+default = ["daemon", "gstreamer", "pipewire"]
 daemon = ["dep:link-ipc"]
 gstreamer = ["dep:link-media", "link-media/gstreamer"]
 pipewire = ["dep:link-audio", "link-audio/pipewire"]
 host-ai = ["dep:link-effects", "link-effects/host-ai"]
 network = ["dep:link-ipc", "dep:link-media", "link-ipc/network", "link-media/network"]
-sdk = ["dep:link-sdk-bridge", "link-sdk-bridge/sdk"]
 
 [dependencies]
 clap.workspace = true
@@ -28,8 +29,7 @@ link-core.workspace = true
 link-effects = { workspace = true, optional = true }
 link-ipc = { workspace = true, optional = true }
 link-media = { workspace = true, optional = true }
-link-linux = { path = "../link-linux", version = "=0.1.0" }
-link-sdk-bridge = { workspace = true, optional = true }
+link-linux = { path = "../link-linux", version = "=1.0.0" }
 link-v4l2.workspace = true
 rustix.workspace = true
 serde.workspace = true

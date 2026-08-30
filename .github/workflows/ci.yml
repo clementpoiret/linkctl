@@ -34,6 +34,20 @@ jobs:
         run: devenv shell -- cargo check --workspace --all-targets --all-features --locked
       - name: Dependency policy
         run: devenv shell -- cargo deny --all-features check
+      - name: Release asset validation
+        run: |
+          set -euo pipefail
+          devenv shell -- bash -c \
+            'find packaging -type f -name "*.sh" -print0 | xargs -0 shellcheck'
+          devenv shell -- actionlint
+          devenv shell -- cargo build --locked --package link-daemon --bin linkd
+          service=$(mktemp --suffix=.service)
+          trap 'rm -f -- "$service"' EXIT
+          sed "s|^ExecStart=/usr/bin/linkd$|ExecStart=$PWD/target/debug/linkd|" \
+            packaging/systemd/linkd.service >"$service"
+          devenv shell -- systemd-analyze verify --man=no "$service"
+          devenv shell -- udevadm verify packaging/udev/70-linkctl.rules
+          nix flake check --no-build --all-systems
 
   xu-abi-arm64:
     runs-on: ubuntu-24.04-arm

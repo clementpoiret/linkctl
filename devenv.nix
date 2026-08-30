@@ -7,19 +7,27 @@
   env.V4L2R_VIDEODEV2_H_PATH = "${pkgs.linuxHeaders}/include";
 
   packages = [
+    pkgs.actionlint
     pkgs.alsa-lib
     pkgs.alsa-utils
+    pkgs.cargo-audit
+    pkgs.cargo-cyclonedx
     pkgs.cargo-deny
+    pkgs.dpkg
     pkgs.glibc.dev
     pkgs.gst_all_1.gstreamer
     pkgs.gst_all_1.gst-plugins-base
     pkgs.gst_all_1.gst-plugins-good
     pkgs.gst_all_1.gst-plugins-bad
     pkgs.gst_all_1.gst-libav
+    pkgs.help2man
+    pkgs.jq
     pkgs.libclang
     pkgs.linuxHeaders
     pkgs.pkg-config
     pkgs.pipewire
+    pkgs.rpm
+    pkgs.shellcheck
     pkgs.systemd
     pkgs.usbutils
     pkgs.v4l-utils

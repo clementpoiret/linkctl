@@ -503,6 +503,7 @@ mod tests {
 
     #[test]
     fn rejects_incompatible_protocol() {
+        assert_eq!(PROTOCOL_VERSION, 1);
         let error = validate_protocol(PROTOCOL_VERSION + 1).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::DaemonUnavailable);
         assert_eq!(error.process_exit().code(), 12);

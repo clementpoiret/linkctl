@@ -1,0 +1,382 @@
+name: Release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact release tag, including the v prefix
+        required: true
+        default: v1.0.0
+        type: string
+      confirmation:
+        description: Enter release-v1.0.0 for version v1.0.0
+        required: true
+        type: string
+      publish:
+        description: Attest and upload to an existing exact tag after environment approval
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.version }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      revision: ${{ steps.metadata.outputs.revision }}
+      source_date_epoch: ${{ steps.metadata.outputs.source_date_epoch }}
+      cargo_version: ${{ steps.metadata.outputs.cargo_version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Validate explicit release selection
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          PUBLISH: ${{ inputs.publish }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          test "$CONFIRMATION" = "release-$VERSION"
+          test "$VERSION" = "v1.0.0"
+          if [[ $PUBLISH == true ]]; then
+            test "$GITHUB_REF" = "refs/tags/$VERSION"
+          fi
+      - id: metadata
+        name: Resolve immutable build metadata
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          cargo_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          test "$VERSION" = "v$cargo_version"
+          {
+            echo "revision=$(git rev-parse HEAD)"
+            echo "source_date_epoch=$(git show -s --format=%ct HEAD)"
+            echo "cargo_version=$cargo_version"
+          } >>"$GITHUB_OUTPUT"
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v17
+        with:
+          name: devenv
+      - name: Install devenv
+        run: nix profile add nixpkgs#devenv
+      - name: Release checks
+        run: |
+          set -euo pipefail
+          devenv shell -- cargo fmt --all -- --check
+          devenv shell -- cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          devenv shell -- cargo test --workspace --all-features --locked
+          devenv shell -- cargo check --workspace --all-targets --no-default-features --locked
+          devenv shell -- cargo deny --all-features check
+          devenv shell -- cargo audit
+      - name: Source archive and SBOMs
+        env:
+          LINKCTL_ARCHIVE_REVISION: HEAD
+          LINKCTL_SOURCE_REVISION: ${{ steps.metadata.outputs.revision }}
+          SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.source_date_epoch }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-inputs
+          devenv shell -- packaging/release/source-archive.sh . release-inputs
+          devenv shell -- packaging/release/sbom.sh . release-inputs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-inputs
+          path: release-inputs/*
+          if-no-files-found: error
+
+  debian:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            architecture: amd64
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    container: debian:13
+    env:
+      LINKCTL_SOURCE_REVISION: ${{ needs.prepare.outputs.revision }}
+      SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-inputs
+          path: release-inputs
+      - name: Install native build dependencies
+        run: |
+          set -euo pipefail
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential ca-certificates clang curl dpkg-dev gstreamer1.0-libav \
+            gstreamer1.0-plugins-bad gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            help2man libasound2-dev libclang-dev libgstreamer-plugins-base1.0-dev \
+            libgstreamer1.0-dev libpipewire-0.3-dev libudev-dev lintian pkg-config \
+            systemd systemd-dev udev xz-utils
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain 1.97.1
+          echo /root/.cargo/bin >>"$GITHUB_PATH"
+      - name: Build Debian package
+        run: |
+          set -euo pipefail
+          rustc --version | grep -F '1.97.1'
+          mkdir -p dist
+          packaging/debian/build-package.sh . dist
+      - name: Lint, install, smoke-test, and remove
+        run: |
+          set -euo pipefail
+          package=$(find dist -maxdepth 1 -name '*.deb' -print -quit)
+          test "$(dpkg-deb -f "$package" Architecture)" = "${{ matrix.architecture }}"
+          lintian --fail-on error "$package"
+          dpkg -i "$package"
+          linkctl --version | grep -F '1.0.0'
+          linkctl --format json device list >/dev/null
+          linkd --help >/dev/null
+          systemd-analyze verify /usr/lib/systemd/user/linkd.service
+          udevadm verify /usr/lib/udev/rules.d/70-linkctl.rules
+          dpkg -r linkctl
+          test ! -e /usr/bin/linkctl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-debian-${{ matrix.architecture }}
+          path: dist/*.deb
+          if-no-files-found: error
+
+  fedora:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            architecture: x86_64
+          - runner: ubuntu-24.04-arm
+            architecture: aarch64
+    runs-on: ${{ matrix.runner }}
+    container: fedora:44
+    env:
+      LINKCTL_SOURCE_REVISION: ${{ needs.prepare.outputs.revision }}
+      SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-inputs
+          path: release-inputs
+      - name: Install native build dependencies
+        run: |
+          set -euo pipefail
+          dnf install -y \
+            alsa-lib-devel cargo clang-devel curl findutils gcc gcc-c++ \
+            gstreamer1-devel gstreamer1-plugin-libav gstreamer1-plugins-bad-free \
+            gstreamer1-plugins-base gstreamer1-plugins-base-devel \
+            gstreamer1-plugins-good help2man make man-db pipewire-devel \
+            pkgconf-pkg-config rpm-build rpmlint rust systemd-devel systemd-udev \
+            util-linux
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain 1.97.1
+          echo /root/.cargo/bin >>"$GITHUB_PATH"
+      - name: Build RPM package
+        run: |
+          set -euo pipefail
+          rustc --version | grep -F '1.97.1'
+          mkdir -p dist
+          packaging/rpm/build-package.sh . release-inputs/linkctl-1.0.0.tar.gz dist
+      - name: Lint, install, smoke-test, and remove
+        run: |
+          set -euo pipefail
+          package=$(find dist -maxdepth 1 -name '*.rpm' -print -quit)
+          test "$(rpm -qp --qf '%{ARCH}' "$package")" = "${{ matrix.architecture }}"
+          rpmlint "$package"
+          rpm -ivh "$package"
+          linkctl --version | grep -F '1.0.0'
+          linkctl --format json device list >/dev/null
+          linkd --help >/dev/null
+          systemd-analyze verify /usr/lib/systemd/user/linkd.service
+          udevadm verify /usr/lib/udev/rules.d/70-linkctl.rules
+          rpm -e linkctl
+          test ! -e /usr/bin/linkctl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-fedora-${{ matrix.architecture }}
+          path: dist/*.rpm
+          if-no-files-found: error
+
+  arch:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            container: archlinux:base-devel
+            architecture: x86_64
+          - runner: ubuntu-24.04-arm
+            container: agners/archlinuxarm:latest
+            architecture: aarch64
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    env:
+      LINKCTL_SOURCE_REVISION: ${{ needs.prepare.outputs.revision }}
+      SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-inputs
+          path: release-inputs
+      - name: Install native build dependencies
+        run: |
+          set -euo pipefail
+          pacman -Syu --needed --noconfirm \
+            alsa-lib base-devel clang gst-libav gst-plugins-bad gst-plugins-base \
+            gst-plugins-good gstreamer help2man libpipewire namcap pkgconf rustup systemd
+          useradd --create-home builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          runuser -u builder -- rustup toolchain install 1.97.1 --profile minimal
+          runuser -u builder -- rustup default 1.97.1
+      - name: Build Arch package
+        run: |
+          set -euo pipefail
+          install -d -o builder -g builder dist
+          runuser -u builder -- env \
+            LINKCTL_SOURCE_REVISION="$LINKCTL_SOURCE_REVISION" \
+            SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+            packaging/arch/build-package.sh . release-inputs/linkctl-1.0.0.tar.gz dist
+      - name: Lint, install, smoke-test, and remove
+        run: |
+          set -euo pipefail
+          package=$(find dist -maxdepth 1 -name '*.pkg.tar.zst' -print -quit)
+          bsdtar -xOf "$package" .PKGINFO | grep -F "arch = ${{ matrix.architecture }}"
+          bsdtar -tf "$package" | grep -Fx usr/share/man/man1/linkctl.1.gz
+          bsdtar -tf "$package" | grep -Fx usr/share/man/man1/linkd.1.gz
+          namcap "$package"
+          pacman -U --noconfirm "$package"
+          linkctl --version | grep -F '1.0.0'
+          linkctl --format json device list >/dev/null
+          linkd --help >/dev/null
+          systemd-analyze verify --man=no /usr/lib/systemd/user/linkd.service
+          udevadm verify /usr/lib/udev/rules.d/70-linkctl.rules
+          pacman -R --noconfirm linkctl
+          test ! -e /usr/bin/linkctl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-arch-${{ matrix.architecture }}
+          path: dist/*.pkg.tar.zst
+          if-no-files-found: error
+
+  nixos:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            system: x86_64-linux
+          - runner: ubuntu-24.04-arm
+            system: aarch64-linux
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v31
+      - name: Build and inspect Nix package
+        run: |
+          set -euo pipefail
+          nix flake check --print-build-logs
+          nix build .#linkctl --print-build-logs
+          ./result/bin/linkctl --version | grep -F '1.0.0'
+          ./result/bin/linkd --help >/dev/null
+          grep -F "ExecStart=$(readlink -f result)/bin/linkd" \
+            result/lib/systemd/user/linkd.service
+          mkdir -p dist
+          nix path-info --json --closure-size .#linkctl \
+            >"dist/nix-${{ matrix.system }}.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-nixos-${{ matrix.system }}
+          path: dist/*.json
+          if-no-files-found: error
+
+  assemble:
+    needs: [prepare, debian, fedora, arch, nixos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Generate immutable manifest and checksums
+        env:
+          LINKCTL_SOURCE_REVISION: ${{ needs.prepare.outputs.revision }}
+          SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}
+        run: |
+          set -euo pipefail
+          packaging/release/manifest.sh . dist
+          (cd dist && sha256sum --check SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linkctl-${{ inputs.version }}-candidate
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    if: ${{ inputs.publish }}
+    needs: [prepare, assemble]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Confirm the existing exact tag
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/tags/$VERSION"
+          test "$(git rev-list -n 1 "$VERSION")" = "$GITHUB_SHA"
+      - uses: actions/download-artifact@v4
+        with:
+          name: linkctl-${{ inputs.version }}-candidate
+          path: release
+      - name: Attest immutable artifacts
+        uses: actions/attest@v4
+        with:
+          subject-path: release/*
+      - name: Create the GitHub release and upload artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$VERSION" release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "linkctl ${VERSION#v}" \
+            --notes-file docs/releases/v1.0.0.md

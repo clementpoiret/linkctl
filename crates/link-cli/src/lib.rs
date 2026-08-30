@@ -1342,6 +1342,15 @@ pub fn run(arguments: Vec<OsString>) -> u8 {
         Ok(config) => config,
         Err(error) => return emit_link_error(format_hint, &error),
     };
+    let command_id = command_identifier(cli.command.as_ref());
+    let binary_stdout = uses_binary_stdout(cli.command.as_ref());
+    if let Err(error) = validate_invocation_before_discovery(&config, &cli) {
+        return if binary_stdout {
+            emit_command_error_to_stderr(config.output, command_id, None, &error)
+        } else {
+            emit_command_error(config.output, command_id, None, &error)
+        };
+    }
     let config = match load_selected_device_config(&loader, config, cli.command.as_ref()) {
         Ok(config) => config,
         Err(error) => return emit_link_error(format_hint, &error),
@@ -1360,8 +1369,6 @@ pub fn run(arguments: Vec<OsString>) -> u8 {
         return emit_link_error(config.output, &error);
     }
 
-    let command_id = command_identifier(cli.command.as_ref());
-    let binary_stdout = uses_binary_stdout(cli.command.as_ref());
     let maintenance_check = ensure_command_allowed_in_maintenance(&config, cli.command.as_ref());
     let result = maintenance_check.and_then(|()| match cli.command {
         Some(Command::Device {
@@ -1440,6 +1447,52 @@ pub fn run(arguments: Vec<OsString>) -> u8 {
             emit_command_error_to_stderr(config.output, command_id, None, &error)
         }
         Err(error) => emit_command_error(config.output, command_id, None, &error),
+    }
+}
+
+fn validate_invocation_before_discovery(config: &Config, cli: &Cli) -> Result<(), LinkError> {
+    if cli.unsafe_xu
+        && !matches!(
+            cli.command.as_ref(),
+            Some(Command::Xu {
+                command: XuCommand::RawSet { .. }
+            })
+        )
+    {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "--unsafe-xu is valid only with xu raw-set",
+        ));
+    }
+
+    match cli.command.as_ref() {
+        Some(Command::Control { .. }) => validate_standard_backend_choice(cli.backend),
+        Some(Command::Xu {
+            command: XuCommand::RawSet { hex, .. },
+        }) => {
+            SafetyPolicy::new(config.safety.clone()).authorize(Operation::RawXuWrite {
+                feature_enabled: cfg!(feature = "research"),
+                acknowledged: cli.unsafe_xu,
+                profile: link_profiles::ProfileState::Experimental,
+            })?;
+            link_uvc_xu::parse_hex(hex)?;
+            Ok(())
+        }
+        #[cfg(feature = "gstreamer")]
+        Some(Command::Audio {
+            command: AudioCommand::Capture(arguments),
+        }) => validate_audio_capture_target(arguments).map(|_| ()),
+        #[cfg(feature = "gstreamer")]
+        Some(Command::Record {
+            command: RecordCommand::Start { max_size, .. },
+        }) => {
+            max_size
+                .as_deref()
+                .map(link_media::parse_byte_size)
+                .transpose()?;
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 
@@ -1871,6 +1924,7 @@ fn build_probe(
         HostReport {
             kernel_release: link_linux::kernel_release(),
             architecture: std::env::consts::ARCH.into(),
+            source_revision: link_core::source_revision().map(str::to_owned),
         },
         device.list_entry(include_serial, profile_id),
         profile,
@@ -2027,6 +2081,10 @@ fn ensure_standard_backend(
     if config.daemon == DaemonMode::Always {
         daemon_client(config)?.request(link_ipc::Operation::Status)?;
     }
+    validate_standard_backend_choice(backend)
+}
+
+fn validate_standard_backend_choice(backend: Option<BackendChoice>) -> Result<(), LinkError> {
     match backend.unwrap_or(BackendChoice::Auto) {
         BackendChoice::Auto | BackendChoice::Standard => Ok(()),
         BackendChoice::Vendor | BackendChoice::Host => Err(LinkError::new(
@@ -5278,22 +5336,7 @@ fn run_audio_capture(
     arguments: AudioCaptureArgs,
     dry_run: bool,
 ) -> Result<(), LinkError> {
-    match (&arguments.output, arguments.stdout) {
-        (Some(_), true) => {
-            return Err(LinkError::new(
-                ErrorKind::InvalidInvocation,
-                "audio capture OUTPUT cannot be combined with --stdout",
-            ));
-        }
-        (None, false) => {
-            return Err(LinkError::new(
-                ErrorKind::InvalidInvocation,
-                "audio capture requires OUTPUT or --stdout",
-            ));
-        }
-        _ => {}
-    }
-    let encoding = audio_encoding(arguments.audio_format, arguments.output.as_deref())?;
+    let encoding = validate_audio_capture_target(&arguments)?;
     let lease_key = audio_operation_lease_key(config, &arguments.stream.source)?;
     let source = resolved_audio_request(
         config,
@@ -5326,6 +5369,28 @@ fn run_audio_capture(
     } else {
         emit_success(config.output, "audio.capture", None, &report)
     }
+}
+
+#[cfg(feature = "gstreamer")]
+fn validate_audio_capture_target(
+    arguments: &AudioCaptureArgs,
+) -> Result<link_media::AudioEncoding, LinkError> {
+    match (&arguments.output, arguments.stdout) {
+        (Some(_), true) => {
+            return Err(LinkError::new(
+                ErrorKind::InvalidInvocation,
+                "audio capture OUTPUT cannot be combined with --stdout",
+            ));
+        }
+        (None, false) => {
+            return Err(LinkError::new(
+                ErrorKind::InvalidInvocation,
+                "audio capture requires OUTPUT or --stdout",
+            ));
+        }
+        _ => {}
+    }
+    audio_encoding(arguments.audio_format, arguments.output.as_deref())
 }
 
 #[cfg(feature = "gstreamer")]
@@ -10987,11 +11052,18 @@ fn run_doctor(config: &Config, bundle: Option<&Path>) -> Result<(), LinkError> {
     let healthy = checks
         .iter()
         .all(|check| check.status != DoctorStatus::Fail);
-    let report = DoctorReport { healthy, checks };
+    let report = DoctorReport {
+        healthy,
+        source_revision: link_core::source_revision().map(str::to_owned),
+        checks,
+    };
     if let Some(destination) = bundle {
         write_doctor_bundle(destination, &report, &devices, &catalog)?;
     }
     if config.output == OutputFormat::Human {
+        if let Some(revision) = &report.source_revision {
+            println!("Build: {} ({revision})", env!("CARGO_PKG_VERSION"));
+        }
         for check in &report.checks {
             println!("{:?}\t{}\t{}", check.status, check.name, check.message);
         }
@@ -11056,6 +11128,7 @@ fn write_doctor_bundle(
         "host.json",
         &json!({
             "application_version": env!("CARGO_PKG_VERSION"),
+            "source_revision": link_core::source_revision(),
             "architecture": std::env::consts::ARCH,
             "kernel_release": link_linux::kernel_release(),
             "module_versions": {
@@ -11071,6 +11144,7 @@ fn write_doctor_bundle(
         "runtime.json",
         &json!({
             "cli_version": env!("CARGO_PKG_VERSION"),
+            "source_revision": link_core::source_revision(),
             "daemon_version": null,
             "media_pipeline_graph": null,
             "test_results": null,

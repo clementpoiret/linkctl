@@ -19,3 +19,9 @@ pub use error::{ErrorKind, LinkError, ProcessExit};
 
 /// Current machine-readable output schema.
 pub const SCHEMA_VERSION: u32 = 1;
+
+/// Source revision embedded by release builds, when available.
+#[must_use]
+pub fn source_revision() -> Option<&'static str> {
+    option_env!("LINKCTL_SOURCE_REVISION").filter(|revision| !revision.is_empty())
+}

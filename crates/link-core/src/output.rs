@@ -95,6 +95,7 @@ mod tests {
 
     #[test]
     fn success_envelope_keeps_all_top_level_fields() {
+        assert_eq!(crate::SCHEMA_VERSION, 1);
         let value = serde_json::to_value(Envelope::success("test", None, json!({"value": 1})))
             .expect("envelope should serialize");
 

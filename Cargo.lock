@@ -800,7 +800,7 @@ dependencies = [
 
 [[package]]
 name = "link-audio"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "alsa",
  "link-core",
@@ -811,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "link-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "clap",
  "clap_complete",
@@ -824,7 +824,6 @@ dependencies = [
  "link-linux",
  "link-media",
  "link-profiles",
- "link-sdk-bridge",
  "link-uvc-xu",
  "link-v4l2",
  "serde",
@@ -837,7 +836,7 @@ dependencies = [
 
 [[package]]
 name = "link-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "humantime",
  "rustix",
@@ -852,7 +851,7 @@ dependencies = [
 
 [[package]]
 name = "link-daemon"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "clap",
  "ctrlc",
@@ -863,7 +862,6 @@ dependencies = [
  "link-ipc",
  "link-linux",
  "link-media",
- "link-sdk-bridge",
  "link-v4l2",
  "rustix",
  "serde",
@@ -874,14 +872,14 @@ dependencies = [
 
 [[package]]
 name = "link-effects"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "link-core",
 ]
 
 [[package]]
 name = "link-ipc"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "link-core",
  "rustix",
@@ -891,7 +889,7 @@ dependencies = [
 
 [[package]]
 name = "link-linux"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "link-core",
  "rustix",
@@ -901,7 +899,7 @@ dependencies = [
 
 [[package]]
 name = "link-media"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ctrlc",
  "gstreamer",
@@ -914,7 +912,7 @@ dependencies = [
 
 [[package]]
 name = "link-profiles"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "link-core",
  "serde",
@@ -924,15 +922,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "link-sdk-bridge"
-version = "0.1.0"
-dependencies = [
- "link-core",
-]
-
-[[package]]
 name = "link-testkit"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "link-core",
  "link-profiles",
@@ -943,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "link-uvc-xu"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "base64",
  "link-core",
@@ -957,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "link-v4l2"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "link-core",
  "rustix",

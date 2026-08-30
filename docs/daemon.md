@@ -11,14 +11,22 @@ linkctl pipeline graph
 linkctl pipeline metrics
 ```
 
-For a user service, install [the example unit](../packaging/systemd/linkd.service) as `~/.config/systemd/user/linkd.service`, ensure `linkd` is available on the service PATH, then run:
+Native packages install [the user unit](../packaging/systemd/linkd.service) with an absolute executable path. The Nix
+package renders the same unit with its immutable store path. Installation never enables or starts it; opt in with:
 
 ```sh
 systemctl --user daemon-reload
 systemctl --user enable --now linkd.service
 ```
 
-`linkctl daemon reload` rebuilds the graph from the current camera and active output contracts. `daemon shutdown` gracefully finalizes an active recording, releases the physical source, and does not recreate runtime-only virtual outputs on the next start. `pipeline status`, `graph`, and `metrics` report source/output caps, branch queue bounds and policy, processing backend, frame and byte counters, per-output frames and queue drops, recent latency, bitrate, reconnect count, and the latest recovery error. Latency is measured at each output sink from GStreamer running time and buffer presentation time; `p95_latency_us` covers the most recent 2,048 delivered frames, and the clean 1080p30 release target is below `150000`. The supervisor retries a removed camera with bounded exponential backoff and rebuilds the same runtime branches when it reappears.
+The unit preserves direct camera, PipeWire, ALSA, udev, and home configuration access while applying an owner-only
+umask, an empty capability set, `NoNewPrivileges`, a read-only system tree, private temporary storage, kernel/control
+group protections, namespace restrictions, and only Unix/netlink address families. It deliberately does not use
+`PrivateDevices`, `ProtectHome`, or executable-memory denial because those settings would block supported device,
+configuration, or native multimedia paths. Source-tree users should run `linkd` directly or install a unit whose
+`ExecStart` is the real absolute binary path; service PATH lookup is not used.
+
+`linkctl daemon reload` rebuilds the graph from the current camera and active output contracts. `daemon shutdown` gracefully finalizes an active recording, releases the physical source, and does not recreate runtime-only virtual outputs on the next start. `pipeline status`, `graph`, and `metrics` report source/output caps, branch queue bounds and policy, processing backend, frame and byte counters, per-output frames and queue drops, recent latency, bitrate, reconnect count, and the latest recovery error. Latency is measured at each output sink from GStreamer running time and buffer presentation time; `p95_latency_us` covers the most recent 2,048 delivered frames, and the clean 1080p30 release target is below `150000`. The supervisor retries a removed camera with bounded exponential backoff and rebuilds the same runtime branches when it reappears, preserving the active source tuple when the same stable camera returns on a different video node.
 
 ## Routing and ownership
 
@@ -32,7 +40,7 @@ linkctl record status
 linkctl record stop
 ```
 
-The shared recording branch currently supports one video-only Matroska or MP4 file without segmentation or duration/size limits. Use `--daemon never` for the richer blocking direct recorder. Snapshots briefly open dormant JPEG or PNG encoder branches and pull one frame without interrupting virtual-camera consumers; keeping their valves closed between requests avoids continuous encoder cost. Raw compressed snapshots remain direct-only.
+The shared recording branch currently supports one video-only Matroska or MP4 recording without user-configured segmentation or duration/size limits. If source recovery occurs while it is active, the daemon finalizes the current file and resumes into the next unused `<stem>.reconnect-NNN.<ext>` sibling; it never reopens or overwrites an earlier segment. Use `--daemon never` for the richer blocking direct recorder. Snapshots briefly open dormant JPEG or PNG encoder branches and pull one frame without interrupting virtual-camera consumers; keeping their valves closed between requests avoids continuous encoder cost. Raw compressed snapshots remain direct-only.
 
 Generic standard-control list/get/set/reset operations are routed through the daemon's serialized actor when it owns the selected camera. `control watch` remains a direct kernel event subscription, and `--daemon never` keeps the existing direct transaction path. Stream-dependent verified vendor reads and writes reuse the daemon's active physical stream while retaining their existing serialized control transaction; they do not create a second `v4l2src`.
 

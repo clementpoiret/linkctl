@@ -2,6 +2,31 @@
 
 `linkctl` is a Linux command-line controller for the fixed-mount Insta360 Link 2C Pro. The project is capability-driven: it uses standard Linux camera and audio interfaces first, verified device profiles second, and explicitly labelled host-side processing where appropriate.
 
+The 1.0 standard build enables the local daemon, GStreamer, PipeWire, and ALSA. It excludes research writes, network
+listeners, and unfinished host-processing features. Machine output and local daemon IPC are frozen at version 1.
+
+## Installation
+
+Release artifacts contain one `linkctl` package with `linkctl`, `linkd`, a hardened systemd user unit, a narrow udev
+rule, manuals, licenses, profile checksums, and Bash/Zsh/Fish/Elvish completions. Native packages target Debian 13,
+Fedora 44, Arch Linux, Arch Linux ARM, and NixOS 26.05 on x86-64 and AArch64 where the distribution supports that
+architecture. Packages do not enable or start `linkd` automatically.
+
+Install the package produced for the running distribution, then reload the device rule and opt in to the daemon if
+desired:
+
+```sh
+sudo udevadm control --reload-rules
+sudo udevadm trigger --subsystem-match=video4linux
+systemctl --user enable --now linkd.service
+linkctl doctor
+```
+
+Normal operation is unprivileged. Administrative access is needed only to install/remove a native package and reload
+udev rules. Nix users can build the pinned package with `nix build .#linkctl` (the default package is also `linkctl`).
+Before installing a downloaded artifact, verify `SHA256SUMS` and its GitHub artifact attestation as described in the
+[release runbook](docs/release-runbook.md).
+
 The CLI discovers cameras by stable USB identity, reports their live capabilities, controls standard V4L2 image settings, and captures media through exact runtime-enumerated video tuples:
 
 ```sh
@@ -54,9 +79,9 @@ linkctl xu diff baseline.json after.json
 
 Every mutation supports `--dry-run`, validates values, and verifies its declared outcome. Ordinary controls read the previous value and attempt rollback after a partial failure; restart-dependent compatibility changes instead wait for the camera to disappear and return with an exact profile match and post-restart state. Automatic/manual prerequisites are applied by default; `control set --raw` bypasses only that semantic gating. Pan and tilt remain read-only raw inventory even if a driver advertises them.
 
-Use `device watch --format jsonl` for hotplug events and `control watch --format jsonl` for control changes. While `linkd` owns the selected camera, generic standard-control list/get/set/reset operations use its serialized control actor; `--daemon never` selects the direct path. `linkctl doctor` performs read-only configuration, permission, profile, control, and recovery-journal checks; `doctor --bundle report.tar.zst` creates a private redacted diagnostic archive. See the [current release state and deferred host features](docs/release-state-and-deferred-features.md), [camera-native capabilities](docs/camera-native.md), [configuration and presets](docs/presets.md), [audio](docs/audio.md), [video capture and recording](docs/media.md), [the stream daemon and virtual cameras](docs/daemon.md), [firmware maintenance](docs/firmware.md), [standard controls](docs/controls.md), [safe XU research](docs/xu-research.md), [permissions and udev setup](docs/permissions.md), and the [hardware probe guide](docs/hardware-probe.md).
+Use `device watch --format jsonl` for hotplug events and `control watch --format jsonl` for control changes. While `linkd` owns the selected camera, generic standard-control list/get/set/reset operations use its serialized control actor; `--daemon never` selects the direct path. `linkctl doctor` performs read-only configuration, permission, profile, control, and recovery-journal checks; `doctor --bundle report.tar.zst` creates a private redacted diagnostic archive. See the [compatibility matrix](docs/compatibility.md), [specification coverage](docs/specification-coverage.md), [current release state and deferred host features](docs/release-state-and-deferred-features.md), [camera-native capabilities](docs/camera-native.md), [configuration and presets](docs/presets.md), [audio](docs/audio.md), [video capture and recording](docs/media.md), [the stream daemon and virtual cameras](docs/daemon.md), [firmware maintenance](docs/firmware.md), [standard controls](docs/controls.md), [safe XU research](docs/xu-research.md), [permissions and udev setup](docs/permissions.md), [the hardware probe guide](docs/hardware-probe.md), and the [upgrade guide](docs/upgrade.md).
 
-GStreamer, PipeWire, and the local daemon client are enabled in normal builds, with direct ALSA capture as a fallback. `linkd` owns one physical GStreamer source and fans it out to snapshots, a background recording, and multiple named `v4l2loopback` outputs; graph and metrics output includes bounded-queue policy, per-output drops, and recent p95 processing latency. Direct H.264 and MJPEG recording paths preserve the camera encoding without decoding; recording audio is opt-in and muxes FLAC into Matroska or AAC into MP4. RTP/UDP output is available when the `network` feature is enabled.
+GStreamer, PipeWire, and the local daemon client are enabled in normal builds, with direct ALSA capture as a fallback. `linkd` owns one physical GStreamer source and fans it out to snapshots, a background recording, and multiple named `v4l2loopback` outputs; graph and metrics output includes bounded-queue policy, per-output drops, and recent p95 processing latency. Recovery preserves the active video tuple when the same camera returns, and an active recording continues in the next unused `<stem>.reconnect-NNN.<ext>` sibling without overwriting the finalized earlier segment. Direct H.264 and MJPEG recording paths preserve the camera encoding without decoding; recording audio is opt-in and muxes FLAC into Matroska or AAC into MP4. RTP/UDP output is available when the `network` feature is enabled.
 
 Generate shell completion source with `linkctl completion bash`, `zsh`, `fish`, or `elvish` and load or install the result using the conventions of that shell.
 
@@ -66,6 +91,7 @@ The development environment is managed by [devenv](https://devenv.sh/):
 
 ```sh
 devenv shell
+rustc --version  # 1.97.1
 cargo test --workspace --all-features --locked
 cargo run -p link-cli --bin linkctl -- --help
 cargo run -p link-daemon --bin linkd -- --help
@@ -80,6 +106,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
 cargo deny --all-features check
+cargo audit
 ```
 
 ## Safety boundary
@@ -93,5 +120,17 @@ Discovery, read watches, capability reports, probes, snapshots, diffs, and `doct
 Machine output uses schema version 1. JSON and JSON Lines errors always include `schema_version`, `ok`, `command`, `device`, `result`, and `error`.
 
 Local preset files and per-device configuration are strict, versioned TOML. Preset application resolves and validates the full plan before writing, serializes direct operations per device, verifies each stage, and retains a recovery journal only when rollback cannot fully restore the previous state.
+
+## Release and security
+
+Release candidates include deterministic source and binary checks, CycloneDX SBOMs, checksums, an artifact/profile
+manifest, and prepared GitHub Sigstore attestations. Publication, tagging, and upload remain explicit maintainer
+actions. See the [release runbook](docs/release-runbook.md), [security policy](SECURITY.md), and
+[changelog](CHANGELOG.md).
+
+## License
+
+`linkctl` is available under your choice of the [MIT license](LICENSE-MIT) or the
+[Apache License 2.0](LICENSE-APACHE).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), the [threat model](docs/threat-model.md), and the [architecture decisions](docs/adr/) for the engineering contract.

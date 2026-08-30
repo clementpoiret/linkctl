@@ -620,6 +620,7 @@ fn apply_environment(
             | "LINKCTL_DRY_RUN"
             | "LINKCTL_YES"
             | "LINKCTL_UNSAFE_XU"
+            | "LINKCTL_SOURCE_REVISION"
             | "LINKCTL_SCHEMA_VERSION" => {}
             "LINKCTL_DEFAULT_DEVICE" | "LINKCTL_DEVICE" => {
                 config.default_device = Some(value.clone());
@@ -890,6 +891,19 @@ mod tests {
             .expect_err("unknown variable must fail");
 
         assert_eq!(error.kind(), ErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn compile_time_source_revision_is_not_runtime_configuration() {
+        let config = ConfigLoader::new(ConfigPaths::default())
+            .with_environment(BTreeMap::from([(
+                "LINKCTL_SOURCE_REVISION".into(),
+                "0123456789abcdef".into(),
+            )]))
+            .load()
+            .unwrap();
+
+        assert_eq!(config, Config::default());
     }
 
     #[test]

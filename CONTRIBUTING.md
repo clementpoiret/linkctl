@@ -28,9 +28,9 @@ Local files under `specs/` are product inputs, not repository content. They are 
 
 - Do not copy source code, payload tables, schemas, assets, model weights, or binaries without a compatible license and recorded provenance.
 - Community projects may inform behavior, but reimplement documented kernel interfaces and independently observed behavior unless reuse is explicitly licensed.
-- Do not redistribute Insta360 SDK files, firmware, controller assets, or proprietary models.
+- Do not redistribute Insta360 firmware, controller assets, private traces, or proprietary models.
 - New dependencies must pass `cargo deny`; a new license or source exception requires an explicit review and a narrow comment in `deny.toml`.
-- This repository does not yet declare a project license. Choosing one is an owner decision and must not be inferred from dependency licenses.
+- Contributions are accepted under the repository's `MIT OR Apache-2.0` dual-license terms.
 
 ## Unsafe Rust and native boundaries
 

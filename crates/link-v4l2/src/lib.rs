@@ -3,6 +3,10 @@
 pub mod production;
 pub mod video;
 
+// Linux UAPI value; keeping it here lets linkctl build against distribution headers that
+// predate the generated binding while remaining able to report the flag from newer kernels.
+pub(crate) const V4L2_CTRL_FLAG_HAS_WHICH_MIN_MAX: u32 = 0x1000;
+
 use std::{
     fs::{File, OpenOptions},
     path::Path,
@@ -458,10 +462,7 @@ fn control_flag_names(flags: u32) -> Vec<String> {
         ),
         (bindings::V4L2_CTRL_FLAG_MODIFY_LAYOUT, "modify-layout"),
         (bindings::V4L2_CTRL_FLAG_DYNAMIC_ARRAY, "dynamic-array"),
-        (
-            bindings::V4L2_CTRL_FLAG_HAS_WHICH_MIN_MAX,
-            "has-which-min-max",
-        ),
+        (V4L2_CTRL_FLAG_HAS_WHICH_MIN_MAX, "has-which-min-max"),
     ]
     .into_iter()
     .filter(|(bit, _)| flags & bit != 0)
@@ -504,7 +505,7 @@ mod abi {
 
 #[cfg(test)]
 mod tests {
-    use super::{control_flag_names, fourcc};
+    use super::{V4L2_CTRL_FLAG_HAS_WHICH_MIN_MAX, control_flag_names, fourcc};
     use v4l2r::{PixelFormat, bindings};
 
     #[test]
@@ -519,6 +520,10 @@ mod tests {
                 bindings::V4L2_CTRL_FLAG_READ_ONLY | bindings::V4L2_CTRL_FLAG_VOLATILE
             ),
             ["read-only", "volatile"]
+        );
+        assert_eq!(
+            control_flag_names(V4L2_CTRL_FLAG_HAS_WHICH_MIN_MAX),
+            ["has-which-min-max"]
         );
     }
 }

@@ -1,0 +1,46 @@
+pkgname=linkctl
+pkgver=1.0.0
+pkgrel=1
+pkgdesc='Safe Linux control and media tools for Insta360 Link 2C Pro'
+arch=('x86_64' 'aarch64')
+url='https://github.com/clementpoiret/linkctl'
+license=('MIT' 'Apache-2.0')
+depends=(
+  'alsa-lib'
+  'gst-libav'
+  'gst-plugins-bad'
+  'gst-plugins-base'
+  'gst-plugins-base-libs'
+  'gst-plugins-good'
+  'gstreamer>=1.26'
+  'libpipewire'
+  'systemd-libs'
+  'zstd'
+)
+makedepends=('clang' 'help2man' 'pkgconf' 'rustup')
+source=("linkctl-$pkgver.tar.gz")
+sha256sums=('@SOURCE_SHA256@')
+options=('!debug')
+
+build() {
+  cd "linkctl-$pkgver"
+  export CARGO_INCREMENTAL=0
+  export LINKCTL_SOURCE_REVISION='@SOURCE_REVISION@'
+  export SOURCE_DATE_EPOCH='@SOURCE_DATE_EPOCH@'
+  export ZSTD_SYS_USE_PKG_CONFIG=1
+  export RUSTFLAGS="--remap-path-prefix=$srcdir/linkctl-$pkgver=/usr/src/linkctl"
+  cargo build --locked --release \
+    --package link-cli --bin linkctl \
+    --package link-daemon --bin linkd
+}
+
+check() {
+  cd "linkctl-$pkgver"
+  cargo test --locked --workspace
+}
+
+package() {
+  cd "linkctl-$pkgver"
+  LINKCTL_BINARY_DIR="$srcdir/linkctl-$pkgver/target/release" \
+    bash packaging/common/install.sh "$srcdir/linkctl-$pkgver" "$pkgdir"
+}

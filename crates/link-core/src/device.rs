@@ -50,5 +50,29 @@ pub struct DoctorCheck {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct DoctorReport {
     pub healthy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
     pub checks: Vec<DoctorCheck>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DoctorReport;
+
+    #[test]
+    fn doctor_report_accepts_output_without_source_revision() {
+        let report: DoctorReport = serde_json::from_value(serde_json::json!({
+            "healthy": true,
+            "checks": []
+        }))
+        .unwrap();
+
+        assert!(report.source_revision.is_none());
+        assert!(
+            serde_json::to_value(report)
+                .unwrap()
+                .get("source_revision")
+                .is_none()
+        );
+    }
 }

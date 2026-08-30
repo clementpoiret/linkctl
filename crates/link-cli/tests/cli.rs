@@ -378,7 +378,13 @@ fn audio_help_exposes_discovery_control_and_streaming_commands() {
 
 #[test]
 fn binary_audio_stdout_requires_an_explicit_encoding_before_discovery() {
-    let output = run(&["audio", "capture", "--stdout"]);
+    let output = run(&[
+        "--device",
+        "missing-preflight-device",
+        "audio",
+        "capture",
+        "--stdout",
+    ]);
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("requires --audio-format"));
 }
@@ -386,6 +392,8 @@ fn binary_audio_stdout_requires_an_explicit_encoding_before_discovery() {
 #[test]
 fn recording_dry_run_validates_limits_before_opening_hardware() {
     let output = run(&[
+        "--device",
+        "missing-preflight-device",
         "--dry-run",
         "record",
         "start",
@@ -493,7 +501,16 @@ fn watch_rejects_single_json_output_before_opening_hardware() {
 
 #[test]
 fn forced_nonstandard_control_backend_is_reported_as_unsupported() {
-    let output = run(&["--format", "json", "--backend", "vendor", "control", "list"]);
+    let output = run(&[
+        "--device",
+        "missing-preflight-device",
+        "--format",
+        "json",
+        "--backend",
+        "vendor",
+        "control",
+        "list",
+    ]);
     assert_eq!(output.status.code(), Some(4));
     let value: Value = serde_json::from_slice(&output.stdout).expect("JSON error");
     assert_eq!(value["command"], "control.list");
@@ -504,6 +521,8 @@ fn forced_nonstandard_control_backend_is_reported_as_unsupported() {
 fn unsafe_xu_from_the_environment_reaches_the_safety_gate() {
     let output = run_with_environment(
         &[
+            "--device",
+            "missing-preflight-device",
             "xu",
             "raw-set",
             "--guid",
@@ -528,6 +547,8 @@ fn unsafe_xu_from_the_environment_reaches_the_safety_gate() {
 #[test]
 fn unsafe_xu_is_rejected_in_human_output() {
     let output = run(&[
+        "--device",
+        "missing-preflight-device",
         "--unsafe-xu",
         "xu",
         "raw-set",
@@ -551,6 +572,8 @@ fn unsafe_xu_is_rejected_in_human_output() {
 #[test]
 fn unsafe_xu_is_rejected_with_a_schema_conforming_json_error() {
     let output = run(&[
+        "--device",
+        "missing-preflight-device",
         "--format",
         "json",
         "--unsafe-xu",
@@ -578,7 +601,13 @@ fn unsafe_xu_is_rejected_with_a_schema_conforming_json_error() {
 
 #[test]
 fn unsafe_xu_is_scoped_to_raw_set() {
-    let output = run(&["--unsafe-xu", "xu", "inventory"]);
+    let output = run(&[
+        "--device",
+        "missing-preflight-device",
+        "--unsafe-xu",
+        "xu",
+        "inventory",
+    ]);
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("only with xu raw-set"));
 }

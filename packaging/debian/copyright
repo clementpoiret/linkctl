@@ -1,0 +1,15 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: linkctl
+Source: https://github.com/clementpoiret/linkctl
+
+Files: *
+Copyright: 2026 Clément Poiret
+License: MIT or Apache-2.0
+
+License: MIT
+ On Debian systems, the complete text of the MIT License is available in
+ /usr/share/common-licenses/MIT.
+
+License: Apache-2.0
+ On Debian systems, the complete text of the Apache License, Version 2.0 is
+ available in /usr/share/common-licenses/Apache-2.0.

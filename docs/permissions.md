@@ -2,7 +2,8 @@
 
 `linkctl` should run as the logged-in desktop user. The example rule at `packaging/udev/70-linkctl.rules` applies only to V4L2 nodes beneath the verified Insta360 Link 2C Pro USB identity `2e1a:4c05`. It grants the normal `video` group mode and asks logind to add an ACL for the active local session.
 
-Install and activate the rule as root:
+Native packages install the rule under `/usr/lib/udev/rules.d`. For an unpackaged source build, install and activate it
+as root:
 
 ```sh
 sudo install -D -m 0644 packaging/udev/70-linkctl.rules \

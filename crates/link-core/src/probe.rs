@@ -452,6 +452,9 @@ pub struct HostReport {
     pub kernel_release: String,
     /// Rust target architecture at build time.
     pub architecture: String,
+    /// Source revision embedded by the producing build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
 }
 
 /// Manifest of privacy-sensitive fields omitted from a report.
@@ -538,7 +541,7 @@ impl ProbeReport {
 
 #[cfg(test)]
 mod tests {
-    use super::UsbIdentity;
+    use super::{HostReport, UsbIdentity};
 
     fn identity(serial: Option<&str>, topology: &str) -> UsbIdentity {
         UsbIdentity {
@@ -586,5 +589,18 @@ mod tests {
         let redacted = source.without_serial();
         assert!(redacted.serial.is_none());
         assert_eq!(redacted.product_id, source.product_id);
+    }
+
+    #[test]
+    fn host_report_accepts_pre_provenance_json() {
+        let report: HostReport = serde_json::from_value(serde_json::json!({
+            "kernel_release": "6.12.0",
+            "architecture": "x86_64"
+        }))
+        .unwrap();
+
+        assert!(report.source_revision.is_none());
+        let serialized = serde_json::to_value(report).unwrap();
+        assert!(serialized.get("source_revision").is_none());
     }
 }

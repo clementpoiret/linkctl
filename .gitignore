@@ -11,6 +11,7 @@ devenv.local.yaml
 
 # Rust build artifacts
 /target/
+/result
 
 # Local product specifications (must never be committed)
 /specs/
