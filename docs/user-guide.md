@@ -6,6 +6,8 @@ installed binary.
 
 ## Install and verify access
 
+### Debian, Fedora, and Arch Linux
+
 Install the native package for the running distribution, reload the package's udev rule, and run the read-only doctor:
 
 ```sh
@@ -14,6 +16,51 @@ sudo udevadm trigger --subsystem-match=video4linux
 linkctl doctor
 linkctl device list
 ```
+
+### NixOS
+
+Building or adding `linkctl` to a user profile does not register its udev rule or systemd user unit with NixOS. Add
+the repository as a flake input and include its package in the system configuration. The following complete outline
+uses `x86_64-linux`; use `aarch64-linux` on an AArch64 host and merge the input and module into an existing flake as
+appropriate:
+
+```nix
+{
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+  inputs.linkctl.url = "github:clementpoiret/linkctl";
+
+  outputs = { nixpkgs, linkctl, ... }: {
+    nixosConfigurations.your-host = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        ./configuration.nix
+        ({ pkgs, ... }:
+          let
+            linkctlPackage = linkctl.packages.${pkgs.stdenv.hostPlatform.system}.linkctl;
+          in {
+            environment.systemPackages = [ linkctlPackage ];
+            services.udev.packages = [ linkctlPackage ];
+            systemd.packages = [ linkctlPackage ];
+          })
+      ];
+    };
+  };
+}
+```
+
+Activate the system configuration and apply the new rule to a camera that is already connected:
+
+```sh
+sudo nixos-rebuild switch --flake .#your-host
+sudo udevadm trigger --subsystem-match=video4linux
+linkctl doctor
+linkctl device list
+```
+
+`nixos-rebuild switch` installs the declared rule and restarts udev when the rule set changes, so a separate
+`udevadm control --reload-rules` is normally redundant. The trigger is needed only to reprocess existing video nodes;
+disconnecting and reconnecting the camera has the same effect. `nix build .#linkctl` remains useful for building or
+inspecting the package, but it does not install these system integrations.
 
 Normal commands run as the logged-in user. Do not use `sudo linkctl`; doing so changes XDG paths, daemon ownership,
 and device permissions. If discovery succeeds but a camera node is inaccessible, follow [Device permissions](permissions.md).

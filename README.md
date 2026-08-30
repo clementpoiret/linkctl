@@ -29,12 +29,12 @@ evidence-backed boundary is in [Feature status](docs/feature-status.md).
 
 ## Install and start
 
-Release artifacts provide native packages for Debian 13, Fedora 44, Arch Linux, Arch Linux ARM, and NixOS 26.05 on
-the architectures listed in the [compatibility matrix](docs/compatibility.md). Packages contain `linkctl`, `linkd`, a
-hardened systemd user unit, a narrow udev rule, manuals, licenses, checksummed profiles, documentation, and completion
-scripts. They do not enable or start the daemon automatically.
+Release artifacts provide native packages for Debian 13, Fedora 44, Arch Linux, and Arch Linux ARM, plus a pinned
+flake package for NixOS 26.05, on the architectures listed in the [compatibility matrix](docs/compatibility.md). Each
+package contains `linkctl`, `linkd`, a hardened systemd user unit, a narrow udev rule, manuals, licenses, checksummed
+profiles, documentation, and completion scripts. Installation does not enable or start the daemon automatically.
 
-After installing the package for your distribution:
+After installing a Debian, Fedora, or Arch package:
 
 ```sh
 sudo udevadm control --reload-rules
@@ -43,16 +43,33 @@ linkctl doctor
 linkctl device list
 ```
 
-Normal operation is unprivileged. Administrative access is needed only to install or remove a package and reload udev
-rules. The daemon is optional:
+On NixOS, add the flake package to the system environment and register the same package with both udev and systemd:
+
+```nix
+let
+  linkctlPackage = linkctl.packages.${pkgs.stdenv.hostPlatform.system}.linkctl;
+in {
+  environment.systemPackages = [ linkctlPackage ];
+  services.udev.packages = [ linkctlPackage ];
+  systemd.packages = [ linkctlPackage ];
+}
+```
+
+Here `linkctl` is the repository's flake input. Apply the configuration with `nixos-rebuild switch`, then reconnect
+the camera or run `sudo udevadm trigger --subsystem-match=video4linux` if it is already connected. A standalone
+`nix build .#linkctl` builds the package but does not register its udev rule or systemd user unit. See the
+[NixOS installation instructions](docs/user-guide.md#nixos) for a complete flake example.
+
+Normal operation is unprivileged. Administrative access is needed only to install or remove a native package, activate
+a NixOS system configuration, and refresh udev rules when required. The daemon is optional:
 
 ```sh
 systemctl --user enable --now linkd.service
 linkctl daemon status
 ```
 
-Nix users can build the pinned package with `nix build .#linkctl`. Verify downloaded artifacts using `SHA256SUMS` and
-the GitHub artifact attestation described in the [release runbook](docs/release-runbook.md).
+Verify downloaded artifacts using `SHA256SUMS` and the GitHub artifact attestation described in the
+[release runbook](docs/release-runbook.md).
 
 ## First commands
 

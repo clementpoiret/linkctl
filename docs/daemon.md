@@ -12,7 +12,8 @@ linkctl pipeline metrics
 ```
 
 Native packages install the systemd user unit with an absolute executable path. The Nix package renders the same unit
-with its immutable store path. Installation never enables or starts it; opt in with:
+with its immutable store path and NixOS users register it through `systemd.packages` as shown in the
+[installation instructions](user-guide.md#nixos). Installation never enables or starts it; opt in with:
 
 ```sh
 systemctl --user daemon-reload
