@@ -1,11 +1,11 @@
 # Changelog
 
-All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
+this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [1.0.0] - Unreleased
+## [1.0.0] - 2026-08-30
 
 ### Added
 
@@ -38,8 +38,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 - Host computer-vision modes, background/appearance effects, multi-camera daemon supervision, remote control, and
   logical privacy transitions are unavailable.
-- Virtual-camera graph production exists, but OBS and WebRTC compatibility is unsupported with the tested
-  v4l2loopback 0.15.4 queue behavior.
+- Virtual-camera graph production exists, but OBS and WebRTC compatibility is unsupported with the tested v4l2loopback
+  0.15.4 queue behavior.
 
-[Unreleased]: https://github.com/clementpoiret/linkctl/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/clementpoiret/linkctl/releases/tag/v1.0.0
+[unreleased]: https://github.com/clementpoiret/linkctl/compare/v1.0.0...HEAD
