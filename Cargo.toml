@@ -4,7 +4,6 @@ members = [
   "crates/link-cli",
   "crates/link-core",
   "crates/link-daemon",
-  "crates/link-effects",
   "crates/link-ipc",
   "crates/link-linux",
   "crates/link-media",
@@ -49,7 +48,6 @@ zstd = "0.13.3"
 
 link-audio = { path = "crates/link-audio", version = "=1.0.0" }
 link-core = { path = "crates/link-core", version = "=1.0.0" }
-link-effects = { path = "crates/link-effects", version = "=1.0.0" }
 link-ipc = { path = "crates/link-ipc", version = "=1.0.0" }
 link-media = { path = "crates/link-media", version = "=1.0.0" }
 link-profiles = { path = "crates/link-profiles", version = "=1.0.0" }

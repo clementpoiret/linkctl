@@ -819,7 +819,6 @@ dependencies = [
  "humantime",
  "link-audio",
  "link-core",
- "link-effects",
  "link-ipc",
  "link-linux",
  "link-media",
@@ -858,7 +857,6 @@ dependencies = [
  "humantime",
  "link-audio",
  "link-core",
- "link-effects",
  "link-ipc",
  "link-linux",
  "link-media",
@@ -868,13 +866,6 @@ dependencies = [
  "serde_json",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "link-effects"
-version = "1.0.0"
-dependencies = [
- "link-core",
 ]
 
 [[package]]

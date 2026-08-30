@@ -16,7 +16,6 @@ default = ["daemon", "gstreamer", "pipewire"]
 daemon = ["dep:link-ipc"]
 gstreamer = ["dep:link-media", "link-media/gstreamer"]
 pipewire = ["link-audio/pipewire"]
-host-ai = ["dep:link-effects", "link-effects/host-ai"]
 network = ["dep:link-ipc", "dep:link-media", "link-ipc/network", "link-media/network", "gstreamer"]
 research = ["link-uvc-xu/research"]
 
@@ -27,7 +26,6 @@ ctrlc.workspace = true
 humantime.workspace = true
 link-audio.workspace = true
 link-core.workspace = true
-link-effects = { workspace = true, optional = true }
 link-ipc = { workspace = true, optional = true }
 link-linux = { path = "../link-linux", version = "=1.0.0" }
 link-media = { workspace = true, optional = true }

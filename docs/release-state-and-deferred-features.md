@@ -37,7 +37,6 @@ tested host because the installed v4l2loopback module does not provide reliable 
 | `link-ipc` | Versioned, length-bounded JSON and binary framing over a Unix socket with same-user peer authentication. Protocol version 1 is implemented. |
 | `link-daemon` | One selected physical source, a serialized control actor, bounded graph requests, source ownership, recovery, snapshots, background recording, and named virtual-output branches. Implemented for one camera per daemon. |
 | `link-cli` | User-facing discovery, controls, native modes, media, audio, presets, diagnostics, firmware maintenance, daemon, pipeline, and virtual-camera commands with human, JSON, and JSON Lines output. Implemented for the exposed command set. |
-| `link-effects` | Reserved host transformation and computer-vision boundary. The crate and feature gate exist, but no host vision or AI implementation is present. |
 
 ### Camera and control support
 
@@ -203,9 +202,9 @@ The following host-side vision and effects are not included:
 - Model/backend selection with explicit licensing metadata.
 - CPU and GPU quality tiers.
 
-The `host-ai` feature and `link-effects` crate reserve an architectural boundary only. No models are bundled or
-downloaded, no detector backend is selected, and no effect command is exposed. The clean output remains the required
-bypass path for any future implementation.
+No host-processing crate or feature is shipped ahead of an implementation. No models are bundled or downloaded, no
+detector backend is selected, and no effect command is exposed. The clean output remains the required bypass path for
+any future implementation.
 
 As with the productivity workflows, algorithms and offline fixtures are possible today. They are deferred because a
 release-quality implementation must also prove stable live publication, bounded latency, deterministic missed-deadline
@@ -251,9 +250,10 @@ healthy daemon after each consumer closes.
 
 ### Add a typed processing boundary
 
-Keep `link-media` responsible for capture, caps, tees, queue policy, and sinks. Implement host algorithms behind
-`link-effects` using typed inputs and outputs rather than accepting arbitrary GStreamer strings. Each processing branch
-should declare its input/output caps, queue bound, latency budget, model/backend identity, and clean-bypass behavior.
+Introduce a dedicated processing boundary with the first working host algorithm rather than reserving an empty crate or
+feature. Keep `link-media` responsible for capture, caps, tees, queue policy, and sinks, and use typed inputs and outputs
+rather than accepting arbitrary GStreamer strings. Each processing branch should declare its input/output caps, queue
+bound, latency budget, model/backend identity, and clean-bypass behavior.
 
 The shared graph should retain one decode and one raw tee. Attach processing branches downstream of bounded queues and
 publish both clean and processed outputs from the same source. Extend existing per-output metrics with per-stage frame

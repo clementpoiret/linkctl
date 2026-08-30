@@ -55,7 +55,7 @@ jq -S -n \
     output_schema_version: 1,
     daemon_protocol_version: 1,
     standard_features: ["daemon", "gstreamer", "pipewire"],
-    excluded_features: ["host-ai", "network", "research"],
+    excluded_features: ["network", "research"],
     supported_targets: [
       "debian-13-amd64",
       "debian-13-arm64",

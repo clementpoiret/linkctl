@@ -31,7 +31,7 @@ upgrade, start it explicitly with `systemctl --user start linkd.service` and che
 
 ## Behavioral changes at 1.0
 
-- Standard builds contain `daemon`, `gstreamer`, and `pipewire`; `research`, `network`, and `host-ai` are excluded.
+- Standard builds contain `daemon`, `gstreamer`, and `pipewire`; `research` and `network` are excluded.
 - Vendor writes are authorized only by compiled-in verified profiles. An external profile can aid safe inspection but
   cannot grant write authority.
 - The daemon protocol and machine-output schemas are version 1. A newer incompatible protocol is rejected rather than
