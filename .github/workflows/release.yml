@@ -263,12 +263,13 @@ jobs:
         run: |
           set -euo pipefail
           package=$(find dist -maxdepth 1 -name '*.pkg.tar.zst' -print -quit)
-          package_root=$(mktemp -d)
-          trap 'rm -rf -- "$package_root"' EXIT
-          bsdtar -xf "$package" -C "$package_root"
-          grep -Fx "arch = ${{ matrix.architecture }}" "$package_root/.PKGINFO"
-          test -f "$package_root/usr/share/man/man1/linkctl.1.gz"
-          test -f "$package_root/usr/share/man/man1/linkd.1.gz"
+          package_architecture=$(
+            LC_ALL=C pacman -Qip "$package" \
+              | sed -n 's/^Architecture[[:space:]]*:[[:space:]]*//p'
+          )
+          test "$package_architecture" = "${{ matrix.architecture }}"
+          pacman -Qlpq "$package" | grep -Fx '/usr/share/man/man1/linkctl.1.gz'
+          pacman -Qlpq "$package" | grep -Fx '/usr/share/man/man1/linkd.1.gz'
           namcap "$package"
           pacman -U --noconfirm "$package"
           linkctl --version | grep -F '1.0.0'
