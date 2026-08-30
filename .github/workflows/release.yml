@@ -127,7 +127,7 @@ jobs:
             systemd systemd-dev udev xz-utils
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --profile minimal --default-toolchain 1.97.1
-          echo /root/.cargo/bin >>"$GITHUB_PATH"
+          echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
       - name: Build Debian package
         run: |
           set -euo pipefail
@@ -189,7 +189,7 @@ jobs:
             util-linux
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --profile minimal --default-toolchain 1.97.1
-          echo /root/.cargo/bin >>"$GITHUB_PATH"
+          echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
       - name: Build RPM package
         run: |
           set -euo pipefail
@@ -226,7 +226,7 @@ jobs:
             container: archlinux:base-devel
             architecture: x86_64
           - runner: ubuntu-24.04-arm
-            container: agners/archlinuxarm:latest
+            container: docker.io/menci/archlinuxarm@sha256:5ffa22c150c0d989a9bc5bc808c7a2e03d156ffbef4c7433879e95b1cffddde6
             architecture: aarch64
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
