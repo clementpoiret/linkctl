@@ -11,8 +11,8 @@ linkctl pipeline graph
 linkctl pipeline metrics
 ```
 
-Native packages install [the user unit](../packaging/systemd/linkd.service) with an absolute executable path. The Nix
-package renders the same unit with its immutable store path. Installation never enables or starts it; opt in with:
+Native packages install the systemd user unit with an absolute executable path. The Nix package renders the same unit
+with its immutable store path. Installation never enables or starts it; opt in with:
 
 ```sh
 systemctl --user daemon-reload
@@ -46,7 +46,8 @@ Generic standard-control list/get/set/reset operations are routed through the da
 
 ## v4l2loopback setup
 
-Install `v4l2loopback` using the distribution's kernel-module packaging. Module loading changes the host kernel and normally requires administrator privileges. For two outputs suitable for Chromium/WebRTC discovery:
+Install `v4l2loopback` using the distribution's kernel-module packaging. Module loading changes the host kernel and
+normally requires administrator privileges. For two outputs using the capability mode expected by Chromium/WebRTC:
 
 ```sh
 sudo modprobe v4l2loopback devices=2 video_nr=20,21 \
@@ -63,7 +64,8 @@ v4l2-ctl --all --device /dev/video21
 
 `linkctl` requires a `v4l2loopback` build with correct V4L2 output-buffer queue semantics. Affected builds emit GStreamer's `buffer ... was not queued, this indicate a driver bug` message and streaming-I/O consumers then fail with `Failed to allocate a buffer`. This is a kernel-module defect tracked by [v4l2loopback #656](https://github.com/v4l2loopback/v4l2loopback/pull/656), not a recoverable virtual-camera branch error. Use a distribution module that does not exhibit the defect, or a module build containing the upstream fix, before validating OBS or WebRTC. GStreamer's read/write sink mode is not an equivalent workaround with `exclusive_caps=1`: it does not activate the streaming state needed for the node to advertise capture-only capabilities.
 
-See [the current release state and deferred host features](release-state-and-deferred-features.md) for the validated component inventory, first-release boundary, and future implementation guidance.
+The tested v4l2loopback 0.15.4 combination is not release-supported for OBS or Chromium/WebRTC, even with these module
+options. See [Feature status](feature-status.md) for the recorded failure boundary and unaffected paths.
 
 The global `--device` always selects the physical source. `--output-device` names the loopback sink:
 
@@ -76,6 +78,9 @@ linkctl vcam stop --name conference
 linkctl vcam stop
 ```
 
-Built-in profiles are `clean`, `effects`, `mirrored`, and `portrait`; `effects` starts from a clean branch intended for explicit overlays and later effect controls. An output contract can also set rotation, horizontal/vertical flip, normalized crop, contain/cover/stretch fitting, zoom and frame position, text/image overlay, or a black privacy frame. Each branch normalizes raw format, dimensions, and frame rate before `v4l2sink`. LUT processing is not implemented.
+Built-in profiles are `clean`, `effects`, `mirrored`, and `portrait`; `effects` is currently a clean branch with
+explicit overlay support, not an effects engine. An output contract can also set rotation, horizontal/vertical flip,
+normalized crop, contain/cover/stretch fitting, zoom and frame position, text/image overlay, or a black privacy frame.
+Each branch normalizes raw format, dimensions, and frame rate before `v4l2sink`. LUT processing is not implemented.
 
 Use `devenv --profile vcam-test shell` for the opt-in OBS and Chromium validation environment; those large GUI packages are excluded from the normal development shell. In OBS, add each node as a Video Capture Device. In Chromium, open a WebRTC camera test page and select the advertised loopback label. `pipeline metrics` should show increasing counters for both outputs while both consumers are active.

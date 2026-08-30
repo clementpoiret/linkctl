@@ -1,7 +1,9 @@
 # Compatibility matrix
 
 This document is the support contract for the standard package. A target is supported only for the feature boundary
-described here; optional research, network, and host-processing builds are not release configurations.
+described here; optional research, network, and host-processing builds are not release configurations. The
+[feature-status guide](feature-status.md) defines what each supported, conditional, experimental, unavailable, or
+prohibited label means.
 
 ## Distribution packages
 
@@ -61,3 +63,6 @@ controls, or daemon IPC. No package installs or loads v4l2loopback automatically
 - Multi-camera supervision in one daemon.
 - Remote control listeners or cloud services.
 - Logical privacy enter/exit; `privacy status` remains an honest read-only separation of physical and logical state.
+
+See the [user guide](user-guide.md) for setup and troubleshooting and the [legal notice](legal.md) for the project's
+independent status and interoperability/provenance boundary.

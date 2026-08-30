@@ -6,6 +6,10 @@ published checksum from [Insta360's official firmware instructions](https://onli
 and review the [official U-Disk entry procedure](https://onlinemanual.insta360.com/link2cpro/en-us/faq/operation-guide/usb-mode)
 before starting.
 
+`linkctl` does not grant a right to obtain or use firmware. Supply only a file obtained from an authorized source and
+review the project's [legal and clean-room notice](legal.md). No firmware file is included in source or release
+artifacts.
+
 ## Observe the maintenance transition
 
 Use JSON Lines for automation or the default human output for an operator:
@@ -34,8 +38,8 @@ linkctl --device usb:10-3 --dry-run firmware stage ./Insta360LINK2CPROFW_HOST.bi
   --sha256 <64-hex-digit-official-checksum>
 ```
 
-When the camera is still in normal mode, the dry run reports that volume, mount, free-space, and destination checks are
-deferred. Running the real workflow requires explicit confirmation:
+When the camera is still in normal mode, the dry run reports that volume, mount, free-space, and destination checks
+cannot run until the maintenance volume appears. Running the real workflow requires explicit confirmation:
 
 ```sh
 linkctl --device usb:10-3 --yes firmware stage ./Insta360LINK2CPROFW_HOST.bin \

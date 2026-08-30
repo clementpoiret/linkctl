@@ -2,11 +2,14 @@
 
 ## Security objectives
 
-The system must preserve camera availability, prevent unverified device writes, keep local media and identifiers private, and ensure that only the logged-in user can control future long-running services. A successful command must never imply a capability that was not actually verified.
+The system must preserve camera availability, prevent unverified device writes, keep local media and identifiers
+private, and ensure that only the logged-in user can control the long-running local service. A successful command must
+never imply a capability that was not actually verified.
 
 ## Assets and trust boundaries
 
-Protected assets include camera firmware and calibration, device availability, video and audio content, configuration and presets, stable identifiers, diagnostic traces, recording destinations, and future daemon credentials.
+Protected assets include camera firmware and calibration, device availability, video and audio content, configuration
+and presets, stable identifiers, diagnostic traces, recording destinations, and daemon runtime state.
 
 Trust boundaries are:
 
@@ -17,7 +20,8 @@ Trust boundaries are:
 5. Native multimedia libraries and optional model runtimes crossing into Rust code.
 6. Dependencies, development tooling, and CI actions entering the software supply chain.
 
-The physical camera, USB bus, kernel driver, local configuration, third-party profiles, native libraries, and future network clients are not assumed trustworthy merely because they are local.
+The physical camera, USB bus, kernel driver, local configuration, third-party profiles, native libraries, and local
+clients are not assumed trustworthy merely because they are local.
 
 ## Threats and required mitigations
 
@@ -26,11 +30,11 @@ The physical camera, USB bus, kernel driver, local configuration, third-party pr
 | Malformed descriptor, profile, config, or payload causes memory corruption or a crash | Strict length checks, bounded allocation, typed parsing, fuzz/property tests, and isolated unsafe ABI code |
 | A placeholder, mismatched, or unverified profile authorizes a write | Strict schema and placeholder rejection, exact descriptor/firmware guards, loader-assigned trust, compiled-in verification for semantic writes, and independent safety classification |
 | Raw or rapid XU writes hang or re-enumerate the camera | Raw writes absent from normal builds, central authorization, exact lengths, conservative rate limits, and finite retries |
-| Driver detach, reset, firmware, flash, or calibration access damages availability | Deny by default; require separately reviewed, narrowly scoped workflows where the product allows them |
+| Driver detach, reset, firmware, flash, or calibration access damages availability | Deny device-control paths centrally; keep the documented firmware workflow filesystem-only and separately guarded |
 | A non-gimbal device receives mechanical commands | Omit semantic movement commands, deny raw pan/tilt writes even during dry-run, and continuously test both policies |
 | A malformed or stale standard-control request changes an unintended value | Resolve against fresh extended-control metadata, validate type/range/step/menu and writability, read before writing, verify readback, and attempt bounded rollback |
 | A malformed or model-incompatible preset partially changes a camera | Strict versioned parsing, exact model/optional USB guards, complete preflight, per-device leases, dependency ordering, verification, reverse rollback, and a crash-visible recovery journal |
-| A preset leaks stream credentials | The current preset schema has no recording/stream target or inline credential field; unknown fields fail and future integrations must use secret references |
+| A preset leaks stream credentials | The current preset schema has no recording/stream target or inline credential field; unknown fields fail, and any added integration must use secret references |
 | A multi-device mutation changes cameras unintentionally | Require an explicit `--device all --yes` combination and report each device independently |
 | Machine output or logs leak serials, paths, credentials, microphone levels, or media | Redact identifiers by default, keep logs on stderr, never log secrets or media buffers, and emit only explicitly requested aggregate audio levels |
 | A local process impersonates or controls the daemon | Owner-only runtime directory and socket, same-UID peer-credential checks on client and server, bounded frames, strict JSON decoding, and protocol-version negotiation before dispatch |
@@ -39,7 +43,7 @@ The physical camera, USB bus, kernel driver, local configuration, third-party pr
 | A recording or audio-capture destination follows a malicious symlink | Canonicalization, regular-file checks, bounded destinations, same-directory temporary output, atomic finalization where possible, and explicit sync semantics |
 | A spoofed source or unrelated mounted volume receives firmware | Require the exact official filename, regular-file/no-symlink input, bounded size and optional trusted checksum, exact USB revision/descriptor/profile/topology matching, and the exact filesystem label and type |
 | A firmware copy is replaced, truncated, duplicated, or interrupted | Reject existing and abandoned destinations, use no-follow/create-new temporary output and no-replace rename, hash while copying, sync the file and directory, verify the final hash, retain a private operation log, and distinguish pre-sync failure from post-sync partial success |
-| A network facade exposes camera control | No listener by default; loopback-only defaults, authentication, origin/CSRF controls, and explicit opt-in |
+| A network facade exposes camera control | No network-control facade is shipped; adding one requires loopback-only defaults, authentication, origin/CSRF controls, and explicit opt-in |
 | A dependency or CI action is compromised | Locked Rust dependencies, `cargo deny`, read-only CI permissions, pinned action major versions, and reviewed upgrades |
 
 ## Current enforcement

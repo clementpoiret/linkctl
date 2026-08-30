@@ -8,7 +8,9 @@ Vendor controls require exact `UVCIOC_CTRL_QUERY` ABI layout, device-reported pa
 
 ## Decision
 
-`link-uvc-xu` will implement a local wrapper with [`rustix::ioctl`](https://docs.rs/rustix/latest/rustix/ioctl/), an exact `repr(C)` query structure, owned buffers, and borrowed file descriptors. Unsafe code will be restricted to the ioctl call after the crate receives a focused lint exception and layout tests.
+`link-uvc-xu` implements a local wrapper with [`rustix::ioctl`](https://docs.rs/rustix/latest/rustix/ioctl/), an exact
+`repr(C)` query structure, owned buffers, and borrowed file descriptors. Unsafe code is restricted to the ioctl call
+under a focused lint exception and layout tests.
 
 Read support must query `GET_INFO` and `GET_LEN` before `GET_CUR`. Semantic writes require an unforgeable capability minted from a compiled-in trusted verified profile and exact device guards. The raw transport method is compiled only with the non-default `research` feature; the CLI reaches it only after independent build, configuration, acknowledgement, exact profile, safety-class, length, stream-state, lease, and pacing checks. Neither route writes an unadvertised or unclassified selector.
 

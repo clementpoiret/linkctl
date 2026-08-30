@@ -8,10 +8,12 @@ Camera formats and extended controls require broad V4L2 coverage without exposin
 
 ## Decision
 
-`link-v4l2` will own V4L2 access and initially use the thin ioctl layer from [`v4l2r`](https://docs.rs/v4l2r/) for enumeration, controls, formats, and queues. Higher layers consume project-owned domain types rather than `v4l2r` types. Missing operations may receive a small local wrapper after ABI review; the work-in-progress high-level `v4l2r` device API is not a required application abstraction.
-
-No V4L2 dependency is linked until device behavior is implemented and tested with fixtures.
+`link-v4l2` owns V4L2 access and uses the thin ioctl layer from [`v4l2r`](https://docs.rs/v4l2r/) for enumeration,
+controls, formats, and queues. Higher layers consume project-owned domain types rather than `v4l2r` types. Operations
+not covered by that layer use a small local wrapper only after ABI review; the high-level `v4l2r` device API is not an
+application abstraction.
 
 ## Consequences
 
-Kernel-facing changes remain auditable and replaceable. The backend must account for generated-header requirements and must test ioctl structure layout on each supported architecture.
+Kernel-facing changes remain auditable and replaceable. The backend accounts for generated-header requirements and
+tests ioctl structure layout on each supported architecture.

@@ -64,14 +64,21 @@ install -Dm644 "$source_root/packaging/udev/70-linkctl.rules" \
 for document in \
   README.md \
   CHANGELOG.md \
+  CONTRIBUTING.md \
   SECURITY.md \
-  docs/compatibility.md \
-  docs/specification-coverage.md \
-  docs/upgrade.md \
-  docs/release-runbook.md; do
+  LICENSE-MIT \
+  LICENSE-APACHE; do
   install -Dm644 "$source_root/$document" \
-    "$destdir$prefix/share/doc/linkctl/${document#docs/}"
+    "$destdir$prefix/share/doc/linkctl/$document"
 done
+while IFS= read -r -d '' document; do
+  install -Dm644 "$source_root/$document" \
+    "$destdir$prefix/share/doc/linkctl/$document"
+done < <(
+  cd "$source_root"
+  find docs -type f \( -name '*.md' -o -name '*.json' \) -print0 \
+    | LC_ALL=C sort -z
+)
 install -Dm644 "$source_root/LICENSE-MIT" "$destdir$prefix/share/licenses/linkctl/LICENSE-MIT"
 install -Dm644 "$source_root/LICENSE-APACHE" \
   "$destdir$prefix/share/licenses/linkctl/LICENSE-APACHE"
