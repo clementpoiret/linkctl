@@ -11680,9 +11680,16 @@ mod tests {
     };
 
     #[test]
-    fn command_graph_excludes_mechanical_movement_commands() {
-        let prohibited = ["pan", "tilt", "gimbal", "center-gimbal", "motor"];
-        assert_command_names_are_absent(&Cli::command(), &prohibited);
+    fn command_graph_excludes_prohibited_fixed_mount_commands_and_options() {
+        let prohibited = [
+            "pan",
+            "tilt",
+            "gimbal",
+            "center-gimbal",
+            "motor",
+            "tracking-zone",
+        ];
+        assert_command_surface_is_absent(&Cli::command(), &prohibited);
     }
 
     #[test]
@@ -12043,14 +12050,27 @@ mod tests {
         );
     }
 
-    fn assert_command_names_are_absent(command: &clap::Command, prohibited: &[&str]) {
+    fn assert_command_surface_is_absent(command: &clap::Command, prohibited: &[&str]) {
+        for argument in command.get_arguments() {
+            let id = argument.get_id().as_str();
+            assert!(
+                !prohibited.contains(&id),
+                "prohibited semantic argument: {id}"
+            );
+            if let Some(long) = argument.get_long() {
+                assert!(
+                    !prohibited.contains(&long),
+                    "prohibited semantic option: --{long}"
+                );
+            }
+        }
         for subcommand in command.get_subcommands() {
             assert!(
                 !prohibited.contains(&subcommand.get_name()),
                 "prohibited semantic command: {}",
                 subcommand.get_name()
             );
-            assert_command_names_are_absent(subcommand, prohibited);
+            assert_command_surface_is_absent(subcommand, prohibited);
         }
     }
 }

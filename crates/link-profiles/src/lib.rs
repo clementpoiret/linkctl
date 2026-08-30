@@ -1420,7 +1420,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ProfileCatalog, VendorProfile, decode_control, encode_control, encode_decoded_control,
+        ProfileCatalog, ProfileControl, VendorProfile, decode_control, encode_control,
+        encode_decoded_control,
     };
 
     fn identity(hash: &str) -> UsbIdentity {
@@ -1434,6 +1435,23 @@ mod tests {
             topology: "1-2.1".into(),
             descriptor_sha256: hash.into(),
         }
+    }
+
+    fn required_control<'a>(profile: &'a VendorProfile, name: &str) -> &'a ProfileControl {
+        profile
+            .control(name)
+            .unwrap_or_else(|| panic!("missing profile control {name}"))
+    }
+
+    fn assert_open_write_policy(
+        control: &ProfileControl,
+        stream_warmup_delay_ms: u64,
+        verification_delay_ms: u64,
+    ) {
+        assert_eq!(control.stream_requirement, super::StreamRequirement::Open);
+        assert_eq!(control.stream_warmup_delay_ms, stream_warmup_delay_ms);
+        assert_eq!(control.verification_delay_ms, verification_delay_ms);
+        assert_eq!(control.write_prelude, super::WritePrelude::GetLengthTwice);
     }
 
     #[test]
@@ -1591,12 +1609,9 @@ firmware = ["v1.2.3"]
         assert!(matched.semantic_read_verified());
         assert!(matched.semantic_write_authorized());
 
-        let control = matched.profile.control("auto-framing.enabled").unwrap();
+        let control = required_control(&matched.profile, "auto-framing.enabled");
         assert!(control.writable);
-        assert_eq!(control.stream_requirement, super::StreamRequirement::Open);
-        assert_eq!(control.stream_warmup_delay_ms, 1_000);
-        assert_eq!(control.verification_delay_ms, 500);
-        assert_eq!(control.write_prelude, super::WritePrelude::GetLengthTwice);
+        assert_open_write_policy(control, 1_000, 500);
         assert_eq!(
             control.stream_format.as_ref().unwrap().video_tuple(),
             link_core::media::VideoTuple {
@@ -1617,10 +1632,8 @@ firmware = ["v1.2.3"]
         on_readback[0] = 0x00;
         assert_eq!(decode_control(control, &on_readback).unwrap(), json!("off"));
 
-        let smart_composition = matched
-            .profile
-            .control("auto-framing.smart-composition")
-            .unwrap();
+        let smart_composition =
+            required_control(&matched.profile, "auto-framing.smart-composition");
         assert!(smart_composition.writable);
         assert_eq!(smart_composition.stream_warmup_delay_ms, 1_000);
         assert_eq!(smart_composition.verification_delay_ms, 500);
@@ -1643,14 +1656,11 @@ firmware = ["v1.2.3"]
             [0xd1, 0x01]
         );
 
-        let hdr = matched.profile.control("image.hdr").unwrap();
+        let hdr = required_control(&matched.profile, "image.hdr");
         assert!(hdr.writable);
         assert!(hdr.read_modify_write);
         assert_eq!(hdr.write_mask, Some(4));
-        assert_eq!(hdr.stream_requirement, super::StreamRequirement::Open);
-        assert_eq!(hdr.stream_warmup_delay_ms, 1_000);
-        assert_eq!(hdr.verification_delay_ms, 500);
-        assert_eq!(hdr.write_prelude, super::WritePrelude::GetLengthTwice);
+        assert_open_write_policy(hdr, 1_000, 500);
         assert_eq!(decode_control(hdr, &[0xd1, 0x01]).unwrap(), json!("off"));
         assert_eq!(decode_control(hdr, &[0xd5, 0x01]).unwrap(), json!("on"));
         assert_eq!(
@@ -1662,14 +1672,11 @@ firmware = ["v1.2.3"]
             [0xd4, 0x01]
         );
 
-        let mirror = matched.profile.control("image.mirror").unwrap();
+        let mirror = required_control(&matched.profile, "image.mirror");
         assert!(mirror.writable);
         assert!(mirror.read_modify_write);
         assert_eq!(mirror.write_mask, Some(8));
-        assert_eq!(mirror.stream_requirement, super::StreamRequirement::Open);
-        assert_eq!(mirror.stream_warmup_delay_ms, 1_000);
-        assert_eq!(mirror.verification_delay_ms, 500);
-        assert_eq!(mirror.write_prelude, super::WritePrelude::GetLengthTwice);
+        assert_open_write_policy(mirror, 1_000, 500);
         assert_eq!(decode_control(mirror, &[0xd5, 0x01]).unwrap(), json!("off"));
         assert_eq!(decode_control(mirror, &[0xdd, 0x01]).unwrap(), json!("on"));
         assert_eq!(
@@ -1681,14 +1688,11 @@ firmware = ["v1.2.3"]
             [0xd5, 0x11]
         );
 
-        let flip = matched.profile.control("image.flip").unwrap();
+        let flip = required_control(&matched.profile, "image.flip");
         assert!(flip.writable);
         assert!(flip.read_modify_write);
         assert_eq!(flip.write_mask, Some(4096));
-        assert_eq!(flip.stream_requirement, super::StreamRequirement::Open);
-        assert_eq!(flip.stream_warmup_delay_ms, 1_000);
-        assert_eq!(flip.verification_delay_ms, 500);
-        assert_eq!(flip.write_prelude, super::WritePrelude::GetLengthTwice);
+        assert_open_write_policy(flip, 1_000, 500);
         assert_eq!(decode_control(flip, &[0xd5, 0x01]).unwrap(), json!("off"));
         assert_eq!(decode_control(flip, &[0xd5, 0x11]).unwrap(), json!("on"));
         assert_eq!(
@@ -1700,7 +1704,7 @@ firmware = ["v1.2.3"]
             [0xdd, 0x01]
         );
 
-        let compatibility = matched.profile.control("mode.compatibility").unwrap();
+        let compatibility = required_control(&matched.profile, "mode.compatibility");
         assert!(compatibility.writable);
         assert!(compatibility.read_modify_write);
         assert_eq!(compatibility.selector, 27);
@@ -1731,7 +1735,7 @@ firmware = ["v1.2.3"]
             [0xdd, 0x11]
         );
 
-        let portrait = matched.profile.control("portrait.native").unwrap();
+        let portrait = required_control(&matched.profile, "portrait.native");
         assert!(portrait.writable);
         assert!(portrait.read_modify_write);
         assert_eq!(portrait.selector, 27);
@@ -1762,16 +1766,13 @@ firmware = ["v1.2.3"]
             [0xdd, 0x11]
         );
 
-        let gestures = matched.profile.control("gesture.enabled").unwrap();
+        let gestures = required_control(&matched.profile, "gesture.enabled");
         assert!(gestures.writable);
         assert!(gestures.read_modify_write);
         assert_eq!(gestures.selector, 5);
         assert_eq!(gestures.length, 1);
         assert_eq!(gestures.write_mask, Some(0x0e));
-        assert_eq!(gestures.stream_requirement, super::StreamRequirement::Open);
-        assert_eq!(gestures.stream_warmup_delay_ms, 1_000);
-        assert_eq!(gestures.verification_delay_ms, 500);
-        assert_eq!(gestures.write_prelude, super::WritePrelude::GetLengthTwice);
+        assert_open_write_policy(gestures, 1_000, 500);
         assert_eq!(decode_control(gestures, &[0x0e]).unwrap(), json!("on"));
         assert_eq!(
             decode_control(gestures, &[0x0c]).unwrap(),
@@ -1790,14 +1791,14 @@ firmware = ["v1.2.3"]
             [0x0f]
         );
 
-        let palm = matched.profile.control("gesture.palm").unwrap();
+        let palm = required_control(&matched.profile, "gesture.palm");
         assert_eq!(palm.write_mask, Some(0x02));
         assert_eq!(decode_control(palm, &[0x0c]).unwrap(), json!("off"));
         assert_eq!(decode_control(palm, &[0x0e]).unwrap(), json!("on"));
         assert_eq!(encode_control(palm, "off", Some(&[0x0f])).unwrap(), [0x0d]);
         assert_eq!(encode_control(palm, "on", Some(&[0x0d])).unwrap(), [0x0f]);
 
-        let v_sign = matched.profile.control("gesture.v-sign").unwrap();
+        let v_sign = required_control(&matched.profile, "gesture.v-sign");
         assert_eq!(v_sign.write_mask, Some(0x08));
         assert_eq!(decode_control(v_sign, &[0x06]).unwrap(), json!("off"));
         assert_eq!(decode_control(v_sign, &[0x0e]).unwrap(), json!("on"));
@@ -1807,7 +1808,7 @@ firmware = ["v1.2.3"]
         );
         assert_eq!(encode_control(v_sign, "on", Some(&[0x07])).unwrap(), [0x0f]);
 
-        let l_sign = matched.profile.control("gesture.l-sign").unwrap();
+        let l_sign = required_control(&matched.profile, "gesture.l-sign");
         assert_eq!(l_sign.write_mask, Some(0x04));
         assert_eq!(decode_control(l_sign, &[0x0a]).unwrap(), json!("off"));
         assert_eq!(decode_control(l_sign, &[0x0e]).unwrap(), json!("on"));
@@ -1817,7 +1818,7 @@ firmware = ["v1.2.3"]
         );
         assert_eq!(encode_control(l_sign, "on", Some(&[0x0b])).unwrap(), [0x0f]);
 
-        let pickup_mode = matched.profile.control("audio.pickup-mode").unwrap();
+        let pickup_mode = required_control(&matched.profile, "audio.pickup-mode");
         assert!(pickup_mode.writable);
         assert_eq!(pickup_mode.selector, 31);
         assert_eq!(pickup_mode.length, 1);
@@ -1845,20 +1846,11 @@ firmware = ["v1.2.3"]
             [2]
         );
 
-        let whiteboard = matched.profile.control("mode.whiteboard").unwrap();
+        let whiteboard = required_control(&matched.profile, "mode.whiteboard");
         assert!(whiteboard.writable);
         assert_eq!(whiteboard.selector, 2);
         assert_eq!(whiteboard.length, 61);
-        assert_eq!(
-            whiteboard.stream_requirement,
-            super::StreamRequirement::Open
-        );
-        assert_eq!(whiteboard.stream_warmup_delay_ms, 1_000);
-        assert_eq!(whiteboard.verification_delay_ms, 2_250);
-        assert_eq!(
-            whiteboard.write_prelude,
-            super::WritePrelude::GetLengthTwice
-        );
+        assert_open_write_policy(whiteboard, 1_000, 2_250);
         assert_eq!(decode_control(whiteboard, &[4; 61]).unwrap(), json!("on"));
         assert_eq!(decode_control(whiteboard, &[0; 61]).unwrap(), json!("off"));
         let whiteboard_on = encode_control(whiteboard, "on", None).unwrap();
@@ -1871,7 +1863,7 @@ firmware = ["v1.2.3"]
         assert_eq!(whiteboard_off[0], 0);
         assert_eq!(&whiteboard_off[1..], &whiteboard_on[1..]);
 
-        let deskview = matched.profile.control("mode.deskview").unwrap();
+        let deskview = required_control(&matched.profile, "mode.deskview");
         assert!(deskview.writable);
         assert_eq!(deskview.selector, 2);
         assert_eq!(deskview.length, 61);
@@ -1887,10 +1879,8 @@ firmware = ["v1.2.3"]
         assert_eq!(&deskview_on[42..46], &[0x1a, 0x0e, 0, 0]);
         assert_eq!(&deskview_on[50..55], &[0, 0, 0x3e, 0xfe, 0]);
 
-        let deskview_correction = matched
-            .profile
-            .control("mode.deskview.vertical-correction")
-            .unwrap();
+        let deskview_correction =
+            required_control(&matched.profile, "mode.deskview.vertical-correction");
         assert!(matches!(
             &deskview_correction.tail_policy,
             super::TailPolicy::Template { .. }
@@ -1923,18 +1913,15 @@ firmware = ["v1.2.3"]
             .is_err()
         );
 
-        let exposure = matched.profile.control("image.exposure").unwrap();
+        let exposure = required_control(&matched.profile, "image.exposure");
         assert_eq!(exposure.selector, 30);
         assert_eq!(exposure.length, 1);
-        assert_eq!(exposure.stream_requirement, super::StreamRequirement::Open);
-        assert_eq!(exposure.stream_warmup_delay_ms, 1_000);
-        assert_eq!(exposure.verification_delay_ms, 250);
-        assert_eq!(exposure.write_prelude, super::WritePrelude::GetLengthTwice);
+        assert_open_write_policy(exposure, 1_000, 250);
         assert_eq!(decode_control(exposure, &[1]).unwrap(), json!("manual"));
         assert_eq!(decode_control(exposure, &[2]).unwrap(), json!("auto"));
         assert_eq!(encode_control(exposure, "manual", Some(&[2])).unwrap(), [1]);
 
-        let iso = matched.profile.control("image.exposure.iso").unwrap();
+        let iso = required_control(&matched.profile, "image.exposure.iso");
         assert_eq!(iso.selector, 25);
         assert_eq!(iso.length, 2);
         assert_eq!(iso.verification_delay_ms, 250);
@@ -1944,10 +1931,7 @@ firmware = ["v1.2.3"]
             [0x80, 0x0c]
         );
 
-        let shutter = matched
-            .profile
-            .control("image.exposure.shutter-denominator")
-            .unwrap();
+        let shutter = required_control(&matched.profile, "image.exposure.shutter-denominator");
         assert_eq!(shutter.selector, 29);
         assert_eq!(shutter.length, 2);
         assert_eq!(shutter.verification_delay_ms, 250);
@@ -1959,22 +1943,11 @@ firmware = ["v1.2.3"]
         );
         assert!(matched.profile.control("image.exposure.curve").is_none());
 
-        let exposure_compensation = matched
-            .profile
-            .control("image.exposure_compensation")
-            .unwrap();
+        let exposure_compensation =
+            required_control(&matched.profile, "image.exposure_compensation");
         assert_eq!(exposure_compensation.selector, 9);
         assert_eq!(exposure_compensation.length, 2);
-        assert_eq!(
-            exposure_compensation.stream_requirement,
-            super::StreamRequirement::Open
-        );
-        assert_eq!(exposure_compensation.stream_warmup_delay_ms, 1_000);
-        assert_eq!(exposure_compensation.verification_delay_ms, 250);
-        assert_eq!(
-            exposure_compensation.write_prelude,
-            super::WritePrelude::GetLengthTwice
-        );
+        assert_open_write_policy(exposure_compensation, 1_000, 250);
         assert_eq!(
             decode_control(exposure_compensation, &[0xd4, 0xfe]).unwrap(),
             json!(-300)
@@ -1993,7 +1966,7 @@ firmware = ["v1.2.3"]
             .readback_tolerance = 1;
         assert!(invalid_tolerance.validate("invalid tolerance").is_err());
 
-        let style = matched.profile.control("auto-framing.style").unwrap();
+        let style = required_control(&matched.profile, "auto-framing.style");
         assert!(style.writable);
         assert_eq!(style.stream_warmup_delay_ms, 1_000);
         assert_eq!(style.verification_delay_ms, 500);

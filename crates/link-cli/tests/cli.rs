@@ -7,31 +7,31 @@ use std::{
 
 use serde_json::Value;
 
-fn run(arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_linkctl"))
+fn command(arguments: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_linkctl"));
+    command
         .args(arguments)
         .env_remove("LINKCTL_FORMAT")
-        .env_remove("LINKCTL_CONFIG")
+        .env_remove("LINKCTL_CONFIG");
+    command
+}
+
+fn run(arguments: &[&str]) -> Output {
+    command(arguments)
         .env_remove("LINKCTL_UNSAFE_XU")
         .output()
         .expect("linkctl should execute")
 }
 
 fn run_with_environment(arguments: &[&str], name: &str, value: &str) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_linkctl"))
-        .args(arguments)
-        .env_remove("LINKCTL_FORMAT")
-        .env_remove("LINKCTL_CONFIG")
+    command(arguments)
         .env(name, value)
         .output()
         .expect("linkctl should execute")
 }
 
 fn run_with_xdg(arguments: &[&str], root: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_linkctl"))
-        .args(arguments)
-        .env_remove("LINKCTL_FORMAT")
-        .env_remove("LINKCTL_CONFIG")
+    command(arguments)
         .env_remove("LINKCTL_DEVICE")
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_STATE_HOME", root.join("state"))
@@ -40,11 +40,19 @@ fn run_with_xdg(arguments: &[&str], root: &Path) -> Output {
         .expect("linkctl should execute")
 }
 
+fn successful_help(arguments: &[&str]) -> String {
+    let output = run(arguments);
+    assert!(
+        output.status.success(),
+        "{arguments:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("UTF-8 help")
+}
+
 #[test]
 fn help_and_version_advertise_only_implemented_commands() {
-    let help = run(&["--help"]);
-    assert!(help.status.success());
-    let stdout = String::from_utf8(help.stdout).expect("UTF-8 help");
+    let stdout = successful_help(&["--help"]);
     assert!(stdout.contains("--unsafe-xu"));
     assert!(stdout.contains("Commands:"));
     assert!(stdout.contains("device"));
@@ -79,9 +87,7 @@ fn help_and_version_advertise_only_implemented_commands() {
 
 #[test]
 fn firmware_help_exposes_only_safe_manual_maintenance_commands() {
-    let help = run(&["firmware", "--help"]);
-    assert!(help.status.success());
-    let stdout = String::from_utf8(help.stdout).expect("UTF-8 help");
+    let stdout = successful_help(&["firmware", "--help"]);
     for command in ["info", "watch", "stage"] {
         assert!(stdout.contains(command));
     }
@@ -89,9 +95,7 @@ fn firmware_help_exposes_only_safe_manual_maintenance_commands() {
         assert!(!stdout.contains(prohibited));
     }
 
-    let stage = run(&["firmware", "stage", "--help"]);
-    assert!(stage.status.success());
-    let stdout = String::from_utf8(stage.stdout).expect("UTF-8 help");
+    let stdout = successful_help(&["firmware", "stage", "--help"]);
     assert!(stdout.contains("OFFICIAL_FILE"));
     assert!(stdout.contains("--sha256"));
     assert!(stdout.contains("--transition-timeout"));
@@ -163,9 +167,7 @@ fn daemon_commands_and_virtual_camera_contract_are_exposed_offline() {
 
 #[test]
 fn xu_help_exposes_read_research_write_and_recovery_commands() {
-    let help = run(&["xu", "--help"]);
-    assert!(help.status.success());
-    let stdout = String::from_utf8(help.stdout).expect("UTF-8 help");
+    let stdout = successful_help(&["xu", "--help"]);
     for command in [
         "inventory",
         "get",
@@ -179,13 +181,7 @@ fn xu_help_exposes_read_research_write_and_recovery_commands() {
         assert!(stdout.contains(command));
     }
 
-    let doctor = run(&["doctor", "--help"]);
-    assert!(doctor.status.success());
-    assert!(
-        String::from_utf8(doctor.stdout)
-            .expect("UTF-8 help")
-            .contains("--bundle")
-    );
+    assert!(successful_help(&["doctor", "--help"]).contains("--bundle"));
 }
 
 #[test]
@@ -252,9 +248,7 @@ fn doctor_writes_a_private_no_clobber_diagnostic_archive() {
 
 #[test]
 fn preset_help_and_local_store_commands_are_hardware_free() {
-    let help = run(&["preset", "--help"]);
-    assert!(help.status.success());
-    let stdout = String::from_utf8(help.stdout).expect("UTF-8 help");
+    let stdout = successful_help(&["preset", "--help"]);
     for command in [
         "save", "apply", "list", "show", "delete", "export", "import",
     ] {
@@ -332,23 +326,17 @@ fn published_json_schemas_are_valid_documents() {
 
 #[test]
 fn media_help_exposes_exact_tuple_and_output_options() {
-    let video = run(&["video", "--help"]);
-    assert!(video.status.success());
-    let stdout = String::from_utf8(video.stdout).expect("UTF-8 help");
+    let stdout = successful_help(&["video", "--help"]);
     for command in ["formats", "status", "set", "stats"] {
         assert!(stdout.contains(command));
     }
 
-    let snapshot = run(&["snapshot", "--help"]);
-    assert!(snapshot.status.success());
-    let stdout = String::from_utf8(snapshot.stdout).expect("UTF-8 help");
+    let stdout = successful_help(&["snapshot", "--help"]);
     assert!(stdout.contains("--image-format"));
     assert!(stdout.contains("--raw-frame"));
     assert!(!stdout.contains("--format <IMAGE"));
 
-    let record = run(&["record", "start", "--help"]);
-    assert!(record.status.success());
-    let stdout = String::from_utf8(record.stdout).expect("UTF-8 help");
+    let stdout = successful_help(&["record", "start", "--help"]);
     assert!(stdout.contains("--segment-duration"));
     assert!(stdout.contains("--rolling"));
     assert!(stdout.contains("--disk-reserve"));
@@ -359,18 +347,14 @@ fn media_help_exposes_exact_tuple_and_output_options() {
 
 #[test]
 fn audio_help_exposes_discovery_control_and_streaming_commands() {
-    let audio = run(&["audio", "--help"]);
-    assert!(audio.status.success());
-    let stdout = String::from_utf8(audio.stdout).expect("UTF-8 help");
+    let stdout = successful_help(&["audio", "--help"]);
     for command in [
         "devices", "status", "gain", "mute", "unmute", "mode", "meter", "capture", "monitor",
     ] {
         assert!(stdout.contains(command));
     }
 
-    let capture = run(&["audio", "capture", "--help"]);
-    assert!(capture.status.success());
-    let stdout = String::from_utf8(capture.stdout).expect("UTF-8 help");
+    let stdout = successful_help(&["audio", "capture", "--help"]);
     for option in ["--stdout", "--audio-format", "--sample-rate", "--channels"] {
         assert!(stdout.contains(option));
     }
@@ -407,38 +391,27 @@ fn recording_dry_run_validates_limits_before_opening_hardware() {
 
 #[test]
 fn device_help_describes_read_only_inventory_commands() {
-    let help = run(&["device", "--help"]);
-    assert!(help.status.success());
-    let stdout = String::from_utf8(help.stdout).expect("UTF-8 help");
+    let stdout = successful_help(&["device", "--help"]);
     assert!(stdout.contains("list"));
     assert!(stdout.contains("info"));
     assert!(stdout.contains("watch"));
     assert!(stdout.contains("probe"));
 
-    let probe_help = run(&["device", "probe", "--help"]);
-    assert!(probe_help.status.success());
-    let stdout = String::from_utf8(probe_help.stdout).expect("UTF-8 help");
+    let stdout = successful_help(&["device", "probe", "--help"]);
     assert!(stdout.contains("--bundle"));
     assert!(stdout.contains("--include-serial"));
 }
 
 #[test]
-fn control_and_image_help_expose_only_non_mechanical_commands() {
-    let control = run(&["control", "--help"]);
-    assert!(control.status.success());
-    let stdout = String::from_utf8(control.stdout).expect("UTF-8 help");
+fn control_and_image_help_expose_expected_commands() {
+    let stdout = successful_help(&["control", "--help"]);
     for command in ["list", "get", "set", "reset", "watch"] {
         assert!(stdout.contains(command));
     }
 
-    let image = run(&["image", "--help"]);
-    assert!(image.status.success());
-    let stdout = String::from_utf8(image.stdout).expect("UTF-8 help");
+    let stdout = successful_help(&["image", "--help"]);
     assert!(stdout.contains("white-balance"));
     assert!(stdout.contains("anti-flicker"));
-    assert!(!stdout.contains("pan"));
-    assert!(!stdout.contains("tilt"));
-    assert!(!stdout.contains("gimbal"));
 }
 
 #[test]
@@ -450,18 +423,9 @@ fn camera_native_help_exposes_only_fixed_mount_semantics() {
         ("gesture", &["status", "enable", "disable", "set"]),
         ("portrait", &["status", "native"]),
     ] {
-        let help = run(&[command, "--help"]);
-        assert!(
-            help.status.success(),
-            "{command}: {}",
-            String::from_utf8_lossy(&help.stderr)
-        );
-        let stdout = String::from_utf8(help.stdout).expect("UTF-8 help");
+        let stdout = successful_help(&[command, "--help"]);
         for item in expected {
             assert!(stdout.contains(item), "{command} help omitted {item}");
-        }
-        for prohibited in ["gimbal", "tracking-zone", "motor"] {
-            assert!(!stdout.contains(prohibited));
         }
     }
 
@@ -471,9 +435,7 @@ fn camera_native_help_exposes_only_fixed_mount_semantics() {
     assert!(stdout.contains("half-body"));
     assert!(!stdout.contains("full-body"));
 
-    let compatibility = run(&["mode", "compatibility", "set", "--help"]);
-    assert!(compatibility.status.success());
-    let stdout = String::from_utf8(compatibility.stdout).expect("UTF-8 help");
+    let stdout = successful_help(&["mode", "compatibility", "set", "--help"]);
     assert!(stdout.contains("standard"));
     assert!(stdout.contains("low-resolution"));
 }
