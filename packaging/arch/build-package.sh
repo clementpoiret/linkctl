@@ -27,4 +27,5 @@ sed \
 
 cd "$temporary"
 PKGDEST="$output_directory" SRCDEST="$temporary" BUILDDIR="$temporary/build" \
-  makepkg --clean --cleanbuild --force --noconfirm --noprogressbar
+  makepkg --clean --cleanbuild --force --noconfirm --noprogressbar \
+    PKGEXT=.pkg.tar.zst
