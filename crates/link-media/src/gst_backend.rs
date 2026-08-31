@@ -8,6 +8,7 @@ use std::{
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -222,6 +223,19 @@ pub struct SharedRecording {
     pub output: PathBuf,
     pub container: RecordContainer,
     pub overwrite: bool,
+}
+
+/// Decoder policy for daemon-owned raw video branches.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DecoderPreference {
+    /// Prefer VA-API when GStreamer exposes a usable decoder, otherwise use software.
+    #[default]
+    Auto,
+    /// Always use the software decoder.
+    Software,
+    /// Require a VA-API decoder.
+    VaApi,
 }
 
 /// Live counters for one daemon-owned source graph.
@@ -907,9 +921,14 @@ pub struct SharedPipeline {
     jpeg_valve: gst::Element,
     png_sink: gst_app::AppSink,
     png_valve: gst::Element,
+    raw_valve: gst::Element,
+    encoded_tee: gst::Element,
+    raw_tee: gst::Element,
     source_frames: Arc<AtomicU64>,
     source_bytes: Arc<AtomicU64>,
     output_metrics: BTreeMap<String, SharedOutputTelemetry>,
+    output_branches: BTreeMap<String, LinkedBranch>,
+    recording_branch: Option<LinkedBranch>,
     started: Instant,
     started_unix_ms: u128,
 }
@@ -930,10 +949,13 @@ impl SharedPipeline {
         source: SharedSource,
         outputs: Vec<SharedOutput>,
         recording: Option<SharedRecording>,
+        decoder_preference: DecoderPreference,
+        decoder_device: Option<&Path>,
         timeout: Duration,
     ) -> Result<Self, LinkError> {
         validate_shared_contracts(&outputs, recording.as_ref())?;
         let lease = MediaLease::acquire(&source.stable_id, "linkd")?;
+        let decoder = shared_decoder(&source.tuple, decoder_preference, decoder_device)?;
         let mut required = vec![
             "v4l2src",
             "capsfilter",
@@ -945,10 +967,11 @@ impl SharedPipeline {
             "pngenc",
             "appsink",
         ];
-        match source.tuple.fourcc.to_ascii_uppercase().as_str() {
-            "MJPG" => required.extend(["jpegparse", "jpegdec"]),
-            "H264" => required.extend(["h264parse", "avdec_h264"]),
-            _ => {}
+        if let Some(parser) = decoder.parser {
+            required.push(parser);
+        }
+        if let Some(element) = decoder.element.as_deref() {
+            required.push(element);
         }
         if !outputs.is_empty() {
             required.extend([
@@ -990,12 +1013,16 @@ impl SharedPipeline {
         let source_bytes = Arc::new(AtomicU64::new(0));
         attach_atomic_stats(&source_filter, &source_frames, &source_bytes)?;
 
-        let raw_queue = queue_element()?;
-        let mut raw_front = vec![raw_queue.clone()];
-        match source.tuple.fourcc.to_ascii_uppercase().as_str() {
-            "MJPG" => raw_front.extend([make("jpegparse")?, make("jpegdec")?]),
-            "H264" => raw_front.extend([make("h264parse")?, make("avdec_h264")?]),
-            _ => {}
+        let raw_valve = gst::ElementFactory::make("valve")
+            .property("drop", outputs.is_empty())
+            .build()
+            .map_err(build_error)?;
+        let mut raw_front = vec![raw_valve.clone(), queue_element()?];
+        if let Some(parser) = decoder.parser {
+            raw_front.push(make(parser)?);
+        }
+        if let Some(element) = decoder.element.as_deref() {
+            raw_front.push(make_named(element)?);
         }
         raw_front.push(make("videoconvert")?);
         let raw_tee = make("tee")?;
@@ -1008,16 +1035,23 @@ impl SharedPipeline {
         add_and_link_branch(&pipeline, &raw_tee, &png_elements)?;
 
         let mut output_metrics = BTreeMap::new();
+        let mut output_branches = BTreeMap::new();
         for output in &outputs {
             let telemetry = SharedOutputTelemetry::default();
             let branch = output_branch(output, &source.tuple, &telemetry)?;
-            add_and_link_branch(&pipeline, &raw_tee, &branch)?;
+            let linked = add_and_link_branch(&pipeline, &raw_tee, &branch)?;
+            linked.open();
             output_metrics.insert(output.name.clone(), telemetry);
+            output_branches.insert(output.name.clone(), linked);
         }
-        if let Some(recording) = &recording {
+        let recording_branch = if let Some(recording) = &recording {
             let branch = recording_branch(recording, &source.tuple)?;
-            add_and_link_branch(&pipeline, &encoded_tee, &branch)?;
-        }
+            let linked = add_and_link_branch(&pipeline, &encoded_tee, &branch)?;
+            linked.open();
+            Some(linked)
+        } else {
+            None
+        };
 
         let bus = pipeline
             .bus()
@@ -1052,22 +1086,27 @@ impl SharedPipeline {
             pipeline,
             graph: SharedGraph {
                 source,
-                decode: "decode-to-raw".into(),
+                decode: decoder.description.into(),
                 outputs,
                 recording,
                 snapshot_branches: vec!["jpeg".into(), "png".into()],
                 queue_max_buffers: SHARED_QUEUE_MAX_BUFFERS,
                 queue_policy: "leaky-downstream".into(),
-                processing_backend: "gstreamer-cpu".into(),
+                processing_backend: decoder.backend.into(),
                 latency_window_samples: SHARED_LATENCY_WINDOW_SAMPLES as u32,
             },
             jpeg_sink,
             jpeg_valve,
             png_sink,
             png_valve,
+            raw_valve,
+            encoded_tee,
+            raw_tee,
             source_frames,
             source_bytes,
             output_metrics,
+            output_branches,
+            recording_branch,
             started: Instant::now(),
             started_unix_ms,
         })
@@ -1114,6 +1153,84 @@ impl SharedPipeline {
         }
     }
 
+    /// Attach one virtual-camera branch without restarting the physical source.
+    pub fn add_output(&mut self, output: SharedOutput) -> Result<(), LinkError> {
+        let mut outputs = self.graph.outputs.clone();
+        outputs.push(output.clone());
+        validate_shared_contracts(&outputs, self.graph.recording.as_ref())?;
+        let telemetry = SharedOutputTelemetry::default();
+        let elements = output_branch(&output, &self.graph.source.tuple, &telemetry)?;
+        let linked = add_and_link_branch(&self.pipeline, &self.raw_tee, &elements)?;
+        if let Err(error) = linked.sync_with_parent() {
+            linked.remove(&self.pipeline, &self.raw_tee);
+            return Err(error);
+        }
+        linked.open();
+        self.raw_valve.set_property("drop", false);
+        self.output_metrics.insert(output.name.clone(), telemetry);
+        self.output_branches.insert(output.name.clone(), linked);
+        self.graph.outputs = outputs;
+        Ok(())
+    }
+
+    /// Detach one virtual-camera branch without restarting other consumers.
+    pub fn remove_output(&mut self, name: &str) -> Result<(), LinkError> {
+        let linked = self.output_branches.remove(name).ok_or_else(|| {
+            LinkError::new(ErrorKind::DeviceNotFound, "virtual camera is not active")
+                .with_detail("name", name.to_owned())
+        })?;
+        linked.close();
+        if self.output_branches.is_empty() {
+            self.raw_valve.set_property("drop", true);
+        }
+        linked.remove(&self.pipeline, &self.raw_tee);
+        self.output_metrics.remove(name);
+        self.graph.outputs.retain(|output| output.name != name);
+        Ok(())
+    }
+
+    /// Attach a pass-through recording branch without restarting the source.
+    pub fn add_recording(&mut self, recording: SharedRecording) -> Result<(), LinkError> {
+        validate_shared_contracts(&self.graph.outputs, Some(&recording))?;
+        if self.recording_branch.is_some() {
+            return Err(LinkError::new(
+                ErrorKind::DeviceBusy,
+                "a shared recording branch is already active",
+            ));
+        }
+        let elements = recording_branch(&recording, &self.graph.source.tuple)?;
+        let linked = add_and_link_branch(&self.pipeline, &self.encoded_tee, &elements)?;
+        if let Err(error) = linked.sync_with_parent() {
+            linked.remove(&self.pipeline, &self.encoded_tee);
+            return Err(error);
+        }
+        linked.open();
+        self.recording_branch = Some(linked);
+        self.graph.recording = Some(recording);
+        Ok(())
+    }
+
+    /// Finalize and detach the active recording branch without restarting other consumers.
+    pub fn remove_recording(&mut self, timeout: Duration) -> Result<bool, LinkError> {
+        let linked = self.recording_branch.take().ok_or_else(|| {
+            LinkError::new(
+                ErrorKind::InvalidInvocation,
+                "no shared recording branch is active",
+            )
+        })?;
+        let finalized = match linked.finalize(timeout) {
+            Ok(finalized) => finalized,
+            Err(error) => {
+                linked.open();
+                self.recording_branch = Some(linked);
+                return Err(error);
+            }
+        };
+        linked.remove(&self.pipeline, &self.encoded_tee);
+        self.graph.recording = None;
+        Ok(finalized)
+    }
+
     /// Pull a still frame from the running decoded stream without reopening the source.
     pub fn snapshot(
         &self,
@@ -1130,7 +1247,11 @@ impl SharedPipeline {
                 ));
             }
         };
+        let wake_raw_branch = self.graph.outputs.is_empty();
         valve.set_property("drop", false);
+        if wake_raw_branch {
+            self.raw_valve.set_property("drop", false);
+        }
         let result = (|| {
             let sample = sink
                 .try_pull_sample(gst::ClockTime::from_nseconds(duration_ns(timeout)))
@@ -1149,6 +1270,9 @@ impl SharedPipeline {
             })
         })();
         valve.set_property("drop", true);
+        if wake_raw_branch {
+            self.raw_valve.set_property("drop", true);
+        }
         result
     }
 
@@ -1169,6 +1293,9 @@ impl SharedPipeline {
 
     /// Gracefully finalize sinks before releasing the physical source.
     pub fn shutdown(&self, timeout: Duration) -> bool {
+        self.raw_valve.set_property("drop", false);
+        self.jpeg_valve.set_property("drop", false);
+        self.png_valve.set_property("drop", false);
         self.pipeline.send_event(gst::event::Eos::new());
         let finalized = self.pipeline.bus().is_some_and(|bus| {
             let deadline = Instant::now() + timeout;
@@ -1302,7 +1429,163 @@ fn validate_shared_contracts(
     Ok(())
 }
 
+#[derive(Clone)]
+struct SharedDecoder {
+    parser: Option<&'static str>,
+    element: Option<String>,
+    description: &'static str,
+    backend: &'static str,
+}
+
+fn shared_decoder(
+    source: &VideoTuple,
+    preference: DecoderPreference,
+    decoder_device: Option<&Path>,
+) -> Result<SharedDecoder, LinkError> {
+    gst::init().map_err(|error| {
+        LinkError::new(
+            ErrorKind::MediaPipelineFailure,
+            "failed to initialize GStreamer",
+        )
+        .with_detail("reason", error.to_string())
+    })?;
+    let (parser, software, va_suffix) = match source.fourcc.to_ascii_uppercase().as_str() {
+        "H264" => (Some("h264parse"), Some("avdec_h264"), Some("h264dec")),
+        "MJPG" => (Some("jpegparse"), Some("jpegdec"), Some("jpegdec")),
+        "YUYV" | "YUY2" | "NV12" | "RGB3" | "BGR3" => {
+            return Ok(SharedDecoder {
+                parser: None,
+                element: None,
+                description: "raw-pass-through",
+                backend: "gstreamer",
+            });
+        }
+        format => {
+            return Err(LinkError::new(
+                ErrorKind::CapabilityUnsupported,
+                "the shared pipeline cannot decode the selected source format",
+            )
+            .with_detail("fourcc", format.to_owned()));
+        }
+    };
+    if preference == DecoderPreference::Software && decoder_device.is_some() {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "a decoder device cannot be combined with software decoding",
+        ));
+    }
+    let va_api = va_suffix.and_then(|suffix| va_decoder_factory(suffix, decoder_device));
+    match preference {
+        DecoderPreference::VaApi => {
+            let element = va_api.ok_or_else(|| {
+                let mut error = LinkError::new(
+                    ErrorKind::CapabilityUnsupported,
+                    "a usable VA-API decoder is unavailable",
+                )
+                .with_detail("fourcc", source.fourcc.clone());
+                if let Some(device) = decoder_device {
+                    error = error.with_detail("decoder_device", device.display().to_string());
+                }
+                error
+            })?;
+            Ok(SharedDecoder {
+                parser,
+                element: Some(element),
+                description: "decode-to-raw-va-api",
+                backend: "gstreamer-va-api",
+            })
+        }
+        DecoderPreference::Auto if decoder_device.is_some() => {
+            let element = va_api.ok_or_else(|| {
+                LinkError::new(
+                    ErrorKind::CapabilityUnsupported,
+                    "the requested VA-API decoder device is unavailable",
+                )
+                .with_detail("fourcc", source.fourcc.clone())
+                .with_detail(
+                    "decoder_device",
+                    decoder_device
+                        .expect("guarded decoder device")
+                        .display()
+                        .to_string(),
+                )
+            })?;
+            Ok(SharedDecoder {
+                parser,
+                element: Some(element),
+                description: "decode-to-raw-va-api",
+                backend: "gstreamer-va-api",
+            })
+        }
+        DecoderPreference::Auto if va_api.is_some() => Ok(SharedDecoder {
+            parser,
+            element: va_api,
+            description: "decode-to-raw-va-api",
+            backend: "gstreamer-va-api",
+        }),
+        DecoderPreference::Auto | DecoderPreference::Software => Ok(SharedDecoder {
+            parser,
+            element: software.map(str::to_owned),
+            description: "decode-to-raw-software",
+            backend: "gstreamer-cpu",
+        }),
+    }
+}
+
+fn va_decoder_factory(codec_suffix: &str, requested_device: Option<&Path>) -> Option<String> {
+    let requested_device = requested_device
+        .map(|device| fs::canonicalize(device).unwrap_or_else(|_| device.to_path_buf()));
+    let mut candidates =
+        gst::ElementFactory::factories_with_type(gst::ElementFactoryType::DECODER, gst::Rank::NONE)
+            .into_iter()
+            .filter(|factory| factory.plugin_name().as_deref() == Some("va"))
+            .filter(|factory| factory.name().ends_with(codec_suffix))
+            .filter_map(|factory| {
+                let decoder = factory.create().build().ok()?;
+                let property = decoder.find_property("device-path")?;
+                if property.value_type() != String::static_type() {
+                    return None;
+                }
+                let device_path = PathBuf::from(decoder.property::<String>("device-path"));
+                if requested_device
+                    .as_deref()
+                    .is_some_and(|requested| requested != device_path)
+                {
+                    return None;
+                }
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&device_path)
+                    .ok()?;
+                Some((
+                    !render_node_is_primary(&device_path),
+                    device_path,
+                    factory.name().to_string(),
+                ))
+            })
+            .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.into_iter().next().map(|(_, _, factory)| factory)
+}
+
+fn render_node_is_primary(device: &Path) -> bool {
+    let Some(name) = device.file_name() else {
+        return false;
+    };
+    fs::read_to_string(
+        Path::new("/sys/class/drm")
+            .join(name)
+            .join("device/boot_vga"),
+    )
+    .is_ok_and(|value| value.trim() == "1")
+}
+
 fn make(name: &'static str) -> Result<gst::Element, LinkError> {
+    make_named(name)
+}
+
+fn make_named(name: &str) -> Result<gst::Element, LinkError> {
     gst::ElementFactory::make(name).build().map_err(build_error)
 }
 
@@ -1339,17 +1622,120 @@ fn monitored_queue(dropped_buffers: &Arc<AtomicU64>) -> Result<gst::Element, Lin
     Ok(queue)
 }
 
+struct LinkedBranch {
+    elements: Vec<gst::Element>,
+    tee_pad: gst::Pad,
+}
+
+impl LinkedBranch {
+    fn open(&self) {
+        if let Some(valve) = self.elements.first() {
+            valve.set_property("drop", false);
+        }
+    }
+
+    fn close(&self) {
+        if let Some(valve) = self.elements.first() {
+            valve.set_property("drop", true);
+        }
+    }
+
+    fn sync_with_parent(&self) -> Result<(), LinkError> {
+        for element in &self.elements {
+            element.sync_state_with_parent().map_err(|error| {
+                media_error("failed to activate a shared pipeline branch")
+                    .with_detail("element", element.name().to_string())
+                    .with_detail("reason", error.to_string())
+            })?;
+        }
+        Ok(())
+    }
+
+    fn finalize(&self, timeout: Duration) -> Result<bool, LinkError> {
+        let sink_pad = self
+            .elements
+            .last()
+            .and_then(|element| element.static_pad("sink"))
+            .ok_or_else(|| media_error("recording branch has no final sink pad"))?;
+        let (sender, receiver) = mpsc::channel();
+        let probe = sink_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+            if let Some(gst::PadProbeData::Event(event)) = info.data.as_ref()
+                && matches!(event.view(), gst::EventView::Eos(..))
+            {
+                let _ = sender.send(());
+            }
+            gst::PadProbeReturn::Ok
+        });
+        self.close();
+        let queue = self
+            .elements
+            .get(1)
+            .ok_or_else(|| media_error("recording branch is missing its finalization queue"))?;
+        if !queue.send_event(gst::event::Eos::new()) {
+            if let Some(probe) = probe {
+                sink_pad.remove_probe(probe);
+            }
+            return Err(media_error("failed to finalize the recording branch"));
+        }
+        let finalized = receiver.recv_timeout(timeout).is_ok();
+        if let Some(probe) = probe {
+            sink_pad.remove_probe(probe);
+        }
+        Ok(finalized)
+    }
+
+    fn remove(self, pipeline: &gst::Pipeline, tee: &gst::Element) {
+        if let Some(sink_pad) = self
+            .elements
+            .first()
+            .and_then(|element| element.static_pad("sink"))
+        {
+            let _ = self.tee_pad.unlink(&sink_pad);
+        }
+        tee.release_request_pad(&self.tee_pad);
+        for element in self.elements.iter().rev() {
+            let _ = element.set_state(gst::State::Null);
+        }
+        let _ = pipeline.remove_many(self.elements.iter());
+    }
+}
+
 fn add_and_link_branch(
     pipeline: &gst::Pipeline,
     tee: &gst::Element,
     elements: &[gst::Element],
-) -> Result<(), LinkError> {
-    pipeline.add_many(elements.iter()).map_err(pipeline_error)?;
+) -> Result<LinkedBranch, LinkError> {
     let first = elements
         .first()
         .ok_or_else(|| media_error("shared pipeline branch was empty"))?;
-    tee.link(first).map_err(link_error)?;
-    gst::Element::link_many(elements).map_err(link_error)
+    pipeline.add_many(elements.iter()).map_err(pipeline_error)?;
+    if let Err(error) = gst::Element::link_many(elements).map_err(link_error) {
+        let _ = pipeline.remove_many(elements.iter());
+        return Err(error);
+    }
+    let sink_pad = match first.static_pad("sink") {
+        Some(sink_pad) => sink_pad,
+        None => {
+            let _ = pipeline.remove_many(elements.iter());
+            return Err(media_error("shared pipeline branch has no sink pad"));
+        }
+    };
+    let Some(tee_pad) = tee.request_pad_simple("src_%u") else {
+        let _ = pipeline.remove_many(elements.iter());
+        return Err(media_error(
+            "shared pipeline tee did not provide a source pad",
+        ));
+    };
+    if let Err(error) = tee_pad.link(&sink_pad) {
+        tee.release_request_pad(&tee_pad);
+        let _ = pipeline.remove_many(elements.iter());
+        return Err(media_error("failed to link a shared pipeline branch")
+            .with_detail("reason", error.to_string()));
+    }
+    Ok(LinkedBranch {
+        elements: elements.to_vec(),
+        tee_pad,
+    })
 }
 
 fn snapshot_branch(
@@ -1376,7 +1762,7 @@ fn snapshot_branch(
     Ok((
         sink,
         valve.clone(),
-        vec![queue, valve, convert, encoder, sink_element],
+        vec![valve, queue, convert, encoder, sink_element],
     ))
 }
 
@@ -1386,6 +1772,10 @@ fn output_branch(
     telemetry: &SharedOutputTelemetry,
 ) -> Result<Vec<gst::Element>, LinkError> {
     let mut branch = vec![
+        gst::ElementFactory::make("valve")
+            .property("drop", true)
+            .build()
+            .map_err(build_error)?,
         monitored_queue(&telemetry.dropped_buffers)?,
         make("videoconvert")?,
     ];
@@ -1474,7 +1864,11 @@ fn recording_branch(
         RecordContainer::Mp4 => "mp4mux",
     };
     Ok(vec![
-        queue_element()?,
+        gst::ElementFactory::make("valve")
+            .property("drop", true)
+            .build()
+            .map_err(build_error)?,
+        recording_queue()?,
         make(parser_name(source)?)?,
         make(muxer)?,
         gst::ElementFactory::make("filesink")
@@ -1517,12 +1911,12 @@ fn crop_pixels(output: &SharedOutput, source: &VideoTuple) -> (i32, i32, i32, i3
 
 fn flip_methods(output: &SharedOutput) -> Vec<&'static str> {
     let mut methods = Vec::new();
-    methods.push(match output.rotation {
-        SharedRotation::None => "none",
-        SharedRotation::Clockwise90 => "clockwise",
-        SharedRotation::Rotate180 => "rotate-180",
-        SharedRotation::Counterclockwise90 => "counterclockwise",
-    });
+    match output.rotation {
+        SharedRotation::None => {}
+        SharedRotation::Clockwise90 => methods.push("clockwise"),
+        SharedRotation::Rotate180 => methods.push("rotate-180"),
+        SharedRotation::Counterclockwise90 => methods.push("counterclockwise"),
+    }
     if output.horizontal_flip {
         methods.push("horizontal-flip");
     }
@@ -2984,7 +3378,7 @@ fn filesystem_error(message: &'static str, path: &Path, error: &io::Error) -> Li
 #[cfg(test)]
 mod tests {
     use std::{
-        path::PathBuf,
+        path::{Path, PathBuf},
         sync::{Arc, Mutex, atomic::Ordering},
     };
 
@@ -2992,10 +3386,11 @@ mod tests {
     use link_core::audio::AudioProcessing;
 
     use super::{
-        AvSyncSeries, AvSyncState, SharedCrop, SharedFit, SharedOutput, SharedOutputTelemetry,
-        SharedRotation, audio_processing_elements, crop_pixels, finish_av_sync, make,
-        missing_elements, parse_byte_size, set_enum_property, shared_output_metrics,
-        validate_shared_contracts,
+        AvSyncSeries, AvSyncState, DecoderPreference, RecordContainer, SharedCrop, SharedFit,
+        SharedOutput, SharedOutputTelemetry, SharedRecording, SharedRotation, add_and_link_branch,
+        audio_processing_elements, crop_pixels, finish_av_sync, flip_methods, make,
+        missing_elements, parse_byte_size, recording_branch, set_enum_property, shared_decoder,
+        shared_output_metrics, validate_shared_contracts,
     };
     use link_core::{media::VideoTuple, probe::Rational};
 
@@ -3103,6 +3498,137 @@ mod tests {
         let mut duplicate_device = shared_output("effects");
         duplicate_device.device = first.device.clone();
         assert!(validate_shared_contracts(&[first, duplicate_device], None).is_err());
+    }
+
+    #[test]
+    fn clean_output_avoids_an_identity_flip_element() {
+        assert!(flip_methods(&shared_output("clean")).is_empty());
+    }
+
+    #[test]
+    fn software_decoder_policy_is_deterministic() {
+        let source = VideoTuple {
+            fourcc: "H264".into(),
+            width: 1920,
+            height: 1080,
+            fps: Rational {
+                numerator: 30,
+                denominator: 1,
+            },
+        };
+        let decoder = shared_decoder(&source, DecoderPreference::Software, None).unwrap();
+        assert_eq!(decoder.element.as_deref(), Some("avdec_h264"));
+        assert_eq!(decoder.backend, "gstreamer-cpu");
+
+        let automatic = shared_decoder(&source, DecoderPreference::Auto, None).unwrap();
+        assert!(
+            automatic
+                .element
+                .as_deref()
+                .is_some_and(|element| { element == "avdec_h264" || element.ends_with("h264dec") })
+        );
+        assert!(
+            shared_decoder(
+                &source,
+                DecoderPreference::Auto,
+                Some(Path::new("/dev/dri/does-not-exist")),
+            )
+            .is_err()
+        );
+        assert!(
+            shared_decoder(
+                &source,
+                DecoderPreference::Software,
+                Some(Path::new("/dev/dri/renderD128")),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn live_branch_can_be_attached_and_removed_without_restarting_source() {
+        use gstreamer::prelude::*;
+
+        gst::init().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let source = gst::ElementFactory::make("videotestsrc")
+            .property("is-live", true)
+            .build()
+            .unwrap();
+        let tee = make("tee").unwrap();
+        pipeline.add_many([&source, &tee]).unwrap();
+        source.link(&tee).unwrap();
+        let permanent = vec![make("queue").unwrap(), make("fakesink").unwrap()];
+        add_and_link_branch(&pipeline, &tee, &permanent).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+
+        let dynamic = vec![
+            gst::ElementFactory::make("valve")
+                .property("drop", true)
+                .build()
+                .unwrap(),
+            make("queue").unwrap(),
+            make("fakesink").unwrap(),
+        ];
+        let linked = add_and_link_branch(&pipeline, &tee, &dynamic).unwrap();
+        linked.sync_with_parent().unwrap();
+        linked.open();
+        linked.close();
+        linked.remove(&pipeline, &tee);
+
+        pipeline.set_state(gst::State::Null).unwrap();
+    }
+
+    #[test]
+    fn live_recording_branch_finalizes_before_detach() {
+        use gstreamer::prelude::*;
+
+        gst::init().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let source = gst::ElementFactory::make("videotestsrc")
+            .property("is-live", true)
+            .build()
+            .unwrap();
+        let encoder = make("jpegenc").unwrap();
+        let tee = make("tee").unwrap();
+        pipeline.add_many([&source, &encoder, &tee]).unwrap();
+        gst::Element::link_many([&source, &encoder, &tee]).unwrap();
+        let permanent = vec![make("queue").unwrap(), make("fakesink").unwrap()];
+        add_and_link_branch(&pipeline, &tee, &permanent).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+
+        let output = std::env::temp_dir().join(format!(
+            "linkctl-recording-branch-{}-{}.mkv",
+            std::process::id(),
+            super::unix_ms().unwrap()
+        ));
+        let elements = recording_branch(
+            &SharedRecording {
+                output: output.clone(),
+                container: RecordContainer::Matroska,
+                overwrite: false,
+            },
+            &VideoTuple {
+                fourcc: "MJPG".into(),
+                width: 320,
+                height: 240,
+                fps: Rational {
+                    numerator: 30,
+                    denominator: 1,
+                },
+            },
+        )
+        .unwrap();
+        let linked = add_and_link_branch(&pipeline, &tee, &elements).unwrap();
+        linked.sync_with_parent().unwrap();
+        linked.open();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(linked.finalize(std::time::Duration::from_secs(2)).unwrap());
+        linked.remove(&pipeline, &tee);
+        pipeline.set_state(gst::State::Null).unwrap();
+
+        assert!(std::fs::metadata(&output).unwrap().len() > 0);
+        std::fs::remove_file(output).unwrap();
     }
 
     #[test]

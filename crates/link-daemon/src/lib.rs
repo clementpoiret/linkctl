@@ -5,7 +5,10 @@ mod runtime {
     use std::{
         collections::BTreeMap,
         fs, io,
-        os::unix::{fs::PermissionsExt, net::UnixListener},
+        os::unix::{
+            fs::PermissionsExt,
+            net::{UnixListener, UnixStream},
+        },
         path::{Path, PathBuf},
         sync::{
             Arc,
@@ -28,8 +31,8 @@ mod runtime {
         SnapshotEncoding as IpcSnapshotEncoding, StandardControlWrite, VirtualCameraSpec,
     };
     use link_media::{
-        RecordContainer, SharedCrop, SharedFit, SharedOutput, SharedPipeline, SharedRecording,
-        SharedRotation, SharedSource, SnapshotEncoding,
+        DecoderPreference, RecordContainer, SharedCrop, SharedFit, SharedOutput, SharedPipeline,
+        SharedRecording, SharedRotation, SharedSource, SnapshotEncoding, SnapshotRequest,
     };
     use serde_json::{Value, json};
 
@@ -38,6 +41,8 @@ mod runtime {
     pub struct DaemonOptions {
         pub socket: PathBuf,
         pub device: Option<String>,
+        pub decoder: DecoderPreference,
+        pub decoder_device: Option<PathBuf>,
         pub request_timeout: Duration,
     }
 
@@ -66,23 +71,24 @@ mod runtime {
         fs::set_permissions(&options.socket, fs::Permissions::from_mode(0o600)).map_err(
             |error| socket_error("failed to secure daemon socket", &options.socket, &error),
         )?;
-        listener.set_nonblocking(true).map_err(|error| {
-            socket_error("failed to configure daemon socket", &options.socket, &error)
-        })?;
-
         let stopping = Arc::new(AtomicBool::new(false));
         let signal_stopping = Arc::clone(&stopping);
-        ctrlc::set_handler(move || signal_stopping.store(true, Ordering::SeqCst)).map_err(
-            |error| {
-                LinkError::new(
-                    ErrorKind::IoFailure,
-                    "failed to install daemon signal handler",
-                )
-                .with_detail("reason", error.to_string())
-            },
-        )?;
+        let signal_socket = options.socket.clone();
+        ctrlc::set_handler(move || {
+            signal_stopping.store(true, Ordering::SeqCst);
+            let _ = UnixStream::connect(&signal_socket);
+        })
+        .map_err(|error| {
+            LinkError::new(
+                ErrorKind::IoFailure,
+                "failed to install daemon signal handler",
+            )
+            .with_detail("reason", error.to_string())
+        })?;
         let (commands, actor) = start_actor(
             options.device.clone(),
+            options.decoder,
+            options.decoder_device.clone(),
             options.request_timeout,
             Arc::clone(&stopping),
         );
@@ -99,11 +105,9 @@ mod runtime {
                         );
                     }
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(25));
-                }
                 Err(error) => {
                     stopping.store(true, Ordering::SeqCst);
+                    drop(commands);
                     let _ = actor.join();
                     let _ = fs::remove_file(&options.socket);
                     return Err(socket_error(
@@ -130,6 +134,8 @@ mod runtime {
 
     fn start_actor(
         selector: Option<String>,
+        decoder: DecoderPreference,
+        decoder_device: Option<PathBuf>,
         timeout: Duration,
         stopping: Arc<AtomicBool>,
     ) -> (
@@ -137,7 +143,16 @@ mod runtime {
         thread::JoinHandle<Result<(), LinkError>>,
     ) {
         let (sender, receiver) = mpsc::sync_channel(32);
-        let actor = thread::spawn(move || actor_loop(receiver, selector, timeout, stopping));
+        let actor = thread::spawn(move || {
+            actor_loop(
+                receiver,
+                selector,
+                decoder,
+                decoder_device,
+                timeout,
+                stopping,
+            )
+        });
         (sender, actor)
     }
 
@@ -191,6 +206,8 @@ mod runtime {
 
     struct ActorState {
         selector: Option<String>,
+        decoder: DecoderPreference,
+        decoder_device: Option<PathBuf>,
         timeout: Duration,
         source: Option<SharedSource>,
         pipeline: Option<SharedPipeline>,
@@ -207,9 +224,16 @@ mod runtime {
     }
 
     impl ActorState {
-        fn new(selector: Option<String>, timeout: Duration) -> Self {
+        fn new(
+            selector: Option<String>,
+            decoder: DecoderPreference,
+            decoder_device: Option<PathBuf>,
+            timeout: Duration,
+        ) -> Self {
             Self {
                 selector,
+                decoder,
+                decoder_device,
                 timeout,
                 source: None,
                 pipeline: None,
@@ -226,18 +250,43 @@ mod runtime {
             }
         }
 
+        fn has_consumers(&self) -> bool {
+            !self.outputs.is_empty() || self.recording.is_some()
+        }
+
+        fn ensure_source(&mut self) -> Result<&SharedSource, LinkError> {
+            if self
+                .source
+                .as_ref()
+                .is_none_or(|source| !source.node.exists())
+            {
+                self.source = Some(resolve_source(self.selector.as_deref())?);
+            }
+            Ok(self.source.as_ref().expect("source was populated"))
+        }
+
         fn rebuild(&mut self, recovery: bool) -> Result<(), LinkError> {
+            let continuing_recording = self.recording.is_some()
+                && self
+                    .pipeline
+                    .as_ref()
+                    .is_some_and(|pipeline| pipeline.graph().recording.is_some());
             if let Some(previous) = self.pipeline.take()
                 && previous.graph().recording.is_some()
             {
                 previous.shutdown(self.timeout.min(Duration::from_secs(2)));
+            }
+            if !self.has_consumers() {
+                self.last_error = None;
+                self.retry_delay = Duration::from_millis(250);
+                return Ok(());
             }
             let source = source_for_rebuild(
                 resolve_source(self.selector.as_deref())?,
                 self.source.as_ref(),
                 recovery,
             );
-            if recovery {
+            if recovery || continuing_recording {
                 self.advance_recording_segment()?;
             }
             let outputs = self
@@ -246,7 +295,14 @@ mod runtime {
                 .map(shared_output)
                 .collect::<Result<Vec<_>, _>>()?;
             let recording = self.recording.as_ref().map(shared_recording);
-            match SharedPipeline::start(source.clone(), outputs, recording, self.timeout) {
+            match SharedPipeline::start(
+                source.clone(),
+                outputs,
+                recording,
+                self.decoder,
+                self.decoder_device.as_deref(),
+                self.timeout,
+            ) {
                 Ok(pipeline) => {
                     self.source = Some(source);
                     self.pipeline = Some(pipeline);
@@ -289,6 +345,7 @@ mod runtime {
                 self.next_retry = Instant::now();
             }
             if self.pipeline.is_none()
+                && self.has_consumers()
                 && Instant::now() >= self.next_retry
                 && let Err(error) = self.rebuild(true)
             {
@@ -305,7 +362,13 @@ mod runtime {
                 "protocol_version": link_ipc::PROTOCOL_VERSION,
                 "pid": std::process::id(),
                 "started_unix_ms": self.started_unix_ms,
-                "state": if self.pipeline.is_some() { "running" } else { "recovering" },
+                "state": if self.pipeline.is_some() {
+                    "running"
+                } else if self.has_consumers() {
+                    "recovering"
+                } else {
+                    "idle"
+                },
                 "source": self.source,
                 "virtual_cameras": self.outputs.len(),
                 "recording": self.recording,
@@ -319,39 +382,43 @@ mod runtime {
     fn actor_loop(
         receiver: Receiver<ActorRequest>,
         selector: Option<String>,
+        decoder: DecoderPreference,
+        decoder_device: Option<PathBuf>,
         timeout: Duration,
         stopping: Arc<AtomicBool>,
     ) -> Result<(), LinkError> {
-        let mut state = ActorState::new(selector, timeout);
-        if let Err(error) = state.rebuild(false) {
-            tracing::warn!(
-                kind = error.kind().code(),
-                message = error.message(),
-                "camera unavailable at daemon startup"
-            );
-        }
+        let mut state = ActorState::new(selector, decoder, decoder_device, timeout);
         while !stopping.load(Ordering::SeqCst) {
-            match receiver.recv_timeout(Duration::from_millis(100)) {
-                Ok(request) => {
-                    let request_id = request.envelope.request_id;
-                    let result = dispatch(&mut state, request.envelope.operation, &stopping);
-                    let (response, binary) = match result {
-                        Ok((value, binary)) => (
-                            ResponseEnvelope {
-                                protocol_version: link_ipc::PROTOCOL_VERSION,
-                                request_id,
-                                result: Ok(value),
-                                binary_length: binary.len() as u64,
-                            },
-                            binary,
-                        ),
-                        Err(error) => (error_response(request_id, &error), Vec::new()),
-                    };
-                    let _ = request.response.send((response, binary));
+            let request = if state.has_consumers() {
+                match receiver.recv_timeout(Duration::from_millis(250)) {
+                    Ok(request) => request,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        state.poll();
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => state.poll(),
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
+            } else {
+                match receiver.recv() {
+                    Ok(request) => request,
+                    Err(mpsc::RecvError) => break,
+                }
+            };
+            let request_id = request.envelope.request_id;
+            let result = dispatch(&mut state, request.envelope.operation, &stopping);
+            let (response, binary) = match result {
+                Ok((value, binary)) => (
+                    ResponseEnvelope {
+                        protocol_version: link_ipc::PROTOCOL_VERSION,
+                        request_id,
+                        result: Ok(value),
+                        binary_length: binary.len() as u64,
+                    },
+                    binary,
+                ),
+                Err(error) => (error_response(request_id, &error), Vec::new()),
+            };
+            let _ = request.response.send((response, binary));
         }
         if let Some(pipeline) = state.pipeline.take() {
             pipeline.shutdown(timeout);
@@ -367,7 +434,12 @@ mod runtime {
         match operation {
             Operation::Status => Ok((state.status(), Vec::new())),
             Operation::Reload => {
-                state.rebuild(false)?;
+                if state.has_consumers() {
+                    state.rebuild(false)?;
+                } else {
+                    state.source = None;
+                    state.last_error = None;
+                }
                 state.reloads = state.reloads.saturating_add(1);
                 Ok((state.status(), Vec::new()))
             }
@@ -382,7 +454,14 @@ mod runtime {
                 stopping.store(true, Ordering::SeqCst);
                 Ok((json!({"state": "stopping"}), Vec::new()))
             }
-            Operation::PipelineStatus => Ok((pipeline_status(state), Vec::new())),
+            Operation::PipelineStatus => {
+                if state.source.is_none()
+                    && let Err(error) = state.ensure_source()
+                {
+                    state.last_error = Some(error.to_string());
+                }
+                Ok((pipeline_status(state), Vec::new()))
+            }
             Operation::PipelineGraph => {
                 let graph = state.pipeline.as_ref().map(SharedPipeline::graph);
                 Ok((
@@ -501,42 +580,80 @@ mod runtime {
                 }
                 validate_output_device(&specification.output_device)?;
                 let name = specification.name.clone();
-                state.outputs.insert(name.clone(), specification);
-                if let Err(error) = state.rebuild(false) {
-                    state.outputs.remove(&name);
-                    let _ = state.rebuild(false);
-                    return Err(error);
+                let output = shared_output(&specification)?;
+                if let Some(pipeline) = state.pipeline.as_mut() {
+                    pipeline.add_output(output)?;
+                    state.outputs.insert(name.clone(), specification);
+                } else {
+                    state.outputs.insert(name.clone(), specification);
+                    if let Err(error) = state.rebuild(false) {
+                        state.outputs.remove(&name);
+                        let _ = state.rebuild(false);
+                        return Err(error);
+                    }
                 }
                 Ok((json!({"name": name, "state": "running"}), Vec::new()))
             }
             Operation::VcamStop { name } => {
-                if let Some(name) = name {
-                    if state.outputs.remove(&name).is_none() {
+                let names = if let Some(name) = name {
+                    if !state.outputs.contains_key(&name) {
                         return Err(LinkError::new(
                             ErrorKind::DeviceNotFound,
                             "virtual camera is not active",
                         )
                         .with_detail("name", name));
                     }
+                    vec![name]
                 } else {
-                    state.outputs.clear();
+                    state.outputs.keys().cloned().collect()
+                };
+                if let Some(pipeline) = state.pipeline.as_mut() {
+                    for name in &names {
+                        pipeline.remove_output(name)?;
+                        state.outputs.remove(name);
+                    }
+                    if !state.has_consumers() {
+                        state.rebuild(false)?;
+                    }
+                } else {
+                    for name in &names {
+                        state.outputs.remove(name);
+                    }
+                    state.rebuild(false)?;
                 }
-                state.rebuild(false)?;
                 Ok((
                     json!({"state": "stopped", "remaining": state.outputs.len()}),
                     Vec::new(),
                 ))
             }
             Operation::Snapshot { encoding } => {
-                let pipeline = state
-                    .pipeline
-                    .as_ref()
-                    .ok_or_else(|| pipeline_unavailable(state))?;
                 let encoding = match encoding {
                     IpcSnapshotEncoding::Jpeg => SnapshotEncoding::Jpeg,
                     IpcSnapshotEncoding::Png => SnapshotEncoding::Png,
                 };
-                let frame = pipeline.snapshot(encoding, state.timeout)?;
+                let frame = if let Some(pipeline) = state.pipeline.as_ref() {
+                    pipeline.snapshot(encoding, state.timeout)?
+                } else {
+                    let source = state.ensure_source()?.clone();
+                    let _lease =
+                        link_media::MediaLease::acquire(&source.stable_id, "linkd-snapshot")?;
+                    link_media::snapshot(&SnapshotRequest {
+                        node: source.node,
+                        tuple: source.tuple,
+                        encoding,
+                        count: 1,
+                        interval: Duration::ZERO,
+                        timeout: state.timeout,
+                    })?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| {
+                        LinkError::new(
+                            ErrorKind::MediaPipelineFailure,
+                            "snapshot pipeline returned no frame",
+                        )
+                    })?
+                };
                 Ok((
                     json!({"captured_unix_ms": frame.captured_unix_ms, "bytes": frame.bytes.len()}),
                     frame.bytes,
@@ -550,15 +667,23 @@ mod runtime {
                     ));
                 }
                 let original = specification.clone();
-                state.recording_root = Some(specification.output.clone());
-                state.recording_segment = 0;
-                state.recording = Some(specification);
-                if let Err(error) = state.rebuild(false) {
-                    state.recording = None;
-                    state.recording_root = None;
+                let recording = shared_recording(&specification);
+                if let Some(pipeline) = state.pipeline.as_mut() {
+                    pipeline.add_recording(recording)?;
+                    state.recording_root = Some(specification.output.clone());
                     state.recording_segment = 0;
-                    let _ = state.rebuild(false);
-                    return Err(error);
+                    state.recording = Some(specification);
+                } else {
+                    state.recording_root = Some(specification.output.clone());
+                    state.recording_segment = 0;
+                    state.recording = Some(specification);
+                    if let Err(error) = state.rebuild(false) {
+                        state.recording = None;
+                        state.recording_root = None;
+                        state.recording_segment = 0;
+                        let _ = state.rebuild(false);
+                        return Err(error);
+                    }
                 }
                 Ok((
                     json!({"state": "recording", "recording": original}),
@@ -573,23 +698,40 @@ mod runtime {
                 Vec::new(),
             )),
             Operation::RecordingStop => {
-                if state.recording.take().is_none() {
+                if state.recording.is_none() {
                     return Err(LinkError::new(
                         ErrorKind::InvalidInvocation,
                         "no daemon recording is active",
                     ));
                 }
+                let finalized = if let Some(pipeline) = state.pipeline.as_mut() {
+                    pipeline.remove_recording(state.timeout)?
+                } else {
+                    false
+                };
+                state.recording = None;
                 state.recording_root = None;
                 state.recording_segment = 0;
-                state.rebuild(false)?;
-                Ok((json!({"state": "stopped"}), Vec::new()))
+                if state.pipeline.is_none() || !state.has_consumers() {
+                    state.rebuild(false)?;
+                }
+                Ok((
+                    json!({"state": "stopped", "finalized": finalized}),
+                    Vec::new(),
+                ))
             }
         }
     }
 
     fn pipeline_status(state: &ActorState) -> Value {
         json!({
-            "state": if state.pipeline.is_some() { "playing" } else { "recovering" },
+            "state": if state.pipeline.is_some() {
+                "playing"
+            } else if state.has_consumers() {
+                "recovering"
+            } else {
+                "idle"
+            },
             "source": state.source,
             "outputs": state.outputs.keys().collect::<Vec<_>>(),
             "recording": state.recording,
@@ -597,12 +739,8 @@ mod runtime {
         })
     }
 
-    fn source_node(state: &ActorState) -> Result<&Path, LinkError> {
-        state
-            .source
-            .as_ref()
-            .map(|source| source.node.as_path())
-            .ok_or_else(|| pipeline_unavailable(state))
+    fn source_node(state: &mut ActorState) -> Result<&Path, LinkError> {
+        Ok(state.ensure_source()?.node.as_path())
     }
 
     #[derive(Clone)]
@@ -613,7 +751,7 @@ mod runtime {
     }
 
     fn apply_standard_controls(
-        state: &ActorState,
+        state: &mut ActorState,
         writes: Vec<StandardControlWrite>,
         raw: bool,
         clamp: bool,
@@ -1097,17 +1235,6 @@ mod runtime {
         Ok(())
     }
 
-    fn pipeline_unavailable(state: &ActorState) -> LinkError {
-        let mut error = LinkError::new(
-            ErrorKind::DaemonUnavailable,
-            "daemon camera pipeline is recovering",
-        );
-        if let Some(reason) = &state.last_error {
-            error = error.with_detail("reason", reason.clone());
-        }
-        error
-    }
-
     fn error_response(request_id: u64, error: &LinkError) -> ResponseEnvelope {
         ResponseEnvelope {
             protocol_version: link_ipc::PROTOCOL_VERSION,
@@ -1215,6 +1342,24 @@ mod runtime {
         fn recording_recovery_uses_a_deterministic_sibling() {
             let recovered = recovery_recording_path(Path::new("/tmp/meeting.mkv"), 2).unwrap();
             assert_eq!(recovered, PathBuf::from("/tmp/meeting.reconnect-002.mkv"));
+        }
+
+        #[test]
+        fn daemon_stays_idle_until_a_persistent_consumer_exists() {
+            let mut state = ActorState::new(
+                None,
+                DecoderPreference::Software,
+                None,
+                Duration::from_secs(1),
+            );
+            assert!(!state.has_consumers());
+            assert_eq!(state.status()["state"], "idle");
+
+            state
+                .outputs
+                .insert("clean".into(), VirtualCameraSpec::default());
+            assert!(state.has_consumers());
+            assert_eq!(state.status()["state"], "recovering");
         }
     }
 }

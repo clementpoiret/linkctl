@@ -77,6 +77,12 @@ systemctl --user enable --now linkd.service
 linkctl daemon status
 ```
 
+An enabled service remains idle until a background recording or virtual output needs the camera; idle controls and
+status requests do not start video. Active H.264/MJPEG raw branches use VA-API when available and fall back to software.
+Use a systemd user drop-in with `Environment=LINKCTL_DECODER=software` to force CPU decode, or `va-api` to require
+hardware decode; `LINKCTL_DECODER_DEVICE=/dev/dri/renderD128` can pin the render node. See [Stream daemon and virtual
+cameras](daemon.md#power-and-decoder-policy).
+
 ## Select a camera
 
 `linkctl device list` prints a non-secret stable ID for each discovered camera. Prefer that ID in configuration and
@@ -171,7 +177,9 @@ is absent or prohibited.
 
 Common environment equivalents include `LINKCTL_DEVICE`, `LINKCTL_DAEMON`, `LINKCTL_FORMAT`, `LINKCTL_TIMEOUT`,
 `LINKCTL_PROFILE_DIR`, `LINKCTL_LOG_LEVEL`, and `LINKCTL_NO_COLOR`. Nested settings use double underscores, for
-example `LINKCTL_SAFETY__REDACT_SERIALS=false`. See [Configuration and presets](presets.md) for camera-state presets.
+example `LINKCTL_SAFETY__REDACT_SERIALS=false`. `LINKCTL_DAEMON_SOCKET` is a client/daemon transport override;
+`LINKCTL_DECODER` and `LINKCTL_DECODER_DEVICE` are `linkd` runtime options. They are recognized but are not persisted
+configuration fields. See [Configuration and presets](presets.md) for camera-state presets.
 
 Preset documents use semantic schema 2. `linkctl preset list` includes the immutable `builtin:default` baseline and
 local files from `~/.config/linkctl/presets/`; inspect its complete transaction with

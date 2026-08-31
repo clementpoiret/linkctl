@@ -621,7 +621,10 @@ fn apply_environment(
             | "LINKCTL_YES"
             | "LINKCTL_UNSAFE_XU"
             | "LINKCTL_SOURCE_REVISION"
-            | "LINKCTL_SCHEMA_VERSION" => {}
+            | "LINKCTL_SCHEMA_VERSION"
+            | "LINKCTL_DAEMON_SOCKET"
+            | "LINKCTL_DECODER"
+            | "LINKCTL_DECODER_DEVICE" => {}
             "LINKCTL_DEFAULT_DEVICE" | "LINKCTL_DEVICE" => {
                 config.default_device = Some(value.clone());
             }
@@ -900,6 +903,23 @@ mod tests {
                 "LINKCTL_SOURCE_REVISION".into(),
                 "0123456789abcdef".into(),
             )]))
+            .load()
+            .unwrap();
+
+        assert_eq!(config, Config::default());
+    }
+
+    #[test]
+    fn daemon_runtime_environment_is_not_treated_as_configuration() {
+        let config = ConfigLoader::new(ConfigPaths::default())
+            .with_environment(BTreeMap::from([
+                ("LINKCTL_DAEMON_SOCKET".into(), "/tmp/linkd.sock".into()),
+                ("LINKCTL_DECODER".into(), "software".into()),
+                (
+                    "LINKCTL_DECODER_DEVICE".into(),
+                    "/dev/dri/renderD128".into(),
+                ),
+            ]))
             .load()
             .unwrap();
 

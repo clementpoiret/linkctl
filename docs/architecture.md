@@ -13,9 +13,9 @@ linkctl CLI
   +-- protocol 1 over owner-only Unix socket  |
             |                                 |
           linkd                               |
-            |-- serialized control actor -----+
-            +-- one shared GStreamer source --+--> snapshots / recording
-                                               \--> bounded raw branches --> v4l2loopback
+            |-- idle IPC/control actor --------+
+            +-- active shared source ----------+--> encoded recording branch
+                                               \--> gated decode --> snapshots / raw outputs
 
 Linux discovery --> V4L2/UVC video and controls
                 --> PipeWire/ALSA audio
@@ -70,10 +70,15 @@ operation. Otherwise the command takes a per-device lease and uses a direct back
 service; `--daemon never` requires the direct path. The same lease namespace prevents accidental competing physical
 streams.
 
-`linkd` opens one physical `v4l2src`. Encoded input can pass directly to a recording branch; video is decoded once for
-snapshots and raw output branches. Each branch has a small bounded queue with an explicit drop policy so a slow sink
-cannot grow latency without bound. On unplug, the supervisor uses the stable camera identity, bounded backoff, and the
-last exact tuple to rebuild the graph. An interrupted recording continues in the next unused
+`linkd` keeps no physical `v4l2src` open while idle. It creates one shared source while at least one persistent
+recording or virtual-output consumer exists, and the last consumer releases the graph and media lease immediately; a
+forced idle snapshot uses a bounded transient source instead. Encoded input can pass directly to a recording branch;
+the raw side remains gated during recording-only operation and is decoded once when a snapshot or raw output needs it.
+Closed snapshot valves precede their queues. Recording and output branches are added or removed without restarting the
+source, and each has a bounded queue with an explicit backpressure policy. Automatic H.264/MJPEG decode uses an
+accessible VA-API render node when available and otherwise uses software. On unplug, the supervisor uses the stable
+camera identity, bounded backoff, and the last exact tuple to rebuild the graph. An interrupted recording continues in
+the next unused
 `<stem>.reconnect-NNN.<ext>` file rather than overwriting a finalized segment.
 
 IPC lives below `$XDG_RUNTIME_DIR/linkctl` in an owner-only directory and socket. Client and server verify peer user

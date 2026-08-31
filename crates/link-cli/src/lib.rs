@@ -1,6 +1,7 @@
 //! Parser and shell-facing behavior for the `linkctl` binary.
 
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fs,
@@ -2000,6 +2001,20 @@ struct ControlGetResult {
 }
 
 fn discovered_devices() -> Result<Vec<DiscoveredDevice>, LinkError> {
+    thread_local! {
+        static CACHE: RefCell<Option<Vec<DiscoveredDevice>>> = const { RefCell::new(None) };
+    }
+    CACHE.with(|cache| {
+        if let Some(devices) = cache.borrow().as_ref() {
+            return Ok(devices.clone());
+        }
+        let devices = refresh_discovered_devices()?;
+        *cache.borrow_mut() = Some(devices.clone());
+        Ok(devices)
+    })
+}
+
+fn refresh_discovered_devices() -> Result<Vec<DiscoveredDevice>, LinkError> {
     Ok(link_linux::enumerate_devices()?
         .into_iter()
         .filter(link_linux::is_listable)
@@ -2455,10 +2470,35 @@ fn capture_xu_snapshot(
     include_volatile: bool,
 ) -> Result<link_uvc_xu::XuSnapshot, LinkError> {
     let (device, node, inventory, catalog, session) = selected_xu_context(config, false)?;
+    capture_xu_snapshot_with_context(
+        &device,
+        &node,
+        &inventory,
+        &catalog,
+        &session,
+        samples,
+        interval,
+        notes,
+        include_volatile,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_xu_snapshot_with_context(
+    device: &DiscoveredDevice,
+    node: &NodeAssociation,
+    inventory: &link_uvc_xu::DescriptorInventory,
+    catalog: &ProfileCatalog,
+    session: &link_uvc_xu::XuSession,
+    samples: u8,
+    interval: Duration,
+    notes: Vec<String>,
+    include_volatile: bool,
+) -> Result<link_uvc_xu::XuSnapshot, LinkError> {
     let profile = catalog.matching(&device.identity, device.mode(), None)?;
     link_uvc_xu::capture_snapshot(
-        &session,
-        &inventory,
+        session,
+        inventory,
         link_uvc_xu::SnapshotRequest {
             captured_unix_ms: now_unix_ms()?,
             application_version: env!("CARGO_PKG_VERSION"),
@@ -2474,7 +2514,7 @@ fn capture_xu_snapshot(
             profile: profile.map(|entry| &entry.profile),
             stream_state: "closed-or-external",
             notes,
-            standard_controls: snapshot_standard_controls(&node)?,
+            standard_controls: snapshot_standard_controls(node)?,
             samples,
             interval,
             include_volatile,
@@ -2545,11 +2585,31 @@ fn run_xu_watch(
     include_volatile: bool,
 ) -> Result<(), LinkError> {
     ensure_watch_format(config.output)?;
-    let mut previous =
-        capture_xu_snapshot(config, 1, Duration::ZERO, Vec::new(), include_volatile)?;
+    let (device, node, inventory, catalog, session) = selected_xu_context(config, false)?;
+    let mut previous = capture_xu_snapshot_with_context(
+        &device,
+        &node,
+        &inventory,
+        &catalog,
+        &session,
+        1,
+        Duration::ZERO,
+        Vec::new(),
+        include_volatile,
+    )?;
     loop {
         thread::sleep(interval);
-        let current = capture_xu_snapshot(config, 1, Duration::ZERO, Vec::new(), include_volatile)?;
+        let current = capture_xu_snapshot_with_context(
+            &device,
+            &node,
+            &inventory,
+            &catalog,
+            &session,
+            1,
+            Duration::ZERO,
+            Vec::new(),
+            include_volatile,
+        )?;
         let diff = link_uvc_xu::diff_snapshots(&previous, &current)?;
         if !diff.selectors.is_empty()
             || diff.standard_controls_before != diff.standard_controls_after
@@ -2896,7 +2956,7 @@ fn wait_for_reenumerated_semantic_value(
     let mut last_descriptor_sha256 = None;
     let mut last_error = None;
     while started.elapsed() < timeout {
-        let devices = discovered_devices()?;
+        let devices = refresh_discovered_devices()?;
         let current = devices
             .iter()
             .find(|device| device.identity.stable_id() == stable_id);
@@ -6892,7 +6952,7 @@ fn run_snapshot(
     dry_run: bool,
 ) -> Result<(), LinkError> {
     #[cfg(feature = "daemon")]
-    if should_use_daemon(config)? {
+    if should_use_daemon_for_snapshot(config)? {
         return run_daemon_snapshot(config, arguments, dry_run);
     }
     ensure_direct_video_backend(config, backend)?;
@@ -7535,6 +7595,15 @@ fn should_use_daemon(config: &Config) -> Result<bool, LinkError> {
 }
 
 #[cfg(feature = "daemon")]
+fn should_use_daemon_for_snapshot(config: &Config) -> Result<bool, LinkError> {
+    match config.daemon {
+        DaemonMode::Never => Ok(false),
+        DaemonMode::Always => Ok(true),
+        DaemonMode::Auto => daemon_owns_stream(config),
+    }
+}
+
+#[cfg(feature = "daemon")]
 fn daemon_owns_stream(config: &Config) -> Result<bool, LinkError> {
     Ok(daemon_source_id(config)?.is_some())
 }
@@ -7556,7 +7625,7 @@ fn daemon_source_id(config: &Config) -> Result<Option<String>, LinkError> {
             }
             return Ok(None);
         }
-        let status = match daemon_client(config)?.request(link_ipc::Operation::PipelineStatus) {
+        let status = match daemon_client(config)?.request(link_ipc::Operation::Status) {
             Ok(status) => status,
             Err(error)
                 if config.daemon == DaemonMode::Auto
@@ -7566,7 +7635,7 @@ fn daemon_source_id(config: &Config) -> Result<Option<String>, LinkError> {
             }
             Err(error) => return Err(error),
         };
-        if status.value.get("state").and_then(Value::as_str) != Some("playing") {
+        if status.value.get("state").and_then(Value::as_str) != Some("running") {
             return Ok(None);
         }
         Ok(status
@@ -9629,9 +9698,12 @@ fn run_firmware_watch(config: &Config) -> Result<(), LinkError> {
         sequence += 1;
         emit_firmware_watch_event(config.output, sequence, "initial", Some(snapshot))?;
     }
+    let monitor = link_linux::HotplugMonitor::new()?;
 
     loop {
-        thread::sleep(Duration::from_millis(250));
+        if monitor.wait(Duration::from_secs(5))? {
+            thread::sleep(Duration::from_millis(250));
+        }
         let devices = firmware_watch_devices(&catalog)?;
         let current = if watch_all {
             firmware_watch_snapshots(&devices, &BTreeSet::new())?
@@ -9672,7 +9744,7 @@ fn run_firmware_watch(config: &Config) -> Result<(), LinkError> {
 
 fn firmware_watch_devices(catalog: &ProfileCatalog) -> Result<Vec<DiscoveredDevice>, LinkError> {
     let mut devices = Vec::new();
-    for device in discovered_devices()? {
+    for device in refresh_discovered_devices()? {
         let matches_profile = catalog
             .matching(&device.identity, device.mode(), None)?
             .is_some_and(|profile| profile.profile.profile_id == "insta360-link-2c-pro");
@@ -10150,7 +10222,7 @@ fn wait_for_firmware_mode(
                 "firmware maintenance was interrupted while waiting for re-enumeration",
             ));
         }
-        if let Some(device) = discovered_devices()?
+        if let Some(device) = refresh_discovered_devices()?
             .into_iter()
             .find(|device| device.identity.topology == topology && device.mode() == mode)
         {
@@ -10188,7 +10260,7 @@ fn wait_for_mounted_firmware_volume(
                 "firmware maintenance was interrupted while waiting for the U-Disk mount",
             ));
         }
-        if let Some(device) = discovered_devices()?.into_iter().find(|device| {
+        if let Some(device) = refresh_discovered_devices()?.into_iter().find(|device| {
             device.identity.topology == topology && device.mode() == DeviceMode::UDisk
         }) {
             ensure_firmware_personality(catalog, &device)?;
@@ -11282,7 +11354,7 @@ fn run_device_watch(config: &Config) -> Result<(), LinkError> {
             continue;
         }
         thread::sleep(Duration::from_millis(250));
-        let devices = discovered_devices()?
+        let devices = refresh_discovered_devices()?
             .into_iter()
             .filter(|device| watch_all || watched_ids.contains(&device.identity.stable_id()))
             .collect::<Vec<_>>();
@@ -11413,20 +11485,47 @@ fn run_control_watch(config: &Config, selectors: Vec<String>) -> Result<(), Link
     let mut sequence = 0_u64;
     let mut missing = false;
     loop {
-        let source = if let Some(monitor) = &event_monitor {
+        let kernel_events = if let Some(monitor) = &event_monitor {
             match monitor.wait(Duration::from_secs(1)) {
                 Ok(events) if events.is_empty() => continue,
-                Ok(_) => "v4l2-event",
+                Ok(events) => Some(events),
                 Err(_) => {
                     event_monitor = None;
-                    "poll"
+                    None
                 }
             }
         } else {
             thread::sleep(Duration::from_millis(250));
-            "poll"
+            None
         };
-        let discovered = discovered_devices()?;
+        if let Some(events) = kernel_events {
+            for event in events {
+                let Some((descriptor, old)) = previous.get(&event.id).cloned() else {
+                    continue;
+                };
+                let current = link_v4l2::production::render_value(&descriptor, event.value);
+                if old == current {
+                    continue;
+                }
+                sequence += 1;
+                emit_control_event(
+                    config.output,
+                    Some(summary.clone()),
+                    &ControlEvent {
+                        sequence,
+                        observed_unix_ms: now_unix_ms()?,
+                        kind: "change".into(),
+                        control: Some(descriptor.clone()),
+                        previous: Some(old),
+                        current: Some(current.clone()),
+                        source: "v4l2-event".into(),
+                    },
+                )?;
+                previous.insert(event.id, (descriptor, current));
+            }
+            continue;
+        }
+        let discovered = refresh_discovered_devices()?;
         let Some(current_device) = discovered
             .iter()
             .find(|device| device.identity.stable_id() == stable_id)
@@ -11497,7 +11596,7 @@ fn run_control_watch(config: &Config, selectors: Vec<String>) -> Result<(), Link
                         control: Some(descriptor.clone()),
                         previous: old,
                         current: Some(current.clone()),
-                        source: source.into(),
+                        source: "poll".into(),
                     },
                 )?;
                 previous.insert(descriptor.id, (descriptor, current));

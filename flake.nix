@@ -37,7 +37,7 @@
           ];
           package = rustPlatform.buildRustPackage {
             pname = "linkctl";
-            version = "1.0.1";
+            version = "1.0.2";
             src = self;
 
             cargoLock.lockFile = ./Cargo.lock;

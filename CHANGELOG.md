@@ -5,6 +5,20 @@ this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-08-31
+
+### Changed
+
+- Made `linkd` release the camera and block without polling while idle, dynamically attach recording and virtual-output
+  branches, gate recording-only decode, and prefer usable VA-API decoders with software fallback.
+- Reduced repeated USB discovery and watch overhead by caching one-shot command discovery, hydrating descriptors only
+  for relevant USB devices, reusing XU watch sessions, and consuming V4L2 control events directly.
+
+### Fixed
+
+- Accepted the documented `LINKCTL_DAEMON_SOCKET` transport override (and the `linkd`-only decoder override) without
+  treating either as an unknown persistent configuration variable.
+
 ## [1.0.1] - 2026-08-31
 
 ### Fixed
@@ -50,6 +64,7 @@ this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Virtual-camera graph production exists, but OBS and WebRTC compatibility is unsupported with the tested v4l2loopback
   0.15.4 queue behavior.
 
+[1.0.2]: https://github.com/clementpoiret/linkctl/releases/tag/v1.0.2
 [1.0.1]: https://github.com/clementpoiret/linkctl/releases/tag/v1.0.1
 [1.0.0]: https://github.com/clementpoiret/linkctl/releases/tag/v1.0.0
-[unreleased]: https://github.com/clementpoiret/linkctl/compare/v1.0.1...HEAD
+[unreleased]: https://github.com/clementpoiret/linkctl/compare/v1.0.2...HEAD

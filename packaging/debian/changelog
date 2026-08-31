@@ -1,3 +1,9 @@
+linkctl (1.0.2-1) unstable; urgency=medium
+
+  * Reduce daemon power use, media fan-out overhead, and device polling.
+
+ -- Clément Poiret <clement@linux.com>  Mon, 31 Aug 2026 00:00:00 +0200
+
 linkctl (1.0.1-1) unstable; urgency=medium
 
   * Fix the Nix GStreamer runtime and camera-native capability reporting.

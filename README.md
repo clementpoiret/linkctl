@@ -18,8 +18,8 @@ The standard 1.0 build includes:
 - PipeWire and ALSA audio discovery, gain/mute, capture, metering, monitoring, pickup modes, and optional A/V muxing.
 - Semantic camera presets with an immutable `builtin:default`, local user definitions, dry runs, readback, rollback,
   and recovery journals.
-- A per-user daemon that owns one camera stream and serves controls, snapshots, recording, metrics, and named raw
-  virtual-output branches.
+- A per-user daemon that stays camera-idle until needed, then owns one shared stream for snapshots, recording, metrics,
+  and named raw virtual-output branches.
 - Verified Link 2C Pro controls for Auto Framing, HDR, mirror/flip, exposure, Whiteboard, DeskView, gestures,
   low-resolution compatibility, native portrait, and firmware information on the exact tested firmware/profile.
 - Read-only Extension Unit research tools and a bounded workflow for staging an official, user-supplied firmware file.
@@ -72,6 +72,10 @@ a NixOS system configuration, and refresh udev rules when required. The daemon i
 systemctl --user enable --now linkd.service
 linkctl daemon status
 ```
+
+Keeping the service enabled has negligible idle cost: `linkd` blocks on IPC without opening the camera or constructing
+a media graph until a background recording or virtual output is active. See the [daemon power and decoder
+controls](docs/daemon.md#power-and-decoder-policy) for active-stream tuning.
 
 Verify downloaded artifacts using `SHA256SUMS` and the GitHub artifact attestation described in the
 [release runbook](docs/release-runbook.md).

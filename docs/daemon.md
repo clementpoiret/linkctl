@@ -1,6 +1,10 @@
 # Stream daemon and virtual cameras
 
-`linkd` is a per-user daemon that owns one selected physical capture stream. It exposes a private, versioned Unix socket below `$XDG_RUNTIME_DIR/linkctl`, verifies the peer UID on every connection, and fans the decoded stream into bounded consumer branches. There is no network listener.
+`linkd` is a per-user daemon that supervises one selected camera. It exposes a private, versioned Unix socket below
+`$XDG_RUNTIME_DIR/linkctl`, verifies the peer UID on every connection, and has no network listener. An enabled daemon
+is normally `idle`: it blocks on IPC without opening a video node, acquiring a media lease, or constructing a
+GStreamer graph. The shared capture stream starts only while a background recording or virtual-camera output needs it,
+and is released immediately after the last persistent consumer stops.
 
 Start it directly while developing:
 
@@ -27,11 +31,52 @@ group protections, namespace restrictions, and only Unix/netlink address familie
 configuration, or native multimedia paths. Source-tree users should run `linkd` directly or install a unit whose
 `ExecStart` is the real absolute binary path; service PATH lookup is not used.
 
-`linkctl daemon reload` rebuilds the graph from the current camera and active output contracts. `daemon shutdown` gracefully finalizes an active recording, releases the physical source, and does not recreate runtime-only virtual outputs on the next start. `pipeline status`, `graph`, and `metrics` report source/output caps, branch queue bounds and policy, processing backend, frame and byte counters, per-output frames and queue drops, recent latency, bitrate, reconnect count, and the latest recovery error. Latency is measured at each output sink from GStreamer running time and buffer presentation time; `p95_latency_us` covers the most recent 2,048 delivered frames, and the clean 1080p30 release target is below `150000`. The supervisor retries a removed camera with bounded exponential backoff and rebuilds the same runtime branches when it reappears, preserving the active source tuple when the same stable camera returns on a different video node.
+`linkctl daemon reload` rebuilds an active graph from the current camera and consumer contracts; while idle it only
+clears cached discovery state. `daemon shutdown` gracefully finalizes an active recording, releases the physical
+source, and does not recreate runtime-only virtual outputs on the next start. Adding or removing a recording or
+virtual output attaches or detaches that typed branch in place, without restarting the source or interrupting other
+branches. `pipeline status` reports `idle`, `playing`, or `recovering`; `graph` and `metrics` report source/output caps,
+branch queue bounds and policy, processing backend, frame and byte counters, per-output frames and queue drops, recent
+latency, bitrate, reconnect count, and the latest recovery error. Latency is measured at each output sink from
+GStreamer running time and buffer presentation time; `p95_latency_us` covers the most recent 2,048 delivered frames,
+and the clean 1080p30 release target is below `150000`. The supervisor retries a removed camera with bounded
+exponential backoff and rebuilds the same runtime branches when it reappears, preserving the active source tuple when
+the same stable camera returns on a different video node.
+
+## Power and decoder policy
+
+Service enablement and camera streaming are deliberately separate. `daemon status` can therefore report an idle
+process with no source. Ordinary controls resolve and cache the camera identity without starting video. With the
+default `--daemon auto`, a snapshot uses the daemon only when a shared pipeline is already playing; an idle daemon
+leaves the complete snapshot burst on the direct path so the camera is opened once and closed afterward. Forced
+`--daemon always` snapshots still work by opening a bounded transient pipeline.
+
+H.264 and MJPEG raw branches default to `--decoder auto`. It selects GStreamer's VA-API decoder when the registered
+decoder's DRM render node can be opened, otherwise it falls back to the software decoder. The VA path does not select
+NVIDIA/NVDEC, and orders a primary render node ahead of secondary GPU nodes. Override the policy for diagnostics or
+systems where the integrated GPU should remain asleep:
+
+```sh
+linkd --decoder software
+linkd --decoder va-api
+linkd --decoder va-api --decoder-device /dev/dri/renderD128
+```
+
+For the installed user service, add `Environment=LINKCTL_DECODER=software` or `va-api` in a systemd drop-in and run
+`systemctl --user daemon-reload && systemctl --user restart linkd`. Set `LINKCTL_DECODER_DEVICE` in the same drop-in to
+pin a render node. Without a pin, candidates are ordered with the primary/boot VGA render node first, then by stable
+device path; this avoids automatically preferring a secondary discrete GPU. `va-api` and an explicitly pinned `auto`
+policy fail if the requested hardware is unavailable; unpinned `auto` remains the safe portable default. Pass-through
+recording stays on the encoded tee and gates the raw branch, so it does not continuously decode. Closed JPEG/PNG
+snapshot valves sit before their queues and encoders, eliminating per-frame work until a snapshot is requested.
 
 ## Routing and ownership
 
-The default `--daemon auto` policy uses `linkd` for snapshots and recording when its socket is present, otherwise those commands use their direct implementation. `--daemon always` requires a compatible daemon and returns exit code 12 if it is missing or uses another protocol version. `--daemon never` bypasses it. Direct stream commands refuse to open the physical camera while the daemon owns its media lease.
+The default `--daemon auto` policy uses `linkd` for background recording when its socket is present and for snapshots
+when it already owns an active stream. Otherwise snapshots use their direct implementation. `--daemon always`
+requires a compatible daemon and returns exit code 12 if it is missing or uses another protocol version.
+`--daemon never` bypasses it. Direct stream commands refuse to open the physical camera while the daemon owns its
+media lease.
 
 Daemon recording is intentionally background operation:
 

@@ -24,11 +24,21 @@ linkctl snapshot raw.mjpg --raw-frame --fourcc MJPG
 
 File snapshots create `<output>.json` metadata by default. It records the redacted device identity, exact applied tuple, matched profile, timestamp, and readable standard controls. Use `--no-metadata` to omit it. Existing outputs are rejected unless `--overwrite` is explicit.
 
-Direct media commands take a per-device advisory lock. `linkd` takes the same lock for its shared graph. With the default `--daemon auto`, snapshots use the daemon when it is running and do not interrupt its recording or virtual-camera branches. A direct snapshot attempted while another owner holds the camera fails with `device-busy` without opening a second stream.
+Direct media commands take a per-device advisory lock. `linkd` takes the same lock for its shared graph. With the
+default `--daemon auto`, snapshots use the daemon when its shared graph is already playing and do not interrupt its
+recording or virtual-camera branches. When `linkd` is idle, the direct path handles the entire burst with one bounded
+camera open and then releases it. A direct snapshot attempted while another owner holds the camera fails with
+`device-busy` without opening a second stream.
 
 ## Recording and pipes
 
-With no daemon, foreground recording blocks until its duration/size limit, Ctrl-C, a disk guard, or an error stops it. Video-only recording remains the default. `--audio` opts in to a microphone source without changing camera controls. When `linkd` is running, `record start` adds a background pass-through branch; inspect and finalize it with `record status` and `record stop`. On camera recovery, an active daemon recording continues in the next unused `<stem>.reconnect-NNN.<ext>` sibling without overwriting the finalized earlier segment. Use `--daemon never` when the direct recorder's audio, segmentation, rolling, duration, or size options are required.
+With no daemon, foreground recording blocks until its duration/size limit, Ctrl-C, a disk guard, or an error stops it.
+Video-only recording remains the default. `--audio` opts in to a microphone source without changing camera controls.
+When `linkd` is running, `record start` adds a background encoded pass-through branch without restarting an existing
+source; inspect and finalize it with `record status` and `record stop`. Recording alone keeps the raw decoder gated.
+On camera recovery, an active daemon recording continues in the next unused `<stem>.reconnect-NNN.<ext>` sibling
+without overwriting the finalized earlier segment. Use `--daemon never` when the direct recorder's audio,
+segmentation, rolling, duration, or size options are required.
 
 ```sh
 linkctl record start meeting.mkv --video-copy

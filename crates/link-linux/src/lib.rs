@@ -214,11 +214,12 @@ struct DeviceBuilder {
 
 /// Enumerate USB devices and group their video, media, sound, and block nodes.
 pub fn enumerate_devices() -> Result<Vec<DiscoveredDevice>, LinkError> {
-    let mut builders = enumerate_usb_roots()?;
+    let mut builders = BTreeMap::new();
     associate_nodes(&mut builders, "video4linux", NodeKind::Video)?;
     associate_nodes(&mut builders, "media", NodeKind::Media)?;
     associate_nodes(&mut builders, "sound", NodeKind::Sound)?;
     associate_nodes(&mut builders, "block", NodeKind::Block)?;
+    hydrate_usb_roots(&mut builders)?;
 
     let mut devices: Vec<_> = builders
         .into_values()
@@ -290,10 +291,9 @@ pub fn select_devices<'a>(
     }
 }
 
-fn enumerate_usb_roots() -> Result<BTreeMap<PathBuf, DeviceBuilder>, LinkError> {
+fn hydrate_usb_roots(builders: &mut BTreeMap<PathBuf, DeviceBuilder>) -> Result<(), LinkError> {
     let mut enumerator = udev::Enumerator::new().map_err(udev_error)?;
     enumerator.match_subsystem("usb").map_err(udev_error)?;
-    let mut builders = BTreeMap::new();
 
     for device in enumerator.scan_devices().map_err(udev_error)? {
         if device.devtype() != Some(OsStr::new("usb_device")) {
@@ -305,8 +305,12 @@ fn enumerate_usb_roots() -> Result<BTreeMap<PathBuf, DeviceBuilder>, LinkError> 
         let Some(product_id) = parse_hex_attribute(&device, "idProduct") else {
             continue;
         };
-        let device_revision = parse_hex_attribute(&device, "bcdDevice").unwrap_or_default();
         let syspath = device.syspath().to_path_buf();
+        let known_personality = vendor_id == 0x2e1a || (vendor_id, product_id) == (0x070a, 0x4026);
+        if !known_personality && !builders.contains_key(&syspath) {
+            continue;
+        }
+        let device_revision = parse_hex_attribute(&device, "bcdDevice").unwrap_or_default();
         let topology = device.sysname().to_string_lossy().into_owned();
         let mut issues = Vec::new();
         let descriptors = match fs::read(syspath.join("descriptors")) {
@@ -331,18 +335,13 @@ fn enumerate_usb_roots() -> Result<BTreeMap<PathBuf, DeviceBuilder>, LinkError> 
             topology,
             descriptor_sha256,
         };
-        builders.insert(
-            syspath.clone(),
-            DeviceBuilder {
-                identity: Some(identity),
-                descriptors,
-                syspath,
-                issues,
-                ..DeviceBuilder::default()
-            },
-        );
+        let builder = builders.entry(syspath.clone()).or_default();
+        builder.identity = Some(identity);
+        builder.descriptors = descriptors;
+        builder.syspath = syspath;
+        builder.issues.extend(issues);
     }
-    Ok(builders)
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -367,9 +366,13 @@ fn associate_nodes(
         else {
             continue;
         };
-        let Some(builder) = builders.get_mut(parent.syspath()) else {
-            continue;
-        };
+        let parent_syspath = parent.syspath().to_path_buf();
+        let builder = builders
+            .entry(parent_syspath.clone())
+            .or_insert_with(|| DeviceBuilder {
+                syspath: parent_syspath,
+                ..DeviceBuilder::default()
+            });
         match kind {
             NodeKind::Block => {
                 if let Some(volume) = volume_report(&device) {
