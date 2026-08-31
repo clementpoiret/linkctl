@@ -6,10 +6,10 @@ on:
       version:
         description: Exact release tag, including the v prefix
         required: true
-        default: v1.0.0
+        default: v1.0.1
         type: string
       confirmation:
-        description: Enter release-v1.0.0 for version v1.0.0
+        description: Enter release-v1.0.1 for version v1.0.1
         required: true
         type: string
       publish:
@@ -44,7 +44,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$CONFIRMATION" = "release-$VERSION"
-          test "$VERSION" = "v1.0.0"
+          test "$VERSION" = "v1.0.1"
           if [[ $PUBLISH == true ]]; then
             test "$GITHUB_REF" = "refs/tags/$VERSION"
           fi
@@ -141,7 +141,7 @@ jobs:
           test "$(dpkg-deb -f "$package" Architecture)" = "${{ matrix.architecture }}"
           lintian --fail-on error "$package"
           dpkg -i "$package"
-          linkctl --version | grep -F '1.0.0'
+          linkctl --version | grep -F '1.0.1'
           linkctl --format json device list >/dev/null
           linkd --help >/dev/null
           systemd-analyze verify /usr/lib/systemd/user/linkd.service
@@ -195,7 +195,7 @@ jobs:
           set -euo pipefail
           rustc --version | grep -F '1.97.1'
           mkdir -p dist
-          packaging/rpm/build-package.sh . release-inputs/linkctl-1.0.0.tar.gz dist
+          packaging/rpm/build-package.sh . release-inputs/linkctl-1.0.1.tar.gz dist
       - name: Lint, install, smoke-test, and remove
         run: |
           set -euo pipefail
@@ -203,7 +203,7 @@ jobs:
           test "$(rpm -qp --qf '%{ARCH}' "$package")" = "${{ matrix.architecture }}"
           rpmlint "$package"
           rpm -ivh "$package"
-          linkctl --version | grep -F '1.0.0'
+          linkctl --version | grep -F '1.0.1'
           linkctl --format json device list >/dev/null
           linkd --help >/dev/null
           systemd-analyze verify /usr/lib/systemd/user/linkd.service
@@ -258,7 +258,7 @@ jobs:
           runuser -u builder -- env \
             LINKCTL_SOURCE_REVISION="$LINKCTL_SOURCE_REVISION" \
             SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
-            packaging/arch/build-package.sh . release-inputs/linkctl-1.0.0.tar.gz dist
+            packaging/arch/build-package.sh . release-inputs/linkctl-1.0.1.tar.gz dist
       - name: Lint, install, smoke-test, and remove
         run: |
           set -euo pipefail
@@ -272,7 +272,7 @@ jobs:
           pacman -Qlpq "$package" | grep -Fx '/usr/share/man/man1/linkd.1.gz'
           namcap "$package"
           pacman -U --noconfirm "$package"
-          linkctl --version | grep -F '1.0.0'
+          linkctl --version | grep -F '1.0.1'
           linkctl --format json device list >/dev/null
           linkd --help >/dev/null
           systemd-analyze verify --man=no /usr/lib/systemd/user/linkd.service
@@ -306,7 +306,7 @@ jobs:
           set -euo pipefail
           nix flake check --print-build-logs
           nix build .#linkctl --print-build-logs
-          ./result/bin/linkctl --version | grep -F '1.0.0'
+          ./result/bin/linkctl --version | grep -F '1.0.1'
           ./result/bin/linkd --help >/dev/null
           grep -F "ExecStart=$(readlink -f result)/bin/linkd" \
             result/lib/systemd/user/linkd.service
@@ -383,4 +383,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "linkctl ${VERSION#v}" \
-            --notes-file docs/releases/v1.0.0.md
+            --notes-file docs/releases/v1.0.1.md

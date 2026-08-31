@@ -1,5 +1,5 @@
 Name:           linkctl
-Version:        1.0.0
+Version:        1.0.1
 Release:        1%{?dist}
 Summary:        Safe Linux control and media tools for Insta360 Link 2C Pro
 License:        MIT OR Apache-2.0
@@ -66,5 +66,8 @@ LINKCTL_BINARY_DIR=%{_builddir}/linkctl-%{version}/target/release \
 %{_prefix}/lib/udev/rules.d/70-linkctl.rules
 
 %changelog
+* Mon Aug 31 2026 Clément Poiret <clement@linux.com> - 1.0.1-1
+- Fix the Nix GStreamer runtime and camera-native capability reporting
+
 * Sun Aug 30 2026 Clément Poiret <clement@linux.com> - 1.0.0-1
 - Initial package

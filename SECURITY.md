@@ -2,9 +2,8 @@
 
 ## Supported versions
 
-Security fixes are provided for the latest `1.0.x` release. Until `1.0.0` is tagged, the current default branch is the
-only supported source. Development snapshots and builds with `research` or `network` enabled are outside the standard
-release security boundary.
+Security fixes are provided for the latest `1.0.x` release. Development snapshots and builds with `research` or
+`network` enabled are outside the standard release security boundary.
 
 ## Reporting a vulnerability
 

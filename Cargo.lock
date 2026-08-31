@@ -800,7 +800,7 @@ dependencies = [
 
 [[package]]
 name = "link-audio"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "alsa",
  "link-core",
@@ -811,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "link-cli"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "clap",
  "clap_complete",
@@ -835,7 +835,7 @@ dependencies = [
 
 [[package]]
 name = "link-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "humantime",
  "rustix",
@@ -850,7 +850,7 @@ dependencies = [
 
 [[package]]
 name = "link-daemon"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "clap",
  "ctrlc",
@@ -870,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "link-ipc"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "link-core",
  "rustix",
@@ -880,7 +880,7 @@ dependencies = [
 
 [[package]]
 name = "link-linux"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "link-core",
  "rustix",
@@ -890,7 +890,7 @@ dependencies = [
 
 [[package]]
 name = "link-media"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "ctrlc",
  "gstreamer",
@@ -903,7 +903,7 @@ dependencies = [
 
 [[package]]
 name = "link-profiles"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "link-core",
  "serde",
@@ -914,7 +914,7 @@ dependencies = [
 
 [[package]]
 name = "link-testkit"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "link-core",
  "link-profiles",
@@ -925,7 +925,7 @@ dependencies = [
 
 [[package]]
 name = "link-uvc-xu"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "base64",
  "link-core",
@@ -939,7 +939,7 @@ dependencies = [
 
 [[package]]
 name = "link-v4l2"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "link-core",
  "rustix",

@@ -15,7 +15,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 repository = "https://github.com/clementpoiret/linkctl"
 publish = false
@@ -46,13 +46,13 @@ udev = "0.9.3"
 v4l2r = "0.0.8"
 zstd = "0.13.3"
 
-link-audio = { path = "crates/link-audio", version = "=1.0.0" }
-link-core = { path = "crates/link-core", version = "=1.0.0" }
-link-ipc = { path = "crates/link-ipc", version = "=1.0.0" }
-link-media = { path = "crates/link-media", version = "=1.0.0" }
-link-profiles = { path = "crates/link-profiles", version = "=1.0.0" }
-link-uvc-xu = { path = "crates/link-uvc-xu", version = "=1.0.0" }
-link-v4l2 = { path = "crates/link-v4l2", version = "=1.0.0" }
+link-audio = { path = "crates/link-audio", version = "=1.0.1" }
+link-core = { path = "crates/link-core", version = "=1.0.1" }
+link-ipc = { path = "crates/link-ipc", version = "=1.0.1" }
+link-media = { path = "crates/link-media", version = "=1.0.1" }
+link-profiles = { path = "crates/link-profiles", version = "=1.0.1" }
+link-uvc-xu = { path = "crates/link-uvc-xu", version = "=1.0.1" }
+link-v4l2 = { path = "crates/link-v4l2", version = "=1.0.1" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

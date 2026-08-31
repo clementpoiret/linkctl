@@ -43,8 +43,8 @@ hashes cover every package artifact.
 
 ## Manual GitHub workflow
 
-Run the `Release candidate` workflow for the exact release revision. Enter `v1.0.0` and the confirmation text
-`release-v1.0.0`. Leave `publish` false for a candidate-only run. Download all artifacts, compare their manifest and
+Run the `Release candidate` workflow for the exact release revision. Enter `v1.0.1` and the confirmation text
+`release-v1.0.1`. Leave `publish` false for a candidate-only run. Download all artifacts, compare their manifest and
 checksums, and retain the workflow URL as evidence.
 
 Only after a second explicit publication decision should the maintainer rerun the workflow with `publish` true. That
@@ -56,16 +56,16 @@ them to the already reviewed tag. It does not create or move the tag.
 Create the local tag only after replacing `<release-revision>` with the reviewed immutable revision:
 
 ```sh
-jj tag set v1.0.0 --revision <release-revision>
+jj tag set v1.0.1 --revision <release-revision>
 jj --no-pager --color=never tag list --all-remotes
-jj git push --dry-run --remote origin --tag 'exact:v1.0.0'
+jj git push --dry-run --remote origin --tag 'exact:v1.0.1'
 ```
 
-Read the complete dry-run output and confirm that it selects only `v1.0.0` at the intended revision. Publication then
+Read the complete dry-run output and confirm that it selects only `v1.0.1` at the intended revision. Publication then
 requires a separate explicit command:
 
 ```sh
-jj git push --remote origin --tag 'exact:v1.0.0'
+jj git push --remote origin --tag 'exact:v1.0.1'
 jj --no-pager --color=never tag list --all-remotes
 ```
 
@@ -77,13 +77,13 @@ release tag without a separately documented incident decision.
 After GitHub publication, use a clean directory:
 
 ```sh
-gh release download v1.0.0 --repo clementpoiret/linkctl --dir linkctl-1.0.0
-cd linkctl-1.0.0
+gh release download v1.0.1 --repo clementpoiret/linkctl --dir linkctl-1.0.1
+cd linkctl-1.0.1
 sha256sum --check SHA256SUMS
 gh attestation verify --repo clementpoiret/linkctl ./*.deb
 gh attestation verify --repo clementpoiret/linkctl ./*.rpm
 gh attestation verify --repo clementpoiret/linkctl ./*.pkg.tar.zst
-gh attestation verify --repo clementpoiret/linkctl ./linkctl-1.0.0.tar.gz
+gh attestation verify --repo clementpoiret/linkctl ./linkctl-1.0.1.tar.gz
 ```
 
 Confirm `release-manifest.json` has the tagged source revision, expected schemas, standard features, supported targets,

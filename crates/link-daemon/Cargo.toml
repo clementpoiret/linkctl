@@ -27,7 +27,7 @@ link-audio = { workspace = true, optional = true }
 link-core.workspace = true
 link-ipc = { workspace = true, optional = true }
 link-media = { workspace = true, optional = true }
-link-linux = { path = "../link-linux", version = "=1.0.0" }
+link-linux = { path = "../link-linux", version = "=1.0.1" }
 link-v4l2.workspace = true
 rustix.workspace = true
 serde.workspace = true
