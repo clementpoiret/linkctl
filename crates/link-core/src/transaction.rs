@@ -18,12 +18,14 @@ use crate::{
     paths::{AppPaths, path_error},
 };
 
-pub const TRANSACTION_SCHEMA_VERSION: u32 = 1;
+pub const TRANSACTION_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TransactionStepKind {
+    CameraRestart,
     VideoFormat,
+    VendorControls,
     ControlPrerequisite,
     StandardControls,
     AudioGain,
@@ -208,11 +210,26 @@ impl JournalStore {
     pub fn existing(&self, stable_id: &str) -> Result<Option<RecoveryJournal>, LinkError> {
         let path = self.path(stable_id);
         match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|error| {
-                LinkError::new(ErrorKind::PartialSuccess, "recovery journal is invalid")
+            Ok(bytes) => {
+                let journal: RecoveryJournal = serde_json::from_slice(&bytes).map_err(|error| {
+                    LinkError::new(ErrorKind::PartialSuccess, "recovery journal is invalid")
+                        .with_detail("path", path.display().to_string())
+                        .with_detail("reason", error.to_string())
+                })?;
+                if journal.schema_version != TRANSACTION_SCHEMA_VERSION
+                    || journal.report.schema_version != TRANSACTION_SCHEMA_VERSION
+                    || journal.report.plan.schema_version != TRANSACTION_SCHEMA_VERSION
+                {
+                    return Err(LinkError::new(
+                        ErrorKind::PartialSuccess,
+                        "recovery journal uses an unsupported transaction schema",
+                    )
                     .with_detail("path", path.display().to_string())
-                    .with_detail("reason", error.to_string())
-            }),
+                    .with_detail("supported", TRANSACTION_SCHEMA_VERSION)
+                    .with_detail("requested", journal.schema_version));
+                }
+                Ok(Some(journal))
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(path_error("failed to read recovery journal", &path, &error)),
         }
@@ -352,6 +369,16 @@ mod tests {
         assert_eq!(store.existing("camera").unwrap(), Some(journal));
         store.remove("camera").unwrap();
         assert!(store.existing("camera").unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_transaction_journals_are_rejected() {
+        let directory = tempdir().unwrap();
+        let store = JournalStore::new(directory.path().join("transactions"));
+        let mut journal = RecoveryJournal::new(report("camera"));
+        journal.schema_version = 1;
+        store.write(&journal).unwrap();
+        assert!(store.existing("camera").is_err());
     }
 
     #[test]

@@ -46,8 +46,11 @@ use link_core::{
     output::{DeviceSummary, Envelope},
     paths::AppPaths,
     preset::{
-        PRESET_SCHEMA_VERSION, Preset, PresetAudio, PresetCategory, PresetRequirements,
-        PresetStore, PresetSummary, PresetVideo,
+        PRESET_SCHEMA_VERSION, Preset, PresetAntiFlicker, PresetAudio, PresetCamera,
+        PresetCameraMode, PresetCatalog, PresetCategory, PresetCompatibility, PresetControlMarker,
+        PresetControlValue, PresetExposureMode, PresetFocusMode, PresetFramingStyle,
+        PresetGestures, PresetImage, PresetOrigin, PresetPickupMode, PresetPolicy,
+        PresetRequirements, PresetStore, PresetSummary, PresetVideo, PresetWhiteBalanceMode,
     },
     probe::{
         DeviceListEntry, DeviceMode, HostReport, NodeAssociation, ProbeIssue, ProbeReport,
@@ -788,20 +791,24 @@ pub struct DoctorArgs {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, ValueEnum)]
 pub enum PresetCategoryChoice {
     Video,
+    Camera,
     Image,
     Zoom,
     Controls,
     Audio,
+    Gestures,
 }
 
 impl From<PresetCategoryChoice> for PresetCategory {
     fn from(value: PresetCategoryChoice) -> Self {
         match value {
             PresetCategoryChoice::Video => Self::Video,
+            PresetCategoryChoice::Camera => Self::Camera,
             PresetCategoryChoice::Image => Self::Image,
             PresetCategoryChoice::Zoom => Self::Zoom,
             PresetCategoryChoice::Controls => Self::Controls,
             PresetCategoryChoice::Audio => Self::Audio,
+            PresetCategoryChoice::Gestures => Self::Gestures,
         }
     }
 }
@@ -2686,6 +2693,7 @@ fn run_xu_semantic_writes(
     )?;
     let limiter = link_uvc_xu::RateLimiter::from_process()?;
     let mut prepared = Vec::with_capacity(authorized.len());
+    let mut simulated_selectors = BTreeMap::<(u8, u8), Vec<u8>>::new();
     for (authorization, input) in authorized {
         let control = authorization.control();
         let (guid, address) = link_uvc_xu::resolve_address(
@@ -2694,10 +2702,16 @@ fn run_xu_semantic_writes(
             None,
             control.selector,
         )?;
-        let baseline = session.get_current(address, Some(control.length))?.1;
+        let key = (address.unit, address.selector);
+        let baseline = if let Some(payload) = simulated_selectors.get(&key) {
+            payload.clone()
+        } else {
+            session.get_current(address, Some(control.length))?.1
+        };
         let previous = link_profiles::decode_control(control, &baseline)?;
         let payload = link_profiles::encode_control(control, input, Some(&baseline))?;
         let requested = link_profiles::decode_control(control, &payload)?;
+        simulated_selectors.insert(key, payload.clone());
         let rate_wait = limiter.enforce(
             &format!("{stable_id}:{guid}:{}", control.selector),
             Duration::from_millis(
@@ -3994,7 +4008,8 @@ fn run_preset(
     command: PresetCommand,
     dry_run: bool,
 ) -> Result<(), LinkError> {
-    let store = PresetStore::from_process()?;
+    let catalog = PresetCatalog::from_process()?;
+    let store = catalog.local();
     match command {
         PresetCommand::Save {
             name,
@@ -4004,7 +4019,7 @@ fn run_preset(
         } => run_preset_save(
             config,
             backend,
-            &store,
+            store,
             name,
             description,
             include,
@@ -4012,24 +4027,30 @@ fn run_preset(
             dry_run,
         ),
         PresetCommand::Apply { name } => {
-            let preset = store.load(&name)?;
-            run_preset_apply(config, backend, preset, dry_run)
+            let resolved = catalog.load(&name)?;
+            run_preset_apply(config, backend, &resolved.id, resolved.preset, dry_run)
         }
         PresetCommand::List => {
-            let presets = store.list()?;
+            let presets = catalog.list()?;
             if config.output == OutputFormat::Human {
                 if presets.is_empty() {
                     println!("No presets found in {}", store.directory().display());
                 } else {
-                    println!("NAME\tMODEL\tVIDEO\tCONTROLS\tAUDIO\tDESCRIPTION");
+                    println!(
+                        "ID\tORIGIN\tMODEL\tVIDEO\tCAMERA\tIMAGE\tCONTROLS\tAUDIO\tGESTURES\tDESCRIPTION"
+                    );
                     for preset in &presets {
                         println!(
-                            "{}\t{}\t{}\t{}\t{}\t{}",
-                            preset.name,
+                            "{}\t{:?}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                            preset.id,
+                            preset.origin,
                             preset.model,
                             preset.has_video,
+                            preset.has_camera,
+                            preset.has_image,
                             preset.standard_control_count,
                             preset.has_audio,
+                            preset.has_gestures,
                             preset.description.as_deref().unwrap_or("-"),
                         );
                     }
@@ -4040,7 +4061,7 @@ fn run_preset(
             }
         }
         PresetCommand::Show { name } => {
-            let preset = store.load(&name)?;
+            let preset = catalog.load(&name)?.preset;
             if config.output == OutputFormat::Human {
                 print!("{}", preset.to_toml()?);
                 Ok(())
@@ -4049,10 +4070,17 @@ fn run_preset(
             }
         }
         PresetCommand::Delete { name } => {
-            let preset = store.load(&name)?;
-            let path = store.path_for(&preset.name)?;
+            let resolved = catalog.load(&name)?;
+            if resolved.origin == PresetOrigin::Builtin {
+                return Err(LinkError::new(
+                    ErrorKind::InvalidInvocation,
+                    "built-in presets are immutable",
+                )
+                .with_detail("id", name));
+            }
+            let path = store.path_for(&resolved.preset.name)?;
             if !dry_run {
-                store.delete(&name)?;
+                catalog.delete(&name)?;
             }
             let result = json!({"name": name, "path": path, "dry_run": dry_run});
             if config.output == OutputFormat::Human {
@@ -4067,12 +4095,12 @@ fn run_preset(
             }
         }
         PresetCommand::Export { name, output } if output == Path::new("-") => {
-            let preset = store.load(&name)?;
+            let preset = catalog.load(&name)?.preset;
             print!("{}", preset.to_toml()?);
             Ok(())
         }
         PresetCommand::Export { name, output } => {
-            let preset = store.load(&name)?;
+            let resolved = catalog.load(&name)?;
             if output.exists() {
                 return Err(LinkError::new(
                     ErrorKind::InvalidInvocation,
@@ -4081,9 +4109,9 @@ fn run_preset(
                 .with_detail("path", output.display().to_string()));
             }
             if !dry_run {
-                store.export(&name, &output)?;
+                catalog.export(&name, &output)?;
             }
-            let result = json!({"name": preset.name, "path": output, "dry_run": dry_run});
+            let result = json!({"id": resolved.id, "name": resolved.preset.name, "path": output, "dry_run": dry_run});
             if config.output == OutputFormat::Human {
                 println!(
                     "{} {}",
@@ -4115,15 +4143,7 @@ fn run_preset(
                 .with_detail("path", destination.display().to_string()));
             }
             let summary = if dry_run {
-                PresetSummary {
-                    name: preset.name.clone(),
-                    description: preset.description.clone(),
-                    model: preset.requirements.model.clone(),
-                    has_video: preset.video.is_some(),
-                    standard_control_count: preset.standard_controls.len(),
-                    has_audio: preset.audio.is_some(),
-                    path: destination,
-                }
+                preset_summary_for(&preset, PresetOrigin::Local, Some(destination))
             } else {
                 store.import(&file)?
             };
@@ -4142,6 +4162,37 @@ fn run_preset(
     }
 }
 
+fn preset_summary_for(
+    preset: &Preset,
+    origin: PresetOrigin,
+    path: Option<PathBuf>,
+) -> PresetSummary {
+    PresetSummary {
+        id: if origin == PresetOrigin::Builtin {
+            format!("builtin:{}", preset.name)
+        } else {
+            preset.name.clone()
+        },
+        name: preset.name.clone(),
+        origin,
+        description: preset.description.clone(),
+        model: preset.requirements.model.clone(),
+        has_video: preset.video.is_some(),
+        has_camera: preset
+            .camera
+            .as_ref()
+            .is_some_and(|value| !value.is_empty()),
+        has_image: preset.image.as_ref().is_some_and(|value| !value.is_empty()),
+        standard_control_count: preset.standard_controls.len(),
+        has_audio: preset.audio.as_ref().is_some_and(|value| !value.is_empty()),
+        has_gestures: preset
+            .gestures
+            .as_ref()
+            .is_some_and(|value| !value.is_empty()),
+        path,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_preset_save(
     config: &Config,
@@ -4156,10 +4207,12 @@ fn run_preset_save(
     let mut categories = if include.is_empty() {
         BTreeSet::from([
             PresetCategory::Video,
+            PresetCategory::Camera,
             PresetCategory::Image,
             PresetCategory::Zoom,
             PresetCategory::Controls,
             PresetCategory::Audio,
+            PresetCategory::Gestures,
         ])
     } else {
         include.into_iter().map(Into::into).collect()
@@ -4203,18 +4256,28 @@ fn run_preset_save(
         .transpose()?
         .map(|status| PresetVideo::from(status.tuple));
 
+    let controls = link_v4l2::production::ControlDevice::open_read(&node.path)?.controls()?;
     let mut standard_controls = BTreeMap::new();
-    if categories.iter().any(|category| {
-        matches!(
-            category,
-            PresetCategory::Image | PresetCategory::Zoom | PresetCategory::Controls
-        )
-    }) {
-        for control in link_v4l2::production::ControlDevice::open_read(&node.path)?.controls()? {
-            let Some(category) = preset_control_category(&control) else {
+    if categories.contains(&PresetCategory::Controls) || categories.contains(&PresetCategory::Image)
+    {
+        for control in &controls {
+            let Some(category) = preset_control_category(control) else {
                 continue;
             };
-            if categories.contains(&category)
+            let capture = (categories.contains(&PresetCategory::Controls)
+                && category == PresetCategory::Controls)
+                || (categories.contains(&PresetCategory::Image)
+                    && matches!(
+                        control.name.as_str(),
+                        "brightness"
+                            | "contrast"
+                            | "saturation"
+                            | "hue"
+                            | "sharpness"
+                            | "backlight_compensation"
+                            | "gain"
+                    ));
+            if capture
                 && control.readable
                 && control.writable
                 && control.available
@@ -4222,11 +4285,19 @@ fn run_preset_save(
                 && !link_v4l2::production::is_movement_control(control.id)
                 && let Some(current) = control.current
             {
-                link_v4l2::production::validate_raw_value(&control, current)?;
-                standard_controls.insert(control.name, current);
+                link_v4l2::production::validate_raw_value(control, current)?;
+                standard_controls.insert(control.name.clone(), PresetControlValue::Raw(current));
             }
         }
     }
+
+    let semantic = capture_preset_semantic_state(config, &device, &controls, &categories)?;
+    let CapturedPresetSemanticState {
+        camera,
+        image,
+        gestures,
+        pickup_mode,
+    } = semantic;
 
     let audio = if categories.contains(&PresetCategory::Audio) {
         let (endpoint, _) = selected_audio_source(config, "camera")?;
@@ -4250,14 +4321,22 @@ fn run_preset_save(
             ));
         }
         Some(PresetAudio {
-            source: if endpoint.associated_camera.as_deref() == Some(&summary.stable_id) {
-                "camera".into()
-            } else {
-                endpoint.id
-            },
-            layer,
+            pickup_mode,
+            source: Some(
+                if endpoint.associated_camera.as_deref() == Some(&summary.stable_id) {
+                    "camera".into()
+                } else {
+                    endpoint.id
+                },
+            ),
+            layer: Some(layer),
             gain_percent: state.gain.map(|gain| gain * 100.0),
             mute: state.muted,
+        })
+    } else if pickup_mode.is_some() {
+        Some(PresetAudio {
+            pickup_mode,
+            ..Default::default()
         })
     } else {
         None
@@ -4273,38 +4352,386 @@ fn run_preset_save(
             usb_pid: Some(device.identity.product_id),
             fallback: Default::default(),
         },
+        policy: PresetPolicy::default(),
         video,
+        camera,
+        image,
         standard_controls,
         audio,
+        gestures,
     };
     preset.validate("captured state")?;
     let saved = if dry_run {
-        PresetSummary {
-            name: preset.name.clone(),
-            description: preset.description.clone(),
-            model: preset.requirements.model.clone(),
-            has_video: preset.video.is_some(),
-            standard_control_count: preset.standard_controls.len(),
-            has_audio: preset.audio.is_some(),
-            path: destination,
-        }
+        preset_summary_for(&preset, PresetOrigin::Local, Some(destination))
     } else {
         store.save(&preset)?
     };
     if config.output == OutputFormat::Human {
         println!(
-            "{} preset {} at {} (video={}, controls={}, audio={})",
+            "{} preset {} at {} (video={}, camera={}, image={}, controls={}, audio={}, gestures={})",
             if dry_run { "Would save" } else { "Saved" },
             saved.name,
-            saved.path.display(),
+            saved
+                .path
+                .as_ref()
+                .expect("saved local preset has a path")
+                .display(),
             saved.has_video,
+            saved.has_camera,
+            saved.has_image,
             saved.standard_control_count,
             saved.has_audio,
+            saved.has_gestures,
         );
         Ok(())
     } else {
         emit_success(config.output, "preset.save", Some(summary), &saved)
     }
+}
+
+struct CapturedPresetSemanticState {
+    camera: Option<PresetCamera>,
+    image: Option<PresetImage>,
+    gestures: Option<PresetGestures>,
+    pickup_mode: Option<PresetPickupMode>,
+}
+
+fn capture_preset_semantic_state(
+    config: &Config,
+    device: &DiscoveredDevice,
+    controls: &[ControlDescriptor],
+    categories: &BTreeSet<PresetCategory>,
+) -> Result<CapturedPresetSemanticState, LinkError> {
+    let mut names = Vec::new();
+    if categories.contains(&PresetCategory::Camera) {
+        names.extend([
+            "camera.mode",
+            "auto-framing.style",
+            "mode.deskview.vertical-correction",
+            "mode.compatibility",
+            "portrait.native",
+        ]);
+    }
+    if categories.contains(&PresetCategory::Image) {
+        names.extend([
+            "image.hdr",
+            "image.mirror",
+            "image.flip",
+            "image.exposure",
+            "image.exposure.iso",
+            "image.exposure.shutter-denominator",
+            "image.exposure_compensation",
+        ]);
+    }
+    if categories.contains(&PresetCategory::Gestures) {
+        names.extend(["gesture.palm", "gesture.v-sign", "gesture.l-sign"]);
+    }
+    if categories.contains(&PresetCategory::Audio) {
+        names.push("audio.pickup-mode");
+    }
+    let vendor = if names.is_empty() {
+        BTreeMap::new()
+    } else {
+        read_preset_vendor_values(config, device, &names)?
+    };
+
+    let camera = if categories.contains(&PresetCategory::Camera) {
+        let mode = match preset_vendor_string(&vendor, "camera.mode")? {
+            "normal" => PresetCameraMode::Normal,
+            "auto-framing" => PresetCameraMode::AutoFraming,
+            "whiteboard" => PresetCameraMode::Whiteboard,
+            "deskview" => PresetCameraMode::Deskview,
+            value => {
+                return Err(LinkError::new(
+                    ErrorKind::ProtocolProfileMismatch,
+                    "camera mode readback is outside the preset schema",
+                )
+                .with_detail("value", value));
+            }
+        };
+        Some(PresetCamera {
+            mode: Some(mode),
+            framing_style: (mode == PresetCameraMode::AutoFraming)
+                .then(
+                    || match preset_vendor_string(&vendor, "auto-framing.style")? {
+                        "head" => Ok(PresetFramingStyle::Head),
+                        "half-body" => Ok(PresetFramingStyle::HalfBody),
+                        value => Err(LinkError::new(
+                            ErrorKind::ProtocolProfileMismatch,
+                            "Auto Framing style readback is outside the preset schema",
+                        )
+                        .with_detail("value", value)),
+                    },
+                )
+                .transpose()?,
+            deskview_vertical_correction: (mode == PresetCameraMode::Deskview)
+                .then(|| {
+                    let raw = preset_vendor_i64(&vendor, "mode.deskview.vertical-correction")?;
+                    u8::try_from(-raw / 10).map_err(|_| {
+                        LinkError::new(
+                            ErrorKind::ProtocolProfileMismatch,
+                            "DeskView correction readback is outside the preset schema",
+                        )
+                        .with_detail("raw", raw)
+                    })
+                })
+                .transpose()?,
+            compatibility: Some(match preset_vendor_string(&vendor, "mode.compatibility")? {
+                "standard" => PresetCompatibility::Standard,
+                "low-resolution" => PresetCompatibility::LowResolution,
+                value => {
+                    return Err(LinkError::new(
+                        ErrorKind::ProtocolProfileMismatch,
+                        "compatibility mode readback is outside the preset schema",
+                    )
+                    .with_detail("value", value));
+                }
+            }),
+            native_portrait: Some(preset_vendor_on(&vendor, "portrait.native")?),
+        })
+    } else {
+        None
+    };
+
+    let mut image = PresetImage::default();
+    if categories.contains(&PresetCategory::Image) {
+        image.hdr = Some(preset_vendor_on(&vendor, "image.hdr")?);
+        image.mirror = Some(preset_vendor_on(&vendor, "image.mirror")?);
+        image.flip = Some(preset_vendor_on(&vendor, "image.flip")?);
+        image.exposure = Some(match preset_vendor_string(&vendor, "image.exposure")? {
+            "auto" => PresetExposureMode::Auto,
+            "manual" => PresetExposureMode::Manual,
+            value => {
+                return Err(LinkError::new(
+                    ErrorKind::ProtocolProfileMismatch,
+                    "exposure readback is outside the preset schema",
+                )
+                .with_detail("value", value));
+            }
+        });
+        if image.exposure == Some(PresetExposureMode::Manual) {
+            image.iso = Some(preset_vendor_i64(&vendor, "image.exposure.iso")?);
+            let denominator = preset_vendor_i64(&vendor, "image.exposure.shutter-denominator")?;
+            image.shutter = Some(format!("1/{denominator}"));
+        }
+        image.exposure_compensation_ev =
+            Some(preset_vendor_i64(&vendor, "image.exposure_compensation")? as f64 / 100.0);
+
+        if let Some(automatic) = preset_control_current(controls, "white_balance_automatic") {
+            let automatic = automatic != 0;
+            image.white_balance = Some(if automatic {
+                PresetWhiteBalanceMode::Auto
+            } else {
+                PresetWhiteBalanceMode::Manual
+            });
+            if !automatic {
+                image.white_balance_kelvin =
+                    preset_control_current(controls, "white_balance_temperature");
+            }
+        }
+        if let Some(automatic) = preset_control_current(controls, "focus_automatic_continuous") {
+            let automatic = automatic != 0;
+            image.focus = Some(if automatic {
+                PresetFocusMode::Auto
+            } else {
+                PresetFocusMode::Manual
+            });
+            if !automatic {
+                let descriptor = controls
+                    .iter()
+                    .find(|control| control.name == "focus_absolute")
+                    .ok_or_else(|| {
+                        LinkError::new(
+                            ErrorKind::CapabilityUnsupported,
+                            "manual focus position is unavailable for preset capture",
+                        )
+                    })?;
+                let current = descriptor.current.ok_or_else(|| {
+                    LinkError::new(
+                        ErrorKind::CapabilityUnsupported,
+                        "manual focus position is unreadable for preset capture",
+                    )
+                })?;
+                if descriptor.maximum <= descriptor.minimum {
+                    return Err(LinkError::new(
+                        ErrorKind::ProtocolProfileMismatch,
+                        "focus descriptor has an invalid range",
+                    ));
+                }
+                image.focus_position = Some(
+                    (current - descriptor.minimum) as f64
+                        / (descriptor.maximum - descriptor.minimum) as f64,
+                );
+            }
+        }
+        image.anti_flicker = match preset_control_current(controls, "power_line_frequency") {
+            Some(0) => Some(PresetAntiFlicker::Disabled),
+            Some(1) => Some(PresetAntiFlicker::FiftyHz),
+            Some(2) => Some(PresetAntiFlicker::SixtyHz),
+            _ => None,
+        };
+    }
+    if categories.contains(&PresetCategory::Zoom) {
+        image.zoom =
+            preset_control_current(controls, "zoom_absolute").map(|raw| raw as f64 / 100.0);
+    }
+    let image = (!image.is_empty()).then_some(image);
+
+    let gestures = categories
+        .contains(&PresetCategory::Gestures)
+        .then(|| {
+            Ok(PresetGestures {
+                palm: Some(preset_vendor_on(&vendor, "gesture.palm")?),
+                v_sign: Some(preset_vendor_on(&vendor, "gesture.v-sign")?),
+                l_sign: Some(preset_vendor_on(&vendor, "gesture.l-sign")?),
+            })
+        })
+        .transpose()?;
+    let pickup_mode = if categories.contains(&PresetCategory::Audio) {
+        Some(match preset_vendor_string(&vendor, "audio.pickup-mode")? {
+            "standard" => PresetPickupMode::Standard,
+            "wide" => PresetPickupMode::Wide,
+            "focus" => PresetPickupMode::Focus,
+            "original" => PresetPickupMode::Original,
+            value => {
+                return Err(LinkError::new(
+                    ErrorKind::ProtocolProfileMismatch,
+                    "pickup-mode readback is outside the preset schema",
+                )
+                .with_detail("value", value));
+            }
+        })
+    } else {
+        None
+    };
+    Ok(CapturedPresetSemanticState {
+        camera,
+        image,
+        gestures,
+        pickup_mode,
+    })
+}
+
+fn read_preset_vendor_values(
+    config: &Config,
+    expected_device: &DiscoveredDevice,
+    names: &[&str],
+) -> Result<BTreeMap<String, Value>, LinkError> {
+    let (device, node, inventory, catalog, session) = selected_xu_context(config, false)?;
+    if device.identity.stable_id() != expected_device.identity.stable_id() {
+        return Err(LinkError::new(
+            ErrorKind::DeviceNotFound,
+            "selected camera changed during preset capture",
+        ));
+    }
+    let (entry, firmware) = resolve_firmware_profile(&device, &inventory, &catalog, &session)?;
+    let entry = entry.ok_or_else(|| {
+        LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "preset capture requires an exact verified vendor profile",
+        )
+        .with_detail("firmware", firmware.unwrap_or_else(|| "unknown".into()))
+    })?;
+    if !entry.semantic_read_verified() {
+        return Err(LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "preset capture requires a trusted verified vendor profile",
+        ));
+    }
+    let needs_open_stream = names.iter().any(|name| {
+        entry
+            .profile
+            .control(name)
+            .is_some_and(|control| control.stream_requirement == StreamRequirement::Open)
+    });
+    drop(session);
+    #[cfg(feature = "daemon")]
+    let daemon_stream = needs_open_stream && daemon_owns_stream(config)?;
+    #[cfg(not(feature = "daemon"))]
+    let daemon_stream = false;
+    let _stream = needs_open_stream
+        .then(|| {
+            prepare_xu_read_stream(
+                StreamRequirement::Open,
+                &node.path,
+                config.timeout.get(),
+                daemon_stream,
+            )
+        })
+        .transpose()?
+        .flatten();
+    let session = link_uvc_xu::XuSession::open_read(Path::new(&node.path))?;
+    let mut values = BTreeMap::new();
+    for name in names {
+        let control = entry.profile.control(name).ok_or_else(|| {
+            LinkError::new(
+                ErrorKind::CapabilityUnsupported,
+                "verified profile does not provide requested preset state",
+            )
+            .with_detail("control", (*name).to_owned())
+        })?;
+        let value = link_uvc_xu::read_value(
+            &session,
+            &inventory,
+            Some(&control.entity_guid),
+            None,
+            control.selector,
+            Some(control.length),
+            Some(&entry.profile),
+        )?;
+        let decoded = value.decoded.get(*name).cloned().ok_or_else(|| {
+            LinkError::new(
+                ErrorKind::ProtocolProfileMismatch,
+                "verified preset state did not decode",
+            )
+            .with_detail("control", (*name).to_owned())
+        })?;
+        values.insert((*name).to_owned(), decoded);
+    }
+    Ok(values)
+}
+
+fn preset_vendor_string<'a>(
+    values: &'a BTreeMap<String, Value>,
+    name: &str,
+) -> Result<&'a str, LinkError> {
+    values.get(name).and_then(Value::as_str).ok_or_else(|| {
+        LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "preset vendor state is not a string",
+        )
+        .with_detail("control", name.to_owned())
+    })
+}
+
+fn preset_vendor_i64(values: &BTreeMap<String, Value>, name: &str) -> Result<i64, LinkError> {
+    values.get(name).and_then(Value::as_i64).ok_or_else(|| {
+        LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "preset vendor state is not an integer",
+        )
+        .with_detail("control", name.to_owned())
+    })
+}
+
+fn preset_vendor_on(values: &BTreeMap<String, Value>, name: &str) -> Result<bool, LinkError> {
+    match preset_vendor_string(values, name)? {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        value => Err(LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "preset vendor toggle is outside the preset schema",
+        )
+        .with_detail("control", name.to_owned())
+        .with_detail("value", value)),
+    }
+}
+
+fn preset_control_current(controls: &[ControlDescriptor], name: &str) -> Option<i64> {
+    controls
+        .iter()
+        .find(|control| control.name == name && control.readable && control.available)
+        .and_then(|control| control.current)
 }
 
 fn preset_control_category(control: &ControlDescriptor) -> Option<PresetCategory> {
@@ -4319,6 +4746,7 @@ fn preset_control_category(control: &ControlDescriptor) -> Option<PresetCategory
         "brightness"
             | "contrast"
             | "saturation"
+            | "hue"
             | "sharpness"
             | "backlight_compensation"
             | "exposure_time_absolute"
@@ -4344,17 +4772,68 @@ fn preset_control_category(control: &ControlDescriptor) -> Option<PresetCategory
 
 #[derive(Clone)]
 struct PreparedPresetApply {
-    device: DiscoveredDevice,
-    node: NodeAssociation,
     plan: TransactionPlan,
     control_requests: Vec<ControlRequest>,
+    vendor_restart: Option<PreparedPresetVendorGroup>,
+    vendor_controls: Option<PreparedPresetVendorGroup>,
     audio_endpoint: Option<AudioEndpoint>,
+    audio_layer: Option<AudioControlLayer>,
+}
+
+#[derive(Clone)]
+struct PreparedPresetVendorWrite {
+    control: String,
+    input: String,
+    previous: Value,
+    requested: Value,
+    no_op: bool,
+}
+
+#[derive(Clone)]
+struct PreparedPresetVendorGroup {
+    writes: Vec<PreparedPresetVendorWrite>,
+}
+
+#[derive(Clone)]
+struct AppliedPresetVendorWrite {
+    control: String,
+    previous: Value,
+}
+
+struct PresetVideoRestore {
+    node: String,
+    previous: Option<VideoTuple>,
+}
+
+impl PresetVideoRestore {
+    fn restore(&mut self) -> Result<(), LinkError> {
+        let Some(previous) = self.previous.take() else {
+            return Ok(());
+        };
+        let current = link_v4l2::video::VideoDevice::open_read(&self.node)?
+            .status()?
+            .tuple;
+        if !current.equivalent(&previous) {
+            link_v4l2::video::VideoDevice::open_write(&self.node)?.set_format(&previous)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for PresetVideoRestore {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
 }
 
 #[derive(Default)]
 struct AppliedPresetState {
+    restart: bool,
     video: Option<link_core::media::FormatSetReport>,
+    video_node: Option<String>,
+    vendor: Vec<AppliedPresetVendorWrite>,
     controls: Option<ControlSetReport>,
+    controls_node: Option<String>,
     gain: Option<link_core::audio::AudioSetReport>,
     mute: Option<link_core::audio::AudioSetReport>,
 }
@@ -4362,6 +4841,7 @@ struct AppliedPresetState {
 fn run_preset_apply(
     config: &Config,
     backend: Option<BackendChoice>,
+    preset_id: &str,
     preset: Preset,
     dry_run: bool,
 ) -> Result<(), LinkError> {
@@ -4389,7 +4869,7 @@ fn run_preset_apply(
             serde_json::to_value(existing).unwrap_or_default(),
         ));
     }
-    let prepared = prepare_preset_apply(config, backend, &preset, dry_run)?;
+    let prepared = prepare_preset_apply(config, backend, preset_id, &preset, dry_run)?;
     let mut report = TransactionReport {
         schema_version: TRANSACTION_SCHEMA_VERSION,
         plan: prepared.plan.clone(),
@@ -4445,8 +4925,9 @@ fn run_preset_apply(
             None,
             Some(error_value(&error)),
         );
-        let rollback_error = rollback_preset(&prepared, &mut report, &applied, &journals);
+        let rollback_error = rollback_preset(config, &prepared, &mut report, &applied, &journals);
         if !failed_stage_is_partial
+            && !applied.restart
             && rollback_error.is_none()
             && report.rollback_failures.is_empty()
         {
@@ -4476,6 +4957,11 @@ fn run_preset_apply(
         report.outcome = TransactionOutcome::Partial;
         if failed_stage_is_partial {
             report.rollback_failures.push("failed-stage-state".into());
+        }
+        if applied.restart {
+            report
+                .rollback_failures
+                .push("camera-restart-irreversible".into());
         }
         if let Some(rollback_error) = rollback_error {
             report
@@ -4514,6 +5000,7 @@ fn run_preset_apply(
 fn prepare_preset_apply(
     config: &Config,
     backend: Option<BackendChoice>,
+    preset_id: &str,
     preset: &Preset,
     dry_run: bool,
 ) -> Result<PreparedPresetApply, LinkError> {
@@ -4525,37 +5012,183 @@ fn prepare_preset_apply(
         device.identity.vendor_id,
         device.identity.product_id,
     )?;
-    if preset.video.is_some() || !preset.standard_controls.is_empty() {
+    let has_standard_state = preset.video.is_some()
+        || !preset.standard_controls.is_empty()
+        || preset.image.as_ref().is_some_and(|image| {
+            image.white_balance.is_some()
+                || image.focus.is_some()
+                || image.zoom.is_some()
+                || image.anti_flicker.is_some()
+        });
+    if has_standard_state {
         ensure_standard_backend(config, backend)?;
+    }
+    let has_vendor_state = preset
+        .camera
+        .as_ref()
+        .is_some_and(|camera| !camera.is_empty())
+        || preset.image.as_ref().is_some_and(|image| {
+            image.hdr.is_some()
+                || image.mirror.is_some()
+                || image.flip.is_some()
+                || image.exposure.is_some()
+                || image.exposure_compensation_ev.is_some()
+        })
+        || preset
+            .gestures
+            .as_ref()
+            .is_some_and(|gestures| !gestures.is_empty())
+        || preset
+            .audio
+            .as_ref()
+            .and_then(|audio| audio.pickup_mode)
+            .is_some();
+    if has_vendor_state && matches!(backend, Some(BackendChoice::Standard | BackendChoice::Host)) {
+        return Err(LinkError::new(
+            ErrorKind::CapabilityUnsupported,
+            "forced backend cannot provide camera-native preset state",
+        ));
     }
     let stable_id = device.identity.stable_id();
     let mut steps = Vec::new();
     let mut sequence = 0_u32;
-    if let Some(video) = &preset.video {
-        let requested = VideoTuple::from(video);
-        let reader = link_v4l2::video::VideoDevice::open_read(&node.path)?;
-        let previous = reader.status()?.tuple;
-        reader.validate(&requested)?;
+
+    let (restart_inputs, vendor_inputs) = preset_vendor_inputs(config, &device, preset)?;
+    let vendor_restart = (!restart_inputs.is_empty())
+        .then(|| {
+            prepare_preset_vendor_group(
+                config,
+                &device,
+                &node,
+                StreamRequirement::Restart,
+                &restart_inputs,
+            )
+        })
+        .transpose()?;
+    if let Some(group) = &vendor_restart {
+        let no_op = group.writes.iter().all(|write| write.no_op);
+        if !no_op && !preset.policy.allow_restart {
+            return Err(LinkError::new(
+                ErrorKind::UnsafeOperationDenied,
+                "preset requires a camera restart but policy.allow_restart is false",
+            ));
+        }
         steps.push(TransactionStepPlan {
             sequence,
-            kind: TransactionStepKind::VideoFormat,
-            backend: "v4l2".into(),
-            previous: serde_json::to_value(&previous).unwrap_or_default(),
-            requested: serde_json::to_value(&requested).unwrap_or_default(),
+            kind: TransactionStepKind::CameraRestart,
+            backend: "uvc-xu".into(),
+            previous: preset_vendor_group_values(group, false),
+            requested: preset_vendor_group_values(group, true),
+            reversible: no_op,
+            no_op,
+        });
+        sequence += 1;
+    }
+
+    let vendor_controls = (!vendor_inputs.is_empty())
+        .then(|| {
+            let requirement = if vendor_inputs
+                .iter()
+                .any(|(control, _)| control != "audio.pickup-mode")
+            {
+                StreamRequirement::Open
+            } else {
+                StreamRequirement::Either
+            };
+            prepare_preset_vendor_group(config, &device, &node, requirement, &vendor_inputs)
+        })
+        .transpose()?;
+    if let Some(group) = &vendor_controls {
+        steps.push(TransactionStepPlan {
+            sequence,
+            kind: TransactionStepKind::VendorControls,
+            backend: "uvc-xu".into(),
+            previous: preset_vendor_group_values(group, false),
+            requested: preset_vendor_group_values(group, true),
             reversible: true,
-            no_op: previous.equivalent(&requested),
+            no_op: group.writes.iter().all(|write| write.no_op),
         });
         sequence += 1;
     }
 
     let control_reader = link_v4l2::production::ControlDevice::open_read(&node.path)?;
-    let mut desired_by_id = BTreeMap::new();
+    let mut desired_by_id = BTreeMap::<u32, i64>::new();
     let mut descriptors = BTreeMap::new();
     for (name, value) in &preset.standard_controls {
         let descriptor = control_reader.resolve(name)?;
-        link_v4l2::production::validate_raw_value(&descriptor, *value)?;
-        desired_by_id.insert(descriptor.id, *value);
+        let desired = match value {
+            PresetControlValue::Raw(value) => *value,
+            PresetControlValue::Marker(PresetControlMarker::Default) => {
+                if !descriptor.default_is_valid {
+                    return Err(LinkError::new(
+                        ErrorKind::CapabilityUnsupported,
+                        "preset requested a live control default that is not writable",
+                    )
+                    .with_detail("control", descriptor.name.clone()));
+                }
+                descriptor.default
+            }
+        };
+        link_v4l2::production::validate_raw_value(&descriptor, desired)?;
+        insert_preset_control(&mut desired_by_id, &descriptor, desired)?;
         descriptors.insert(descriptor.id, descriptor);
+    }
+    if let Some(image) = &preset.image {
+        if let Some(mode) = image.white_balance {
+            let automatic = control_reader.resolve("white_balance_automatic")?;
+            insert_preset_control(
+                &mut desired_by_id,
+                &automatic,
+                i64::from(mode == PresetWhiteBalanceMode::Auto),
+            )?;
+            descriptors.insert(automatic.id, automatic);
+            if mode == PresetWhiteBalanceMode::Manual {
+                let temperature = control_reader.resolve("white_balance_temperature")?;
+                let desired = image
+                    .white_balance_kelvin
+                    .expect("validated manual white balance has Kelvin");
+                link_v4l2::production::validate_raw_value(&temperature, desired)?;
+                insert_preset_control(&mut desired_by_id, &temperature, desired)?;
+                descriptors.insert(temperature.id, temperature);
+            }
+        }
+        if let Some(mode) = image.focus {
+            let automatic = control_reader.resolve("focus_automatic_continuous")?;
+            insert_preset_control(
+                &mut desired_by_id,
+                &automatic,
+                i64::from(mode == PresetFocusMode::Auto),
+            )?;
+            descriptors.insert(automatic.id, automatic);
+            if mode == PresetFocusMode::Manual {
+                let focus = control_reader.resolve("focus_absolute")?;
+                let position = image
+                    .focus_position
+                    .expect("validated manual focus has a position");
+                let desired = focus.minimum
+                    + ((focus.maximum - focus.minimum) as f64 * position).round() as i64;
+                link_v4l2::production::validate_raw_value(&focus, desired)?;
+                insert_preset_control(&mut desired_by_id, &focus, desired)?;
+                descriptors.insert(focus.id, focus);
+            }
+        }
+        if let Some(zoom) = image.zoom {
+            let descriptor = control_reader.resolve("zoom_absolute")?;
+            let desired = zoom_factor_to_raw(&descriptor, zoom)?;
+            insert_preset_control(&mut desired_by_id, &descriptor, desired)?;
+            descriptors.insert(descriptor.id, descriptor);
+        }
+        if let Some(anti_flicker) = image.anti_flicker {
+            let descriptor = control_reader.resolve("power_line_frequency")?;
+            let desired = match anti_flicker {
+                PresetAntiFlicker::Disabled => 0,
+                PresetAntiFlicker::FiftyHz => 1,
+                PresetAntiFlicker::SixtyHz => 2,
+            };
+            link_v4l2::production::validate_raw_value(&descriptor, desired)?;
+            insert_preset_control(&mut desired_by_id, &descriptor, desired)?;
+            descriptors.insert(descriptor.id, descriptor);
+        }
     }
     for descriptor in descriptors.values() {
         for (parent_id, manual_value) in link_v4l2::production::manual_dependencies(descriptor.id) {
@@ -4575,7 +5208,7 @@ fn prepare_preset_apply(
     let mut control_requests = Vec::new();
     let mut previous_controls = BTreeMap::new();
     let mut requested_controls = BTreeMap::new();
-    for (id, desired) in desired_by_id {
+    for (&id, &desired) in &desired_by_id {
         let descriptor = &descriptors[&id];
         let (_, previous) = control_reader.get(id)?;
         previous_controls.insert(descriptor.name.clone(), previous.raw);
@@ -4589,7 +5222,7 @@ fn prepare_preset_apply(
     }
     let mut prerequisite_previous = BTreeMap::new();
     let mut prerequisite_requested = BTreeMap::new();
-    if !preset.standard_controls.is_empty() {
+    if !desired_by_id.is_empty() {
         if !control_requests.is_empty() {
             let preview = execute_requests(
                 &device,
@@ -4642,22 +5275,30 @@ fn prepare_preset_apply(
     }
 
     let mut audio_endpoint = None;
-    if let Some(audio) = &preset.audio {
-        let (endpoint, _) = selected_audio_source(config, &audio.source)?;
+    let mut audio_layer = None;
+    if let Some(audio) = &preset.audio
+        && (audio.gain_percent.is_some() || audio.mute.is_some())
+    {
+        let source = audio
+            .source
+            .as_deref()
+            .expect("validated audio layer has source");
+        let layer = audio.layer.expect("validated audio layer is present");
+        let (endpoint, _) = selected_audio_source(config, source)?;
         let requested_layer = match backend.unwrap_or(BackendChoice::Auto) {
-            BackendChoice::Auto => audio.layer,
+            BackendChoice::Auto => layer,
             BackendChoice::Standard => AudioControlLayer::Hardware,
             BackendChoice::Host => AudioControlLayer::Host,
             BackendChoice::Vendor => return Err(audio_backend_unsupported("vendor")),
         };
-        if requested_layer != audio.layer {
+        if requested_layer != layer {
             return Err(LinkError::new(
                 ErrorKind::CapabilityUnsupported,
                 "forced audio backend does not match the preset control layer",
             ));
         }
         let status = link_audio::status(&endpoint)?;
-        let state = match audio.layer {
+        let state = match layer {
             AudioControlLayer::Hardware => status.hardware,
             AudioControlLayer::Host => status.host,
         }
@@ -4678,7 +5319,7 @@ fn prepare_preset_apply(
             steps.push(TransactionStepPlan {
                 sequence,
                 kind: TransactionStepKind::AudioGain,
-                backend: format!("{:?}", audio.layer).to_ascii_lowercase(),
+                backend: format!("{layer:?}").to_ascii_lowercase(),
                 previous: json!(previous),
                 requested: json!(requested),
                 reversible: true,
@@ -4696,7 +5337,7 @@ fn prepare_preset_apply(
             steps.push(TransactionStepPlan {
                 sequence,
                 kind: TransactionStepKind::AudioMute,
-                backend: format!("{:?}", audio.layer).to_ascii_lowercase(),
+                backend: format!("{layer:?}").to_ascii_lowercase(),
                 previous: json!(previous),
                 requested: json!(muted),
                 reversible: true,
@@ -4704,24 +5345,321 @@ fn prepare_preset_apply(
             });
         }
         audio_endpoint = Some(endpoint);
+        audio_layer = Some(layer);
+    }
+
+    let previous_video = link_v4l2::video::VideoDevice::open_read(&node.path)?
+        .status()?
+        .tuple;
+    if let Some(video) = &preset.video {
+        let requested = VideoTuple::from(video);
+        link_v4l2::video::VideoDevice::open_read(&node.path)?.validate(&requested)?;
+        steps.push(TransactionStepPlan {
+            sequence,
+            kind: TransactionStepKind::VideoFormat,
+            backend: "v4l2".into(),
+            previous: serde_json::to_value(&previous_video).unwrap_or_default(),
+            requested: serde_json::to_value(&requested).unwrap_or_default(),
+            reversible: true,
+            no_op: previous_video.equivalent(&requested),
+        });
     }
     Ok(PreparedPresetApply {
-        device,
-        node,
         plan: TransactionPlan {
             schema_version: TRANSACTION_SCHEMA_VERSION,
-            transaction_id: new_transaction_id(&stable_id, &preset.name),
-            preset: preset.name.clone(),
+            transaction_id: new_transaction_id(&stable_id, preset_id),
+            preset: preset_id.to_owned(),
             stable_id,
             dry_run,
-            restart_required: false,
-            stream_restart_required: false,
+            restart_required: vendor_restart
+                .as_ref()
+                .is_some_and(|group| group.writes.iter().any(|write| !write.no_op)),
+            stream_restart_required: vendor_controls
+                .as_ref()
+                .is_some_and(|group| group.writes.iter().any(|write| !write.no_op)),
             rollback_feasible: steps.iter().all(|step| step.reversible),
             steps,
         },
         control_requests,
+        vendor_restart,
+        vendor_controls,
         audio_endpoint,
+        audio_layer,
     })
+}
+
+type PresetVendorInput = (String, String);
+
+fn preset_vendor_inputs(
+    config: &Config,
+    device: &DiscoveredDevice,
+    preset: &Preset,
+) -> Result<(Vec<PresetVendorInput>, Vec<PresetVendorInput>), LinkError> {
+    let mut restart = Vec::new();
+    let mut regular = Vec::new();
+    if let Some(camera) = &preset.camera {
+        if camera.compatibility.is_some() || camera.native_portrait.is_some() {
+            let current = read_preset_vendor_values(config, device, &["camera.usb-mode"])?;
+            let current = preset_vendor_string(&current, "camera.usb-mode")?;
+            let current_compatibility = if current == "low-resolution" {
+                PresetCompatibility::LowResolution
+            } else {
+                PresetCompatibility::Standard
+            };
+            let current_portrait = current == "portrait";
+            let compatibility = camera.compatibility.unwrap_or(current_compatibility);
+            let portrait = camera.native_portrait.unwrap_or(current_portrait);
+            let desired = match (compatibility, portrait) {
+                (PresetCompatibility::LowResolution, false) => "low-resolution",
+                (PresetCompatibility::Standard, true) => "portrait",
+                (PresetCompatibility::Standard, false) => "standard",
+                (PresetCompatibility::LowResolution, true) => {
+                    return Err(LinkError::new(
+                        ErrorKind::InvalidInvocation,
+                        "native portrait and low-resolution compatibility cannot be combined",
+                    ));
+                }
+            };
+            restart.push(("camera.usb-mode".into(), desired.into()));
+        }
+        if let Some(mode) = camera.mode {
+            if mode == PresetCameraMode::AutoFraming
+                && let Some(style) = camera.framing_style
+            {
+                regular.push(("auto-framing.smart-composition".into(), "on".into()));
+                regular.push((
+                    "auto-framing.style".into(),
+                    match style {
+                        PresetFramingStyle::Head => "head",
+                        PresetFramingStyle::HalfBody => "half-body",
+                    }
+                    .into(),
+                ));
+            }
+            regular.push((
+                "camera.mode".into(),
+                match mode {
+                    PresetCameraMode::Normal => "normal",
+                    PresetCameraMode::AutoFraming => "auto-framing",
+                    PresetCameraMode::Whiteboard => "whiteboard",
+                    PresetCameraMode::Deskview => "deskview",
+                }
+                .into(),
+            ));
+        }
+        if let Some(correction) = camera.deskview_vertical_correction {
+            regular.push((
+                "mode.deskview.vertical-correction".into(),
+                (-i64::from(correction) * 10).to_string(),
+            ));
+        }
+    }
+    if let Some(image) = &preset.image {
+        for (name, enabled) in [
+            ("image.hdr", image.hdr),
+            ("image.mirror", image.mirror),
+            ("image.flip", image.flip),
+        ] {
+            if let Some(enabled) = enabled {
+                regular.push((name.into(), if enabled { "on" } else { "off" }.into()));
+            }
+        }
+        if let Some(exposure) = image.exposure {
+            regular.push((
+                "image.exposure".into(),
+                match exposure {
+                    PresetExposureMode::Auto => "auto",
+                    PresetExposureMode::Manual => "manual",
+                }
+                .into(),
+            ));
+            if exposure == PresetExposureMode::Manual {
+                if let Some(iso) = image.iso {
+                    validate_vendor_iso(iso)?;
+                    regular.push(("image.exposure.iso".into(), iso.to_string()));
+                }
+                if let Some(shutter) = &image.shutter {
+                    regular.push((
+                        "image.exposure.shutter-denominator".into(),
+                        shutter_to_vendor_denominator(shutter)?.to_string(),
+                    ));
+                }
+            }
+        }
+        if let Some(ev) = image.exposure_compensation_ev {
+            regular.push((
+                "image.exposure_compensation".into(),
+                exposure_compensation_to_vendor_hundredths(ev)?.to_string(),
+            ));
+        }
+    }
+    if let Some(gestures) = &preset.gestures {
+        let current = read_preset_vendor_values(config, device, &["gesture.enabled"])?;
+        let current = preset_vendor_string(&current, "gesture.enabled")?;
+        let mut palm = matches!(current, "palm" | "palm+l-sign" | "palm+v-sign" | "on");
+        let mut v_sign = matches!(current, "v-sign" | "palm+v-sign" | "v-sign+l-sign" | "on");
+        let mut l_sign = matches!(current, "l-sign" | "palm+l-sign" | "v-sign+l-sign" | "on");
+        palm = gestures.palm.unwrap_or(palm);
+        v_sign = gestures.v_sign.unwrap_or(v_sign);
+        l_sign = gestures.l_sign.unwrap_or(l_sign);
+        let value = match (palm, v_sign, l_sign) {
+            (false, false, false) => "off",
+            (true, false, false) => "palm",
+            (false, true, false) => "v-sign",
+            (false, false, true) => "l-sign",
+            (true, true, false) => "palm+v-sign",
+            (true, false, true) => "palm+l-sign",
+            (false, true, true) => "v-sign+l-sign",
+            (true, true, true) => "on",
+        };
+        regular.push(("gesture.enabled".into(), value.into()));
+    }
+    if let Some(pickup_mode) = preset.audio.as_ref().and_then(|audio| audio.pickup_mode) {
+        regular.push((
+            "audio.pickup-mode".into(),
+            match pickup_mode {
+                PresetPickupMode::Standard => "standard",
+                PresetPickupMode::Wide => "wide",
+                PresetPickupMode::Focus => "focus",
+                PresetPickupMode::Original => "original",
+            }
+            .into(),
+        ));
+    }
+    Ok((restart, regular))
+}
+
+fn prepare_preset_vendor_group(
+    config: &Config,
+    expected_device: &DiscoveredDevice,
+    node: &NodeAssociation,
+    requirement: StreamRequirement,
+    inputs: &[PresetVendorInput],
+) -> Result<PreparedPresetVendorGroup, LinkError> {
+    let (device, _, inventory, catalog, session) = selected_xu_context(config, false)?;
+    if device.identity.stable_id() != expected_device.identity.stable_id() {
+        return Err(LinkError::new(
+            ErrorKind::DeviceNotFound,
+            "selected camera changed during preset validation",
+        ));
+    }
+    let (entry, firmware) = resolve_firmware_profile(&device, &inventory, &catalog, &session)?;
+    let entry = entry.ok_or_else(|| {
+        LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "preset application requires an exact verified vendor profile",
+        )
+        .with_detail("firmware", firmware.unwrap_or_else(|| "unknown".into()))
+    })?;
+    SafetyPolicy::new(config.safety.clone())
+        .authorize(Operation::VendorProfileWrite(entry.state()))?;
+    if !entry.semantic_write_authorized() {
+        return Err(LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "preset application requires a trusted verified vendor profile",
+        ));
+    }
+    for (name, _) in inputs {
+        let authorization = entry.authorized_control(name).ok_or_else(|| {
+            LinkError::new(
+                ErrorKind::CapabilityUnsupported,
+                "preset vendor control is unavailable",
+            )
+            .with_detail("control", name.clone())
+        })?;
+        let control = authorization.control();
+        authorize_control_safety(control.safety, &SafetyPolicy::new(config.safety.clone()))?;
+        let compatible = control.stream_requirement == requirement
+            || (requirement == StreamRequirement::Open
+                && control.stream_requirement == StreamRequirement::Either);
+        if !compatible {
+            return Err(LinkError::new(
+                ErrorKind::ProtocolProfileMismatch,
+                "preset vendor controls require incompatible stream conditions",
+            )
+            .with_detail("control", name.clone()));
+        }
+    }
+    drop(session);
+    #[cfg(feature = "daemon")]
+    let daemon_stream = requirement == StreamRequirement::Open && daemon_owns_stream(config)?;
+    #[cfg(not(feature = "daemon"))]
+    let daemon_stream = false;
+    let _stream = (requirement == StreamRequirement::Open)
+        .then(|| {
+            prepare_xu_read_stream(requirement, &node.path, config.timeout.get(), daemon_stream)
+        })
+        .transpose()?
+        .flatten();
+    let session = link_uvc_xu::XuSession::open_read(Path::new(&node.path))?;
+    let mut simulated = BTreeMap::<(u8, u8), Vec<u8>>::new();
+    let mut writes = Vec::with_capacity(inputs.len());
+    for (name, input) in inputs {
+        let authorization = entry.authorized_control(name).expect("authorized above");
+        let control = authorization.control();
+        let (_, address) = link_uvc_xu::resolve_address(
+            &inventory,
+            Some(&control.entity_guid),
+            None,
+            control.selector,
+        )?;
+        let key = (address.unit, address.selector);
+        let baseline = if let Some(payload) = simulated.get(&key) {
+            payload.clone()
+        } else {
+            session.get_current(address, Some(control.length))?.1
+        };
+        let previous = link_profiles::decode_control(control, &baseline)?;
+        let payload = link_profiles::encode_control(control, input, Some(&baseline))?;
+        let requested = link_profiles::decode_control(control, &payload)?;
+        simulated.insert(key, payload);
+        writes.push(PreparedPresetVendorWrite {
+            control: name.clone(),
+            input: input.clone(),
+            no_op: semantic_readback_matches(control, &requested, &previous),
+            previous,
+            requested,
+        });
+    }
+    Ok(PreparedPresetVendorGroup { writes })
+}
+
+fn preset_vendor_group_values(group: &PreparedPresetVendorGroup, requested: bool) -> Value {
+    Value::Object(
+        group
+            .writes
+            .iter()
+            .map(|write| {
+                (
+                    write.control.clone(),
+                    if requested {
+                        write.requested.clone()
+                    } else {
+                        write.previous.clone()
+                    },
+                )
+            })
+            .collect(),
+    )
+}
+
+fn insert_preset_control(
+    desired: &mut BTreeMap<u32, i64>,
+    descriptor: &ControlDescriptor,
+    value: i64,
+) -> Result<(), LinkError> {
+    if let Some(previous) = desired.insert(descriptor.id, value)
+        && previous != value
+    {
+        return Err(LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "preset assigns conflicting values to one standard control",
+        )
+        .with_detail("control", descriptor.name.clone())
+        .with_detail("first", previous)
+        .with_detail("second", value));
+    }
+    Ok(())
 }
 
 fn validate_preset_requirements(
@@ -4754,28 +5692,66 @@ fn apply_prepared_preset(
     applied: &mut AppliedPresetState,
     journals: &JournalStore,
 ) -> Result<(), (LinkError, u32)> {
-    if let Some(step) = plan_step(&prepared.plan, TransactionStepKind::VideoFormat)
+    if let Some(step) = plan_step(&prepared.plan, TransactionStepKind::CameraRestart)
         && !step.no_op
     {
-        let requested = VideoTuple::from(preset.video.as_ref().expect("video plan requires video"));
-        let result = link_v4l2::video::VideoDevice::open_write(&prepared.node.path)
-            .and_then(|mut device| device.set_format(&requested))
-            .map_err(|error| (error, step.sequence))?;
+        apply_preset_vendor_group(
+            config,
+            prepared
+                .vendor_restart
+                .as_ref()
+                .expect("restart plan has a prepared group"),
+            true,
+        )
+        .map_err(|error| {
+            (
+                LinkError::new(
+                    ErrorKind::PartialSuccess,
+                    "restart-dependent preset state may have changed and cannot be rolled back",
+                )
+                .with_detail("cause", error_value(&error)),
+                step.sequence,
+            )
+        })?;
+        applied.restart = true;
         set_transaction_step(
             report,
             step.sequence,
             TransactionStepStatus::Verified,
-            Some(serde_json::to_value(&result.applied).unwrap_or_default()),
+            Some(step.requested.clone()),
             None,
         );
-        applied.video = Some(result);
+        write_transaction_journal(journals, report).map_err(|error| (error, step.sequence))?;
+    }
+    if let Some(step) = plan_step(&prepared.plan, TransactionStepKind::VendorControls)
+        && !step.no_op
+    {
+        let writes = apply_preset_vendor_group(
+            config,
+            prepared
+                .vendor_controls
+                .as_ref()
+                .expect("vendor plan has a prepared group"),
+            false,
+        )
+        .map_err(|error| (error, step.sequence))?;
+        applied.vendor = writes;
+        set_transaction_step(
+            report,
+            step.sequence,
+            TransactionStepStatus::Verified,
+            Some(step.requested.clone()),
+            None,
+        );
         write_transaction_journal(journals, report).map_err(|error| (error, step.sequence))?;
     }
     if let Some(step) = plan_step(&prepared.plan, TransactionStepKind::StandardControls)
         && !step.no_op
     {
+        let (active_device, active_node) =
+            selected_video_device(config).map_err(|error| (error, step.sequence))?;
         let result = execute_requests(
-            &prepared.device,
+            &active_device,
             config,
             prepared.control_requests.clone(),
             false,
@@ -4809,6 +5785,7 @@ fn apply_prepared_preset(
             None,
         );
         applied.controls = Some(result);
+        applied.controls_node = Some(active_node.path);
         write_transaction_journal(journals, report).map_err(|error| (error, step.sequence))?;
     }
     let endpoint = prepared.audio_endpoint.as_ref();
@@ -4819,7 +5796,7 @@ fn apply_prepared_preset(
         let gain = audio.gain_percent.expect("gain step requires gain") / 100.0;
         let result = link_audio::set_gain(
             endpoint.expect("audio step requires endpoint"),
-            audio.layer,
+            prepared.audio_layer.expect("audio step requires layer"),
             gain,
             false,
         )
@@ -4840,7 +5817,7 @@ fn apply_prepared_preset(
         let audio = preset.audio.as_ref().expect("audio plan requires audio");
         let result = link_audio::set_mute(
             endpoint.expect("audio step requires endpoint"),
-            audio.layer,
+            prepared.audio_layer.expect("audio step requires layer"),
             audio.mute.expect("mute step requires mute"),
             false,
         )
@@ -4855,10 +5832,329 @@ fn apply_prepared_preset(
         applied.mute = Some(result);
         write_transaction_journal(journals, report).map_err(|error| (error, step.sequence))?;
     }
+    if let Some(step) = plan_step(&prepared.plan, TransactionStepKind::VideoFormat)
+        && !step.no_op
+    {
+        let requested = VideoTuple::from(preset.video.as_ref().expect("video plan requires video"));
+        let (_, active_node) =
+            selected_video_device(config).map_err(|error| (error, step.sequence))?;
+        let result = link_v4l2::video::VideoDevice::open_write(&active_node.path)
+            .and_then(|mut device| device.set_format(&requested))
+            .map_err(|error| (error, step.sequence))?;
+        set_transaction_step(
+            report,
+            step.sequence,
+            TransactionStepStatus::Verified,
+            Some(serde_json::to_value(&result.applied).unwrap_or_default()),
+            None,
+        );
+        applied.video_node = Some(active_node.path);
+        applied.video = Some(result);
+        write_transaction_journal(journals, report).map_err(|error| (error, step.sequence))?;
+    }
     Ok(())
 }
 
+fn apply_preset_vendor_group(
+    config: &Config,
+    group: &PreparedPresetVendorGroup,
+    restart: bool,
+) -> Result<Vec<AppliedPresetVendorWrite>, LinkError> {
+    let (device, node, inventory, catalog, session) = selected_xu_context(config, true)?;
+    let stable_id = device.identity.stable_id();
+    let (entry, firmware) = resolve_firmware_profile(&device, &inventory, &catalog, &session)?;
+    let entry = entry.ok_or_else(|| {
+        LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "no exact verified profile matches the camera during preset application",
+        )
+        .with_detail("firmware", firmware.unwrap_or_else(|| "unknown".into()))
+    })?;
+    if !entry.semantic_write_authorized() {
+        return Err(LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "preset application requires a trusted verified vendor profile",
+        ));
+    }
+    let stream_control = group.writes.iter().find_map(|write| {
+        let control = entry.profile.control(&write.control)?;
+        (control.stream_requirement == StreamRequirement::Open).then_some(control)
+    });
+    #[cfg(feature = "daemon")]
+    let daemon_stream = stream_control.is_some() && daemon_owns_stream(config)?;
+    #[cfg(not(feature = "daemon"))]
+    let daemon_stream = false;
+    #[cfg(feature = "gstreamer")]
+    let _media_lease = if stream_control.is_some() && !daemon_stream {
+        Some(link_media::MediaLease::acquire(
+            &stable_id,
+            "preset.vendor-controls",
+        )?)
+    } else {
+        None
+    };
+    let previous_video = stream_control
+        .filter(|_| !daemon_stream)
+        .map(|_| {
+            link_v4l2::video::VideoDevice::open_read(&node.path)?
+                .status()
+                .map(|status| status.tuple)
+        })
+        .transpose()?;
+    let mut video_restore = PresetVideoRestore {
+        node: node.path.clone(),
+        previous: previous_video,
+    };
+    let stream = stream_control
+        .map(|control| {
+            prepare_xu_stream(
+                control,
+                &node.path,
+                config.timeout.get(),
+                false,
+                daemon_stream,
+            )
+        })
+        .transpose()?
+        .flatten();
+    let limiter = link_uvc_xu::RateLimiter::from_process()?;
+    let mut applied = Vec::new();
+    for write in group.writes.iter().filter(|write| !write.no_op) {
+        let authorization = entry.authorized_control(&write.control).ok_or_else(|| {
+            LinkError::new(
+                ErrorKind::CapabilityUnsupported,
+                "preset vendor control became unavailable",
+            )
+            .with_detail("control", write.control.clone())
+        })?;
+        let control = authorization.control();
+        let (guid, address) = link_uvc_xu::resolve_address(
+            &inventory,
+            Some(&control.entity_guid),
+            None,
+            control.selector,
+        )?;
+        let baseline = session.get_current(address, Some(control.length))?.1;
+        let previous = link_profiles::decode_control(control, &baseline)?;
+        let payload = link_profiles::encode_control(control, &write.input, Some(&baseline))?;
+        let requested = link_profiles::decode_control(control, &payload)?;
+        limiter.enforce(
+            &format!("{stable_id}:{guid}:{}", control.selector),
+            Duration::from_millis(
+                control
+                    .minimum_write_interval_ms
+                    .max(config.safety.minimum_xu_write_interval_ms),
+            ),
+            config.timeout.get(),
+            false,
+        )?;
+        if restart {
+            let set_error = session.set_profiled(address, authorization, &payload).err();
+            drop(session);
+            let observed = wait_for_reenumerated_semantic_value(
+                config,
+                &stable_id,
+                &device.identity.descriptor_sha256,
+                &entry.profile.profile_id,
+                control,
+            )?;
+            if !semantic_readback_matches(control, &requested, &observed) {
+                let mut error = LinkError::new(
+                    ErrorKind::ProtocolProfileMismatch,
+                    "restart-dependent preset write failed verification",
+                )
+                .with_detail("control", write.control.clone())
+                .with_detail("requested", requested)
+                .with_detail("observed", observed);
+                if let Some(set_error) = set_error {
+                    error = error.with_detail("transport_error", error_value(&set_error));
+                }
+                return Err(error);
+            }
+            return Ok(Vec::new());
+        }
+        let attempted = AppliedPresetVendorWrite {
+            control: write.control.clone(),
+            previous: previous.clone(),
+        };
+        let observed = match apply_semantic_write(
+            &session,
+            &PreparedSemanticWrite {
+                authorization,
+                guid,
+                address,
+                baseline: baseline.clone(),
+                previous: previous.clone(),
+                payload,
+                requested: requested.clone(),
+                observed: None,
+                verified: false,
+                rate_limit_wait_ms: 0,
+            },
+        ) {
+            Ok(observed) => observed,
+            Err(error) => {
+                let mut rollback_writes = applied.clone();
+                rollback_writes.push(attempted);
+                let rollback =
+                    restore_preset_vendor_in_session(&session, entry, &inventory, &rollback_writes);
+                return Err(error.with_detail("rollback", rollback));
+            }
+        };
+        if !semantic_readback_matches(control, &requested, &observed) {
+            let mut rollback_writes = applied.clone();
+            rollback_writes.push(attempted);
+            let rollback =
+                restore_preset_vendor_in_session(&session, entry, &inventory, &rollback_writes);
+            return Err(LinkError::new(
+                ErrorKind::ProtocolProfileMismatch,
+                "preset vendor write failed readback verification",
+            )
+            .with_detail("control", write.control.clone())
+            .with_detail("requested", requested)
+            .with_detail("observed", observed)
+            .with_detail("rollback", rollback));
+        }
+        applied.push(attempted);
+    }
+    drop(stream);
+    video_restore.restore()?;
+    Ok(applied)
+}
+
+fn restore_preset_vendor_in_session(
+    session: &link_uvc_xu::XuSession,
+    entry: &link_profiles::CatalogProfile,
+    inventory: &link_uvc_xu::DescriptorInventory,
+    applied: &[AppliedPresetVendorWrite],
+) -> Value {
+    Value::Array(
+        applied
+            .iter()
+            .rev()
+            .map(|write| {
+                let result = (|| {
+                    let authorization =
+                        entry.authorized_control(&write.control).ok_or_else(|| {
+                            LinkError::new(
+                                ErrorKind::CapabilityUnsupported,
+                                "preset rollback control is unavailable",
+                            )
+                        })?;
+                    let control = authorization.control();
+                    let (_, address) = link_uvc_xu::resolve_address(
+                        inventory,
+                        Some(&control.entity_guid),
+                        None,
+                        control.selector,
+                    )?;
+                    let baseline = session.get_current(address, Some(control.length))?.1;
+                    let payload = link_profiles::encode_decoded_control(
+                        control,
+                        &write.previous,
+                        Some(&baseline),
+                    )?;
+                    session.set_profiled(address, authorization, &payload)?;
+                    thread::sleep(Duration::from_millis(control.verification_delay_ms));
+                    let readback = session.get_current(address, Some(control.length))?.1;
+                    let observed = link_profiles::decode_control(control, &readback)?;
+                    if semantic_readback_matches(control, &write.previous, &observed) {
+                        Ok(())
+                    } else {
+                        Err(LinkError::new(
+                            ErrorKind::ProtocolProfileMismatch,
+                            "preset vendor rollback failed verification",
+                        ))
+                    }
+                })();
+                match result {
+                    Ok(()) => json!({"control": write.control, "restored": true}),
+                    Err(error) => json!({
+                        "control": write.control,
+                        "restored": false,
+                        "error": error_value(&error),
+                    }),
+                }
+            })
+            .collect(),
+    )
+}
+
+fn restore_preset_vendor_writes(
+    config: &Config,
+    applied: &[AppliedPresetVendorWrite],
+) -> Result<(), LinkError> {
+    let (device, node, inventory, catalog, session) = selected_xu_context(config, true)?;
+    let (entry, _) = resolve_firmware_profile(&device, &inventory, &catalog, &session)?;
+    let entry = entry.ok_or_else(|| {
+        LinkError::new(
+            ErrorKind::ProtocolProfileMismatch,
+            "no exact verified profile is available for preset rollback",
+        )
+    })?;
+    let first = applied.first().ok_or_else(|| {
+        LinkError::new(
+            ErrorKind::InvalidInvocation,
+            "preset vendor rollback is empty",
+        )
+    })?;
+    let control = entry.profile.control(&first.control).ok_or_else(|| {
+        LinkError::new(
+            ErrorKind::CapabilityUnsupported,
+            "preset vendor rollback control is unavailable",
+        )
+    })?;
+    #[cfg(feature = "daemon")]
+    let daemon_stream =
+        control.stream_requirement == StreamRequirement::Open && daemon_owns_stream(config)?;
+    #[cfg(not(feature = "daemon"))]
+    let daemon_stream = false;
+    #[cfg(feature = "gstreamer")]
+    let _media_lease = if control.stream_requirement == StreamRequirement::Open && !daemon_stream {
+        Some(link_media::MediaLease::acquire(
+            &device.identity.stable_id(),
+            "preset.vendor-rollback",
+        )?)
+    } else {
+        None
+    };
+    let previous_video = (control.stream_requirement == StreamRequirement::Open && !daemon_stream)
+        .then(|| {
+            link_v4l2::video::VideoDevice::open_read(&node.path)?
+                .status()
+                .map(|status| status.tuple)
+        })
+        .transpose()?;
+    let mut video_restore = PresetVideoRestore {
+        node: node.path.clone(),
+        previous: previous_video,
+    };
+    let stream = prepare_xu_stream(
+        control,
+        &node.path,
+        config.timeout.get(),
+        false,
+        daemon_stream,
+    )?;
+    let result = restore_preset_vendor_in_session(&session, entry, &inventory, applied);
+    drop(stream);
+    video_restore.restore()?;
+    let failed = result
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item["restored"] != json!(true)));
+    if failed {
+        Err(LinkError::new(
+            ErrorKind::PartialSuccess,
+            "one or more preset vendor controls could not be restored",
+        )
+        .with_detail("rollback", result))
+    } else {
+        Ok(())
+    }
+}
+
 fn rollback_preset(
+    config: &Config,
     prepared: &PreparedPresetApply,
     report: &mut TransactionReport,
     applied: &AppliedPresetState,
@@ -4915,14 +6211,19 @@ fn rollback_preset(
                 );
             }
             TransactionStepKind::StandardControls => {
-                let applied = applied
+                let node = applied
+                    .controls_node
+                    .as_deref()
+                    .expect("applied controls have a node")
+                    .to_owned();
+                let applied_controls = applied
                     .controls
                     .as_ref()
                     .expect("rollback order requires controls");
                 let sequence = plan_step(&prepared.plan, kind)
                     .expect("applied controls have plan")
                     .sequence;
-                let result = restore_control_report(&prepared.node.path, applied);
+                let result = restore_control_report(&node, applied_controls);
                 record_rollback_result(
                     report,
                     sequence,
@@ -4948,21 +6249,42 @@ fn rollback_preset(
                 }
             }
             TransactionStepKind::VideoFormat => {
-                let applied = applied
+                let node = applied
+                    .video_node
+                    .as_deref()
+                    .expect("applied video has a node")
+                    .to_owned();
+                let applied_video = applied
                     .video
                     .as_ref()
                     .expect("rollback order requires video");
                 let sequence = plan_step(&prepared.plan, kind)
                     .expect("applied video has plan")
                     .sequence;
-                let result = link_v4l2::video::VideoDevice::open_write(&prepared.node.path)
-                    .and_then(|mut device| device.set_format(&applied.previous))
+                let result = link_v4l2::video::VideoDevice::open_write(&node)
+                    .and_then(|mut device| device.set_format(&applied_video.previous))
                     .map(|_| ());
                 record_rollback_result(report, sequence, "video-format", result, &mut first_error);
             }
             TransactionStepKind::ControlPrerequisite => unreachable!(
                 "control prerequisites are restored with their standard control transaction"
             ),
+            TransactionStepKind::VendorControls => {
+                let sequence = plan_step(&prepared.plan, kind)
+                    .expect("applied vendor controls have a plan")
+                    .sequence;
+                let result = restore_preset_vendor_writes(config, &applied.vendor);
+                record_rollback_result(
+                    report,
+                    sequence,
+                    "vendor-controls",
+                    result,
+                    &mut first_error,
+                );
+            }
+            TransactionStepKind::CameraRestart => {
+                unreachable!("restart-dependent preset state is intentionally irreversible")
+            }
         }
         if let Err(error) = write_transaction_journal(journals, report) {
             first_error.get_or_insert(error);
@@ -4975,6 +6297,7 @@ fn rollback_order(applied: &AppliedPresetState) -> Vec<TransactionStepKind> {
     rollback_order_for(
         applied.video.is_some(),
         applied.controls.is_some(),
+        !applied.vendor.is_empty(),
         applied.gain.is_some(),
         applied.mute.is_some(),
     )
@@ -4983,14 +6306,16 @@ fn rollback_order(applied: &AppliedPresetState) -> Vec<TransactionStepKind> {
 fn rollback_order_for(
     video: bool,
     controls: bool,
+    vendor: bool,
     gain: bool,
     mute: bool,
 ) -> Vec<TransactionStepKind> {
     [
+        (video, TransactionStepKind::VideoFormat),
         (mute, TransactionStepKind::AudioMute),
         (gain, TransactionStepKind::AudioGain),
         (controls, TransactionStepKind::StandardControls),
-        (video, TransactionStepKind::VideoFormat),
+        (vendor, TransactionStepKind::VendorControls),
     ]
     .into_iter()
     .filter_map(|(applied, kind)| applied.then_some(kind))
@@ -6849,8 +8174,8 @@ const CAMERA_NATIVE_CAPABILITIES: &[(&str, &str)] = &[
         "camera pickup modes have not been mapped for this profile",
     ),
     (
-        "mode.normal",
-        "the normal-mode transition has not been mapped for this profile",
+        "camera.mode",
+        "the mutually exclusive camera mode has not been mapped for this profile",
     ),
     (
         "mode.whiteboard",
@@ -7964,7 +9289,7 @@ fn run_auto_framing(
 fn run_mode(config: &Config, command: ModeCommand, dry_run: bool) -> Result<(), LinkError> {
     match command {
         ModeCommand::Normal => {
-            run_native_vendor_set(config, "mode.normal", "mode.normal", "on", dry_run)
+            run_native_vendor_set(config, "mode.normal", "camera.mode", "normal", dry_run)
         }
         ModeCommand::Whiteboard { command } => match command {
             ToggleStatusCommand::Status => {
@@ -12002,14 +13327,14 @@ mod tests {
             rollback_failures: Vec::new(),
             journal: None,
         };
-        let order = rollback_order_for(true, true, true, true);
+        let order = rollback_order_for(true, true, false, true, true);
         assert_eq!(
             order,
             [
+                TransactionStepKind::VideoFormat,
                 TransactionStepKind::AudioMute,
                 TransactionStepKind::AudioGain,
                 TransactionStepKind::StandardControls,
-                TransactionStepKind::VideoFormat,
             ]
         );
 

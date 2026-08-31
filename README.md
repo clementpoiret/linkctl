@@ -16,7 +16,8 @@ The standard 1.0 build includes:
 - Standard image controls, exact video-format negotiation, snapshots, H.264/MJPEG capture, and Matroska/MP4
   recording.
 - PipeWire and ALSA audio discovery, gain/mute, capture, metering, monitoring, pickup modes, and optional A/V muxing.
-- Transactional local presets with validation, dry runs, readback, rollback, and recovery journals.
+- Semantic camera presets with an immutable `builtin:default`, local user definitions, dry runs, readback, rollback,
+  and recovery journals.
 - A per-user daemon that owns one camera stream and serves controls, snapshots, recording, metrics, and named raw
   virtual-output branches.
 - Verified Link 2C Pro controls for Auto Framing, HDR, mirror/flip, exposure, Whiteboard, DeskView, gestures,
@@ -92,7 +93,8 @@ linkctl --device link2cpro-… --dry-run image exposure manual --shutter 1/120 -
 linkctl --device link2cpro-… image exposure manual --shutter 1/120 --iso 400
 linkctl --device link2cpro-… auto-framing on
 linkctl --device link2cpro-… record start meeting.mkv --video-copy --audio camera
-linkctl --device link2cpro-… preset save interview --include video,image,zoom,audio
+linkctl --device link2cpro-… --dry-run preset apply builtin:default
+linkctl --device link2cpro-… preset save interview --include camera,image,zoom,audio,gestures
 linkctl --device link2cpro-… --dry-run preset apply interview
 ```
 

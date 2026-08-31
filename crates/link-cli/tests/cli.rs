@@ -259,7 +259,7 @@ fn preset_help_and_local_store_commands_are_hardware_free() {
     let input = directory.path().join("input.toml");
     fs::write(
         &input,
-        r#"schema_version = 1
+        r#"schema_version = 2
 name = "local-test"
 
 [requirements]
@@ -287,7 +287,33 @@ brightness = 50
 
     let listed = run_with_xdg(&["--format", "json", "preset", "list"], directory.path());
     let value: Value = serde_json::from_slice(&listed.stdout).expect("JSON list");
-    assert_eq!(value["result"].as_array().unwrap().len(), 1);
+    let listed = value["result"].as_array().unwrap();
+    assert_eq!(listed.len(), 2);
+    assert!(
+        listed
+            .iter()
+            .any(|preset| preset["id"] == "builtin:default")
+    );
+
+    let shown = run_with_xdg(
+        &["--format", "json", "preset", "show", "builtin:default"],
+        directory.path(),
+    );
+    assert!(shown.status.success());
+    let value: Value = serde_json::from_slice(&shown.stdout).expect("JSON built-in");
+    assert_eq!(value["result"]["schema_version"], 2);
+    assert_eq!(value["result"]["name"], "default");
+
+    let builtin_export = run_with_xdg(
+        &["preset", "export", "builtin:default", "-"],
+        directory.path(),
+    );
+    assert!(builtin_export.status.success());
+    assert!(String::from_utf8_lossy(&builtin_export.stdout).contains("name = \"default\""));
+
+    let builtin_delete = run_with_xdg(&["preset", "delete", "builtin:default"], directory.path());
+    assert_eq!(builtin_delete.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&builtin_delete.stderr).contains("immutable"));
 
     let exported = run_with_xdg(&["preset", "export", "local-test", "-"], directory.path());
     assert!(exported.status.success());
@@ -301,7 +327,30 @@ brightness = 50
     assert!(deleted.status.success());
     let listed = run_with_xdg(&["--format", "json", "preset", "list"], directory.path());
     let value: Value = serde_json::from_slice(&listed.stdout).expect("JSON list");
-    assert!(value["result"].as_array().unwrap().is_empty());
+    assert_eq!(value["result"].as_array().unwrap().len(), 1);
+    assert_eq!(value["result"][0]["id"], "builtin:default");
+
+    let legacy = directory.path().join("legacy.toml");
+    fs::write(
+        &legacy,
+        r#"schema_version = 1
+name = "legacy"
+
+[requirements]
+model = "Insta360 Link 2C Pro"
+fallback = "fail"
+
+[standard_controls]
+brightness = 50
+"#,
+    )
+    .expect("write legacy fixture");
+    let rejected = run_with_xdg(
+        &["preset", "import", &legacy.to_string_lossy()],
+        directory.path(),
+    );
+    assert_eq!(rejected.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("unsupported preset schema"));
 }
 
 #[test]
@@ -309,8 +358,8 @@ fn published_json_schemas_are_valid_documents() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     for relative in [
         "docs/schemas/envelope-v1.json",
-        "docs/schemas/preset-v1.json",
-        "docs/schemas/transaction-v1.json",
+        "docs/schemas/preset-v2.json",
+        "docs/schemas/transaction-v2.json",
         "docs/schemas/vendor-profile-v1.json",
         "docs/schemas/xu-snapshot-v1.json",
     ] {

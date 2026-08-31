@@ -20,7 +20,7 @@ Status terms:
 | Standard controls | Live V4L2 enumeration; generic get/set/reset/watch; semantic brightness, contrast, saturation, sharpness, gain, backlight compensation, white balance, focus, anti-flicker, and digital zoom |
 | Video and images | Exact advertised tuple enumeration/negotiation, statistics, JPEG/PNG/raw snapshots, binary stdout capture, H.264/MJPEG pass-through, Matroska/MP4 recording, segmentation, rolling limits, and disk guards |
 | Audio | PipeWire/ALSA discovery, camera association, hardware/host gain and mute, WAV/FLAC/raw capture, metering, monitoring, resampling, optional gate/compressor/limiter, and optional A/V recording |
-| Presets | Strict local schema-1 presets for video, image, zoom, standard controls, and audio; selective capture, validation, dry-run plans, readback, reverse rollback, and recovery journals |
+| Presets | Strict schema-2 semantic camera/image/gesture/pickup state and raw V4L2 snapshots; immutable `builtin:default`; local user presets; selective capture, dry-run plans, live defaults, readback, reverse rollback, and recovery journals |
 | Local service | Owner-only protocol-1 IPC, one selected camera per daemon, serialized controls, one shared source, snapshots, background recording, graph/metrics, and bounded hotplug recovery |
 | Research reads | Runtime XU inventory, exact safe reads, repeated snapshots, volatility-aware diffs/watch, profile decoding, redacted evidence, and bounded handle/pipeline recovery |
 | Firmware maintenance | Read-only version/status, normal-to-U-Disk watch, validation and no-clobber staging of an explicit official file, synchronization, post-copy hashing, private logs, and manual reconnect verification |

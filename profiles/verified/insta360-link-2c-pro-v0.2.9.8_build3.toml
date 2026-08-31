@@ -95,6 +95,33 @@ rollback = "readback"
 trace_ids = ["auto-framing-1-ef427d7ab977"]
 safety = "normal"
 
+# Semantic alias for the mutually exclusive selector-2 camera modes. Keeping the
+# complete enum in one control lets preset transactions move directly between
+# Auto Framing, Whiteboard, DeskView, and normal without contradictory toggles.
+[[controls]]
+name = "camera.mode"
+entity_guid = "faf1672d-b71b-4793-8c91-7b1c9b7f95f8"
+selector = 2
+length = 61
+readable = true
+writable = true
+codec = "enum"
+offset = 0
+width = 1
+values = { normal = 0, auto-framing = 7, whiteboard = 4, deskview = 6 }
+tail_policy = { kind = "fixed", hex = "00000000000000000000000000000000000000000000000000000000000000000000000000ffffffff1a0e00001a0e000000003efe00000000000000" }
+verification = "readback"
+stream_requirement = "open"
+stream_format = { fourcc = "MJPG", width = 1920, height = 1080, fps_numerator = 30, fps_denominator = 1 }
+stream_warmup_delay_ms = 1000
+write_prelude = "get-length-twice"
+minimum_write_interval_ms = 250
+verification_delay_ms = 2250
+persistence = "volatile"
+rollback = "readback"
+trace_ids = ["auto-framing-1-ef427d7ab977", "misc-options-1-whiteboard-413fd7c986b9", "misc-options-1-deskview-d134801e2564"]
+safety = "normal"
+
 [[controls]]
 name = "auto-framing.smart-composition"
 entity_guid = "faf1672d-b71b-4793-8c91-7b1c9b7f95f8"
@@ -251,6 +278,34 @@ verification_delay_ms = 250
 persistence = "reconnect"
 rollback = "none"
 trace_ids = ["misc-options-1-portrait-a6aed99817d0"]
+safety = "normal"
+
+# Combined restart transition used by preset transactions. The product rejects
+# native portrait together with low-resolution compatibility, so the verified
+# states are represented as one mutually exclusive enum and one USB restart.
+[[controls]]
+name = "camera.usb-mode"
+entity_guid = "faf1672d-b71b-4793-8c91-7b1c9b7f95f8"
+selector = 27
+length = 2
+readable = true
+writable = true
+codec = "enum"
+offset = 0
+width = 2
+byte_order = "little"
+values = { standard = 0, portrait = 32, low-resolution = 8192 }
+read_modify_write = true
+write_mask = 8224
+tail_policy = { kind = "preserve" }
+verification = "reenumeration"
+stream_requirement = "restart"
+write_prelude = "get-length-twice"
+minimum_write_interval_ms = 250
+verification_delay_ms = 250
+persistence = "reconnect"
+rollback = "none"
+trace_ids = ["misc-options-1-low-res-1932784a0919", "misc-options-1-portrait-a6aed99817d0"]
 safety = "normal"
 
 [[controls]]

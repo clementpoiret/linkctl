@@ -1632,6 +1632,32 @@ firmware = ["v1.2.3"]
         on_readback[0] = 0x00;
         assert_eq!(decode_control(control, &on_readback).unwrap(), json!("off"));
 
+        let camera_mode = required_control(&matched.profile, "camera.mode");
+        for (raw, semantic) in [
+            (0, "normal"),
+            (7, "auto-framing"),
+            (4, "whiteboard"),
+            (6, "deskview"),
+        ] {
+            let mut payload = vec![0; 61];
+            payload[0] = raw;
+            assert_eq!(
+                decode_control(camera_mode, &payload).unwrap(),
+                json!(semantic)
+            );
+        }
+
+        let usb_mode = required_control(&matched.profile, "camera.usb-mode");
+        assert_eq!(usb_mode.write_mask, Some(0x2020));
+        assert_eq!(
+            encode_control(usb_mode, "low-resolution", Some(&[0xd5, 0x01])).unwrap(),
+            [0xd5, 0x21]
+        );
+        assert_eq!(
+            encode_control(usb_mode, "standard", Some(&[0xf5, 0x21])).unwrap(),
+            [0xd5, 0x01]
+        );
+
         let smart_composition =
             required_control(&matched.profile, "auto-framing.smart-composition");
         assert!(smart_composition.writable);

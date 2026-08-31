@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/clementpoiret/linkctl/schemas/preset-v2.json",
+  "title": "linkctl semantic preset v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "name", "requirements"],
+  "properties": {
+    "schema_version": {"const": 2},
+    "name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,128}$",
+      "not": {"enum": [".", ".."]}
+    },
+    "description": {"type": ["string", "null"]},
+    "requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model"],
+      "properties": {
+        "model": {"type": "string", "minLength": 1},
+        "usb_vid": {"type": ["integer", "null"], "minimum": 0, "maximum": 65535},
+        "usb_pid": {"type": ["integer", "null"], "minimum": 0, "maximum": 65535},
+        "fallback": {"const": "fail"}
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow_restart": {"type": "boolean", "default": false}
+      }
+    },
+    "video": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["fourcc", "width", "height", "fps_num", "fps_den"],
+      "properties": {
+        "fourcc": {"type": "string", "minLength": 4, "maxLength": 4},
+        "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1},
+        "fps_num": {"type": "integer", "minimum": 1},
+        "fps_den": {"type": "integer", "minimum": 1}
+      }
+    },
+    "camera": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "mode": {"enum": ["normal", "auto-framing", "whiteboard", "deskview", null]},
+        "framing_style": {"enum": ["head", "half-body", null]},
+        "deskview_vertical_correction": {"type": ["integer", "null"], "minimum": 10, "maximum": 80},
+        "compatibility": {"enum": ["standard", "low-resolution", null]},
+        "native_portrait": {"type": ["boolean", "null"]}
+      },
+      "allOf": [
+        {
+          "if": {"required": ["framing_style"], "properties": {"framing_style": {"type": "string"}}},
+          "then": {"required": ["mode"], "properties": {"mode": {"const": "auto-framing"}}}
+        },
+        {
+          "if": {"required": ["deskview_vertical_correction"], "properties": {"deskview_vertical_correction": {"type": "integer"}}},
+          "then": {"required": ["mode"], "properties": {"mode": {"const": "deskview"}}}
+        },
+        {
+          "not": {
+            "required": ["compatibility", "native_portrait"],
+            "properties": {
+              "compatibility": {"const": "low-resolution"},
+              "native_portrait": {"const": true}
+            }
+          }
+        }
+      ]
+    },
+    "image": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "hdr": {"type": ["boolean", "null"]},
+        "mirror": {"type": ["boolean", "null"]},
+        "flip": {"type": ["boolean", "null"]},
+        "exposure": {"enum": ["auto", "manual", null]},
+        "iso": {"type": ["integer", "null"], "minimum": 100, "maximum": 3200},
+        "shutter": {"type": ["string", "null"], "minLength": 1},
+        "exposure_compensation_ev": {"type": ["number", "null"], "minimum": -3.0, "maximum": 3.0, "multipleOf": 0.1},
+        "white_balance": {"enum": ["auto", "manual", null]},
+        "white_balance_kelvin": {"type": ["integer", "null"], "minimum": 2000, "maximum": 10000},
+        "focus": {"enum": ["auto", "manual", null]},
+        "focus_position": {"type": ["number", "null"], "minimum": 0.0, "maximum": 1.0},
+        "zoom": {"type": ["number", "null"], "minimum": 1.0, "maximum": 4.0},
+        "anti_flicker": {"enum": ["disabled", "50hz", "60hz", null]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"exposure": {"const": "auto"}}, "required": ["exposure"]},
+          "then": {"properties": {"iso": {"type": "null"}, "shutter": {"type": "null"}}}
+        },
+        {
+          "if": {"properties": {"exposure": {"const": "manual"}}, "required": ["exposure"]},
+          "then": {"anyOf": [{"required": ["iso"], "properties": {"iso": {"type": "integer"}}}, {"required": ["shutter"], "properties": {"shutter": {"type": "string"}}}]}
+        },
+        {
+          "if": {"anyOf": [{"required": ["iso"], "properties": {"iso": {"type": "integer"}}}, {"required": ["shutter"], "properties": {"shutter": {"type": "string"}}}]},
+          "then": {"required": ["exposure"], "properties": {"exposure": {"const": "manual"}}}
+        },
+        {
+          "if": {"properties": {"white_balance": {"const": "auto"}}, "required": ["white_balance"]},
+          "then": {"properties": {"white_balance_kelvin": {"type": "null"}}}
+        },
+        {
+          "if": {"properties": {"white_balance": {"const": "manual"}}, "required": ["white_balance"]},
+          "then": {"required": ["white_balance_kelvin"], "properties": {"white_balance_kelvin": {"type": "integer"}}}
+        },
+        {
+          "if": {"required": ["white_balance_kelvin"], "properties": {"white_balance_kelvin": {"type": "integer"}}},
+          "then": {"required": ["white_balance"], "properties": {"white_balance": {"const": "manual"}}}
+        },
+        {
+          "if": {"properties": {"focus": {"const": "auto"}}, "required": ["focus"]},
+          "then": {"properties": {"focus_position": {"type": "null"}}}
+        },
+        {
+          "if": {"properties": {"focus": {"const": "manual"}}, "required": ["focus"]},
+          "then": {"required": ["focus_position"], "properties": {"focus_position": {"type": "number"}}}
+        },
+        {
+          "if": {"required": ["focus_position"], "properties": {"focus_position": {"type": "number"}}},
+          "then": {"required": ["focus"], "properties": {"focus": {"const": "manual"}}}
+        }
+      ]
+    },
+    "standard_controls": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z0-9_]+$"},
+      "additionalProperties": {"oneOf": [{"type": "integer"}, {"const": "default"}]}
+    },
+    "audio": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "pickup_mode": {"enum": ["standard", "wide", "focus", "original", null]},
+        "source": {"type": ["string", "null"], "minLength": 1},
+        "layer": {"enum": ["hardware", "host", null]},
+        "gain_percent": {"type": ["number", "null"], "minimum": 0, "maximum": 100},
+        "mute": {"type": ["boolean", "null"]}
+      },
+      "allOf": [
+        {
+          "if": {"anyOf": [{"required": ["gain_percent"], "properties": {"gain_percent": {"type": "number"}}}, {"required": ["mute"], "properties": {"mute": {"type": "boolean"}}}]},
+          "then": {"required": ["source", "layer"], "properties": {"source": {"type": "string"}, "layer": {"enum": ["hardware", "host"]}}}
+        },
+        {
+          "if": {"anyOf": [{"required": ["source"], "properties": {"source": {"type": "string"}}}, {"required": ["layer"], "properties": {"layer": {"enum": ["hardware", "host"]}}}]},
+          "then": {"anyOf": [{"required": ["gain_percent"], "properties": {"gain_percent": {"type": "number"}}}, {"required": ["mute"], "properties": {"mute": {"type": "boolean"}}}]}
+        }
+      ]
+    },
+    "gestures": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "palm": {"type": ["boolean", "null"]},
+        "v_sign": {"type": ["boolean", "null"]},
+        "l_sign": {"type": ["boolean", "null"]}
+      }
+    }
+  },
+  "anyOf": [
+    {"required": ["video"], "properties": {"video": {"type": "object"}}},
+    {"required": ["camera"], "properties": {"camera": {"type": "object"}}},
+    {"required": ["image"], "properties": {"image": {"type": "object"}}},
+    {"properties": {"standard_controls": {"minProperties": 1}}},
+    {"required": ["audio"], "properties": {"audio": {"type": "object"}}},
+    {"required": ["gestures"], "properties": {"gestures": {"type": "object"}}}
+  ]
+}

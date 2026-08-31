@@ -1,0 +1,42 @@
+schema_version = 2
+name = "default"
+description = "Safe linkctl baseline; not a vendor factory reset"
+
+[requirements]
+model = "Insta360 Link 2C Pro"
+usb_vid = 11802
+usb_pid = 19461
+fallback = "fail"
+
+[policy]
+allow_restart = true
+
+[camera]
+mode = "normal"
+compatibility = "standard"
+native_portrait = false
+
+[image]
+hdr = true
+mirror = false
+flip = false
+exposure = "auto"
+exposure_compensation_ev = 0.0
+white_balance = "auto"
+focus = "auto"
+zoom = 1.0
+
+[standard_controls]
+brightness = "default"
+contrast = "default"
+saturation = "default"
+hue = "default"
+sharpness = "default"
+
+[audio]
+pickup_mode = "standard"
+
+[gestures]
+palm = true
+v_sign = true
+l_sign = true

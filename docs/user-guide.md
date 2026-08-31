@@ -169,6 +169,11 @@ Common environment equivalents include `LINKCTL_DEVICE`, `LINKCTL_DAEMON`, `LINK
 `LINKCTL_PROFILE_DIR`, `LINKCTL_LOG_LEVEL`, and `LINKCTL_NO_COLOR`. Nested settings use double underscores, for
 example `LINKCTL_SAFETY__REDACT_SERIALS=false`. See [Configuration and presets](presets.md) for camera-state presets.
 
+Preset documents use semantic schema 2. `linkctl preset list` includes the immutable `builtin:default` baseline and
+local files from `~/.config/linkctl/presets/`; inspect its complete transaction with
+`linkctl --dry-run preset apply builtin:default` before applying it. Export the built-in to obtain an editable user
+template.
+
 ## Output and exit codes
 
 Human output is intended for terminals. `--format json` emits one schema-1 envelope; `--format jsonl` emits one

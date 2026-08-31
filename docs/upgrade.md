@@ -7,9 +7,9 @@
 3. Back up `$XDG_CONFIG_HOME/linkctl` and `$XDG_STATE_HOME/linkctl` (or their default locations).
 4. Stop the user daemon: `systemctl --user stop linkd.service`.
 
-Pre-release binaries have no compatibility guarantee. The 1.0 release freezes machine-output schema 1, preset schema
-1, transaction schema 1, vendor-profile schema 1, XU snapshot schema 1, and daemon protocol 1. No data migration is
-required for valid schema-1 files, but strict parsers will continue to reject unknown or malformed fields.
+Pre-release binaries have no compatibility guarantee. Machine-output, vendor-profile, XU snapshot, and daemon protocol
+remain at version 1; semantic presets and preset-transaction reports use schema 2. Schema-1 preset files are rejected
+and must be recreated or edited to the schema-2 fields documented in [Configuration and presets](presets.md).
 
 ## Native package upgrade
 
@@ -59,6 +59,8 @@ linkctl daemon status
   cannot grant write authority.
 - The daemon protocol and machine-output schemas are version 1. A newer incompatible protocol is rejected rather than
   guessed.
+- Preset schema 2 adds semantic camera-native, image, gesture, and pickup-mode state plus the immutable
+  `builtin:default`; transaction schema 2 adds vendor-control and camera-restart stages.
 - Source revision appears in probes, doctor output, diagnostic bundles, and daemon status when embedded by the build.
 
 ## Rollback

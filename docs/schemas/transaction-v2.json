@@ -1,18 +1,18 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/clementpoiret/linkctl/schemas/transaction-v1.json",
-  "title": "linkctl preset transaction report v1",
+  "$id": "https://github.com/clementpoiret/linkctl/schemas/transaction-v2.json",
+  "title": "linkctl preset transaction report v2",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "plan", "outcome", "steps", "rollback_attempted", "rollback_failures", "journal"],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"const": 2},
     "plan": {
       "type": "object",
       "additionalProperties": false,
       "required": ["schema_version", "transaction_id", "preset", "stable_id", "dry_run", "restart_required", "stream_restart_required", "rollback_feasible", "steps"],
       "properties": {
-        "schema_version": {"const": 1},
+        "schema_version": {"const": 2},
         "transaction_id": {"type": "string", "pattern": "^tx-"},
         "preset": {"type": "string"},
         "stable_id": {"type": "string"},
@@ -28,7 +28,7 @@
             "required": ["sequence", "kind", "backend", "previous", "requested", "reversible", "no_op"],
             "properties": {
               "sequence": {"type": "integer", "minimum": 0},
-              "kind": {"enum": ["video-format", "control-prerequisite", "standard-controls", "audio-gain", "audio-mute"]},
+              "kind": {"enum": ["camera-restart", "vendor-controls", "video-format", "control-prerequisite", "standard-controls", "audio-gain", "audio-mute"]},
               "backend": {"type": "string"},
               "previous": true,
               "requested": true,
