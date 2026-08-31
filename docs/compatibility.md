@@ -22,6 +22,11 @@ The source requires Rust 1.97.1. The runtime GStreamer floor is 1.26; core, base
 of the package contract. PipeWire is preferred in a desktop session and ALSA remains available as a direct fallback.
 `linkd` is usable without systemd when started directly.
 
+The Nix wrappers replace `GST_PLUGIN_SYSTEM_PATH_1_0` with the complete plugin set from the pinned nixpkgs input for
+both `linkctl` and `linkd`; this prevents a newer desktop session from mixing incompatible plugins into the packaged
+runtime. `linkctl doctor` checks `v4l2src`, `capsfilter`, and `fakesink`, which are the elements required by temporary
+camera streams used for camera-native status reads.
+
 AArch64 receives the same locked build, parser/ABI tests, and package checks as x86-64. Camera hardware validation is
 currently performed on x86-64; this distinction is not a claim of AArch64 camera validation.
 

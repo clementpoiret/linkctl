@@ -61,6 +61,10 @@ the camera or run `sudo udevadm trigger --subsystem-match=video4linux` if it is 
 `nix build .#linkctl` builds the package but does not register its udev rule or systemd user unit. See the
 [NixOS installation instructions](docs/user-guide.md#nixos) for a complete flake example.
 
+The Nix package gives both binaries one complete, pinned GStreamer system-plugin path instead of inheriting a
+potentially incompatible desktop path. `linkctl doctor` verifies the core elements required for camera-native status
+reads before reporting the installation healthy.
+
 Normal operation is unprivileged. Administrative access is needed only to install or remove a native package, activate
 a NixOS system configuration, and refresh udev rules when required. The daemon is optional:
 

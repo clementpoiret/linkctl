@@ -30,6 +30,17 @@ use serde::{Deserialize, Serialize};
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 static SIGNAL_HANDLER: OnceLock<Result<(), String>> = OnceLock::new();
 
+/// GStreamer elements required for temporary camera streams used by control reads.
+pub const PROBE_STREAM_REQUIRED_ELEMENTS: &[&str] = &["v4l2src", "capsfilter", "fakesink"];
+
+/// Read-only inspection of one GStreamer runtime and its required elements.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct GStreamerRuntimeReport {
+    pub version: String,
+    pub required_elements: Vec<String>,
+    pub missing_elements: Vec<String>,
+}
+
 /// Encoded snapshot output.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -318,7 +329,8 @@ pub fn initialize(required_elements: &[&str]) -> Result<(), LinkError> {
     Ok(())
 }
 
-fn initialize_elements(required_elements: &[&str]) -> Result<(), LinkError> {
+/// Inspect GStreamer without installing process signal handlers or starting a pipeline.
+pub fn inspect_runtime(required_elements: &[&str]) -> Result<GStreamerRuntimeReport, LinkError> {
     gst::init().map_err(|error| {
         LinkError::new(
             ErrorKind::MediaPipelineFailure,
@@ -326,16 +338,39 @@ fn initialize_elements(required_elements: &[&str]) -> Result<(), LinkError> {
         )
         .with_detail("reason", error.to_string())
     })?;
-    for element in required_elements {
-        if gst::ElementFactory::find(element).is_none() {
-            return Err(LinkError::new(
-                ErrorKind::CapabilityUnsupported,
-                "required GStreamer element is unavailable",
-            )
-            .with_detail("element", *element));
-        }
+    Ok(GStreamerRuntimeReport {
+        version: gst::version_string().to_string(),
+        required_elements: required_elements
+            .iter()
+            .map(|element| (*element).to_owned())
+            .collect(),
+        missing_elements: missing_elements(required_elements, |element| {
+            gst::ElementFactory::find(element).is_some()
+        }),
+    })
+}
+
+fn initialize_elements(required_elements: &[&str]) -> Result<(), LinkError> {
+    let report = inspect_runtime(required_elements)?;
+    if let Some(element) = report.missing_elements.first() {
+        return Err(LinkError::new(
+            ErrorKind::CapabilityUnsupported,
+            "required GStreamer element is unavailable",
+        )
+        .with_detail("element", element.clone()));
     }
     Ok(())
+}
+
+fn missing_elements<F>(required_elements: &[&str], mut available: F) -> Vec<String>
+where
+    F: FnMut(&str) -> bool,
+{
+    required_elements
+        .iter()
+        .filter(|element| !available(element))
+        .map(|element| (*element).to_owned())
+        .collect()
 }
 
 /// A minimal no-output camera stream held in PLAYING for a bounded XU operation.
@@ -355,7 +390,7 @@ impl ProbeStream {
         timeout: Duration,
         format: Option<&VideoTuple>,
     ) -> Result<Self, LinkError> {
-        initialize(&["v4l2src", "capsfilter", "fakesink"])?;
+        initialize(PROBE_STREAM_REQUIRED_ELEMENTS)?;
         let pipeline = gst::Pipeline::new();
         let source = gst::ElementFactory::make("v4l2src")
             .property("device", node)
@@ -2959,7 +2994,8 @@ mod tests {
     use super::{
         AvSyncSeries, AvSyncState, SharedCrop, SharedFit, SharedOutput, SharedOutputTelemetry,
         SharedRotation, audio_processing_elements, crop_pixels, finish_av_sync, make,
-        parse_byte_size, set_enum_property, shared_output_metrics, validate_shared_contracts,
+        missing_elements, parse_byte_size, set_enum_property, shared_output_metrics,
+        validate_shared_contracts,
     };
     use link_core::{media::VideoTuple, probe::Rational};
 
@@ -2981,6 +3017,14 @@ mod tests {
             }),
             vec!["audiodynamic", "audioamplify"]
         );
+    }
+
+    #[test]
+    fn runtime_inspection_reports_each_missing_required_element() {
+        let missing = missing_elements(&["v4l2src", "capsfilter", "fakesink"], |element| {
+            element == "v4l2src"
+        });
+        assert_eq!(missing, ["capsfilter", "fakesink"]);
     }
 
     #[test]

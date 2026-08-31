@@ -5,6 +5,15 @@ this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-08-31
+
+### Fixed
+
+- Included GStreamer's core elements in the Nix package, isolated both wrappers from incompatible desktop system-plugin
+  paths, and made `doctor` report missing elements required by camera-native status reads.
+- Read aggregate camera-native capability values in compatible passive and open-stream batches so restart-dependent
+  controls no longer abort `caps all`.
+
 ## [1.0.0] - 2026-08-30
 
 ### Added
@@ -41,5 +50,6 @@ this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Virtual-camera graph production exists, but OBS and WebRTC compatibility is unsupported with the tested v4l2loopback
   0.15.4 queue behavior.
 
+[1.0.1]: https://github.com/clementpoiret/linkctl/releases/tag/v1.0.1
 [1.0.0]: https://github.com/clementpoiret/linkctl/releases/tag/v1.0.0
-[unreleased]: https://github.com/clementpoiret/linkctl/compare/v1.0.0...HEAD
+[unreleased]: https://github.com/clementpoiret/linkctl/compare/v1.0.1...HEAD

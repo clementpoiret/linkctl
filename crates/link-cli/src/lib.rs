@@ -8352,31 +8352,17 @@ fn native_capabilities_for(
     let session = link_uvc_xu::XuSession::open_read(Path::new(&node.path))?;
     let (profile, firmware) = resolve_firmware_profile(device, &inventory, &catalog, &session)?;
     drop(session);
-    let read_requirement = profile
-        .map(|entry| profile_read_stream_requirement(&entry.profile, current_names))
-        .transpose()?
-        .flatten();
-    #[cfg(feature = "daemon")]
-    let daemon_stream =
-        read_requirement == Some(StreamRequirement::Open) && daemon_owns_stream(config)?;
-    #[cfg(not(feature = "daemon"))]
-    let daemon_stream = false;
-    #[cfg(feature = "gstreamer")]
-    let _media_lease = if read_requirement == Some(StreamRequirement::Open) && !daemon_stream {
-        Some(link_media::MediaLease::acquire(
-            &device.identity.stable_id(),
-            "native-status-read",
-        )?)
-    } else {
-        None
-    };
-    let _read_stream = read_requirement
-        .map(|requirement| {
-            prepare_xu_read_stream(requirement, &node.path, config.timeout.get(), daemon_stream)
-        })
-        .transpose()?
-        .flatten();
-    let session = link_uvc_xu::XuSession::open_read(Path::new(&node.path))?;
+    let mut vendor_currents = BTreeMap::new();
+    if let Some(entry) = profile {
+        for batch in profile_read_batches(&entry.profile, current_names) {
+            match read_profile_current_batch(config, device, &node.path, &inventory, entry, &batch)
+            {
+                Ok(currents) => vendor_currents.extend(currents),
+                Err(_) if current_names.is_none() => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
     for (name, evidence) in CAMERA_NATIVE_CAPABILITIES {
         if capabilities
             .get(*name)
@@ -8404,39 +8390,6 @@ fn native_capabilities_for(
                             unit: "setting".into(),
                         }),
                         _ => None,
-                    };
-                    let current = if control.readable
-                        && current_names.is_none_or(|names| names.contains(name))
-                    {
-                        let read_current = |control_name: &str| {
-                            let mapped = entry.profile.control(control_name)?;
-                            link_uvc_xu::read_value(
-                                &session,
-                                &inventory,
-                                Some(&mapped.entity_guid),
-                                None,
-                                mapped.selector,
-                                Some(mapped.length),
-                                Some(&entry.profile),
-                            )
-                            .ok()
-                            .and_then(|value| value.decoded.get(control_name).cloned())
-                        };
-                        if *name == "image.exposure" {
-                            exposure_status_value(
-                                read_current("image.exposure"),
-                                read_current("image.exposure.iso"),
-                                read_current("image.exposure.shutter-denominator"),
-                            )
-                        } else if *name == "image.exposure_compensation" {
-                            exposure_compensation_status_value(read_current(name))
-                        } else if *name == "mode.deskview.vertical-correction" {
-                            deskview_vertical_correction_status_value(read_current(name))
-                        } else {
-                            read_current(name)
-                        }
-                    } else {
-                        None
                     };
                     CapabilityRecord {
                         state: if read_verified {
@@ -8472,7 +8425,7 @@ fn native_capabilities_for(
                         }),
                         range,
                         values: profile_values(control),
-                        current,
+                        current: vendor_currents.get(*name).cloned(),
                         control: None,
                     }
                 },
@@ -8488,26 +8441,128 @@ fn native_capabilities_for(
     })
 }
 
-fn profile_read_stream_requirement(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProfileReadState {
+    Passive,
+    Open,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProfileReadBatch {
+    state: ProfileReadState,
+    names: Vec<String>,
+}
+
+fn profile_read_batches(
     profile: &link_profiles::VendorProfile,
     current_names: Option<&[&str]>,
-) -> Result<Option<StreamRequirement>, LinkError> {
-    let mut requirement = None;
-    for control in profile.controls.iter().filter(|control| {
-        control.readable
-            && current_names.is_none_or(|names| names.contains(&control.name.as_str()))
-            && control.stream_requirement != StreamRequirement::Either
-    }) {
-        if requirement.is_some_and(|current| current != control.stream_requirement) {
-            return Err(LinkError::new(
-                ErrorKind::ProtocolProfileMismatch,
-                "requested vendor reads require incompatible stream states",
-            )
-            .with_detail("control", control.name.clone()));
+) -> Vec<ProfileReadBatch> {
+    let mut passive = Vec::new();
+    let mut open = Vec::new();
+    for (name, _) in CAMERA_NATIVE_CAPABILITIES {
+        if !current_names.is_none_or(|names| names.contains(name)) {
+            continue;
         }
-        requirement = Some(control.stream_requirement);
+        let Some(control) = profile.control(name).filter(|control| control.readable) else {
+            continue;
+        };
+        if control.stream_requirement == StreamRequirement::Open {
+            open.push((*name).to_owned());
+        } else {
+            passive.push((*name).to_owned());
+        }
     }
-    Ok(requirement)
+    let mut batches = Vec::new();
+    if !passive.is_empty() {
+        batches.push(ProfileReadBatch {
+            state: ProfileReadState::Passive,
+            names: passive,
+        });
+    }
+    if !open.is_empty() {
+        batches.push(ProfileReadBatch {
+            state: ProfileReadState::Open,
+            names: open,
+        });
+    }
+    batches
+}
+
+fn read_profile_current_batch(
+    config: &Config,
+    _device: &DiscoveredDevice,
+    node: &str,
+    inventory: &link_uvc_xu::DescriptorInventory,
+    entry: &link_profiles::CatalogProfile,
+    batch: &ProfileReadBatch,
+) -> Result<BTreeMap<String, Value>, LinkError> {
+    let open = batch.state == ProfileReadState::Open;
+    #[cfg(feature = "daemon")]
+    let daemon_stream = open && daemon_owns_stream(config)?;
+    #[cfg(not(feature = "daemon"))]
+    let daemon_stream = false;
+    #[cfg(feature = "gstreamer")]
+    let _media_lease = if open && !daemon_stream {
+        Some(link_media::MediaLease::acquire(
+            &_device.identity.stable_id(),
+            "native-status-read",
+        )?)
+    } else {
+        None
+    };
+    let _read_stream = prepare_xu_read_stream(
+        if open {
+            StreamRequirement::Open
+        } else {
+            StreamRequirement::Either
+        },
+        node,
+        config.timeout.get(),
+        daemon_stream,
+    )?;
+    let session = link_uvc_xu::XuSession::open_read(Path::new(node))?;
+    let mut currents = BTreeMap::new();
+    for name in &batch.names {
+        if let Some(current) = read_profile_current(entry, inventory, &session, name) {
+            currents.insert(name.clone(), current);
+        }
+    }
+    Ok(currents)
+}
+
+fn read_profile_current(
+    entry: &link_profiles::CatalogProfile,
+    inventory: &link_uvc_xu::DescriptorInventory,
+    session: &link_uvc_xu::XuSession,
+    name: &str,
+) -> Option<Value> {
+    let read_current = |control_name: &str| {
+        let mapped = entry.profile.control(control_name)?;
+        link_uvc_xu::read_value(
+            session,
+            inventory,
+            Some(&mapped.entity_guid),
+            None,
+            mapped.selector,
+            Some(mapped.length),
+            Some(&entry.profile),
+        )
+        .ok()
+        .and_then(|value| value.decoded.get(control_name).cloned())
+    };
+    if name == "image.exposure" {
+        exposure_status_value(
+            read_current("image.exposure"),
+            read_current("image.exposure.iso"),
+            read_current("image.exposure.shutter-denominator"),
+        )
+    } else if name == "image.exposure_compensation" {
+        exposure_compensation_status_value(read_current(name))
+    } else if name == "mode.deskview.vertical-correction" {
+        deskview_vertical_correction_status_value(read_current(name))
+    } else {
+        read_current(name)
+    }
 }
 
 #[cfg(feature = "gstreamer")]
@@ -12281,6 +12336,40 @@ fn run_doctor(config: &Config, bundle: Option<&Path>) -> Result<(), LinkError> {
         message: "configuration loaded and validated".into(),
         details: json!({"schema_version": config.schema_version}),
     }];
+    #[cfg(feature = "gstreamer")]
+    checks.push(
+        match link_media::inspect_runtime(link_media::PROBE_STREAM_REQUIRED_ELEMENTS) {
+            Ok(report) => {
+                let available = report.missing_elements.is_empty();
+                DoctorCheck {
+                    name: "gstreamer".into(),
+                    status: if available {
+                        DoctorStatus::Pass
+                    } else {
+                        DoctorStatus::Fail
+                    },
+                    message: if available {
+                        "required GStreamer elements are available".into()
+                    } else {
+                        format!(
+                            "missing required GStreamer element(s): {}",
+                            report.missing_elements.join(", ")
+                        )
+                    },
+                    details: serde_json::to_value(report).unwrap_or_default(),
+                }
+            }
+            Err(error) => DoctorCheck {
+                name: "gstreamer".into(),
+                status: DoctorStatus::Fail,
+                message: error.message().into(),
+                details: json!({
+                    "code": error.kind().code(),
+                    "details": error.details(),
+                }),
+            },
+        },
+    );
     let catalog = ProfileCatalog::load(config.profile_dir.as_deref())?;
     let devices = if config.default_device.is_some() {
         selected_devices(config, true)?
@@ -12989,16 +13078,17 @@ fn parse_format_hint(value: &str) -> OutputFormat {
 mod tests {
     use clap::{CommandFactory, Parser};
     use link_core::preset::PresetRequirements;
-    use link_profiles::{ProfileCatalog, StreamRequirement};
+    use link_profiles::ProfileCatalog;
     use serde_json::{Value, json};
 
     use super::{
-        Cli, ErrorKind, LinkError, TRANSACTION_SCHEMA_VERSION, TransactionOutcome, TransactionPlan,
-        TransactionReport, TransactionStepKind, TransactionStepPlan, TransactionStepReport,
-        TransactionStepStatus, anti_flicker_status_value, command_requires_normal_camera,
+        Cli, ErrorKind, LinkError, ProfileReadState, TRANSACTION_SCHEMA_VERSION,
+        TransactionOutcome, TransactionPlan, TransactionReport, TransactionStepKind,
+        TransactionStepPlan, TransactionStepReport, TransactionStepStatus,
+        anti_flicker_status_value, command_requires_normal_camera,
         exposure_compensation_status_value, exposure_compensation_to_vendor_hundredths,
         exposure_status_value, focus_status_value, parse_fps, parse_size, parse_zoom_factor,
-        profile_read_stream_requirement, record_rollback_result, redact_firmware_volume_paths,
+        profile_read_batches, record_rollback_result, redact_firmware_volume_paths,
         rollback_order_for, semantic_readback_matches, shutter_to_v4l2,
         shutter_to_vendor_denominator, validate_preset_requirements, validate_vendor_iso,
         white_balance_status_value,
@@ -13228,7 +13318,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_framing_status_selects_the_profile_open_stream_requirement() {
+    fn profile_status_reads_are_grouped_by_compatible_stream_state() {
         let catalog = ProfileCatalog::load(None).unwrap();
         let profile = &catalog
             .profiles()
@@ -13236,47 +13326,25 @@ mod tests {
             .find(|entry| entry.profile.profile_id == "insta360-link-2c-pro-v0.2.9.8-build3")
             .unwrap()
             .profile;
-        assert_eq!(
-            profile_read_stream_requirement(
-                profile,
-                Some(&["auto-framing.enabled", "auto-framing.style"]),
-            )
-            .unwrap(),
-            Some(StreamRequirement::Open)
+        let aggregate = profile_read_batches(profile, None);
+        assert_eq!(aggregate.len(), 2);
+        assert_eq!(aggregate[0].state, ProfileReadState::Passive);
+        assert!(aggregate[0].names.contains(&"mode.compatibility".into()));
+        assert!(aggregate[0].names.contains(&"portrait.native".into()));
+        assert_eq!(aggregate[1].state, ProfileReadState::Open);
+        assert!(aggregate[1].names.contains(&"auto-framing.enabled".into()));
+        assert!(aggregate[1].names.contains(&"image.hdr".into()));
+
+        let auto_framing = profile_read_batches(
+            profile,
+            Some(&["auto-framing.enabled", "auto-framing.style"]),
         );
-        assert_eq!(
-            profile_read_stream_requirement(profile, Some(&["firmware.version"])).unwrap(),
-            None
-        );
-        assert_eq!(
-            profile_read_stream_requirement(profile, Some(&["image.hdr"])).unwrap(),
-            Some(StreamRequirement::Open)
-        );
-        assert_eq!(
-            profile_read_stream_requirement(profile, Some(&["image.exposure"])).unwrap(),
-            Some(StreamRequirement::Open)
-        );
-        assert_eq!(
-            profile_read_stream_requirement(profile, Some(&["image.exposure_compensation"]),)
-                .unwrap(),
-            Some(StreamRequirement::Open)
-        );
-        assert_eq!(
-            profile_read_stream_requirement(
-                profile,
-                Some(&["mode.deskview", "mode.deskview.vertical-correction"]),
-            )
-            .unwrap(),
-            Some(StreamRequirement::Open)
-        );
-        assert_eq!(
-            profile_read_stream_requirement(profile, Some(&["mode.compatibility"])).unwrap(),
-            Some(StreamRequirement::Restart)
-        );
-        assert_eq!(
-            profile_read_stream_requirement(profile, Some(&["portrait.native"])).unwrap(),
-            Some(StreamRequirement::Restart)
-        );
+        assert_eq!(auto_framing.len(), 1);
+        assert_eq!(auto_framing[0].state, ProfileReadState::Open);
+
+        let compatibility = profile_read_batches(profile, Some(&["mode.compatibility"]));
+        assert_eq!(compatibility.len(), 1);
+        assert_eq!(compatibility[0].state, ProfileReadState::Passive);
     }
 
     #[test]

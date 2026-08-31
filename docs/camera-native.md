@@ -1,6 +1,6 @@
 # Link 2C Pro camera-native capabilities
 
-`linkctl caps all` is the authoritative runtime view of the fixed-mount camera's semantic capabilities. Each item reports its state, backend, evidence, readable/writable flags, profile identity and checksum when applicable, live value when readable, persistence, and stream/restart dependency. The command also works in U-disk mode, where it reports camera controls as unavailable without trying to open a video node.
+`linkctl caps all` is the authoritative runtime view of the fixed-mount camera's semantic capabilities. Each item reports its state, backend, evidence, readable/writable flags, profile identity and checksum when applicable, live value when readable, persistence, and stream/restart dependency. Aggregate current values are read in separate passive and open-stream batches; failure to prepare one batch leaves those current values null without discarding the capability map. The command also works in U-disk mode, where it reports camera controls as unavailable without trying to open a video node.
 
 The following outcomes are established for the recorded landscape descriptor `1d0fa40a5787adc39223e26a5262f3d5e1ba0421e17442487157905cbd2a066c`, Low resolution descriptor `f8ec69e87774e9831bef86c498625373ba5fbb9d22bbc558185d88fb271a1bc2`, native portrait descriptor `7a60c8dd0f5e3d83e6c1c1fb245d96e02cc4ea6fdea8c10cc5a2e3b1094a2cc8`, and USB revision `0200`:
 

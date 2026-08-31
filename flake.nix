@@ -29,6 +29,7 @@
           };
           rustTarget = pkgs.stdenv.hostPlatform.rust.rustcTarget;
           gstPlugins = with pkgs.gst_all_1; [
+            gstreamer.out
             gst-plugins-base
             gst-plugins-good
             gst-plugins-bad
@@ -80,9 +81,28 @@
             postFixup = ''
               pluginPath=${pkgs.lib.makeSearchPath "lib/gstreamer-1.0" gstPlugins}
               wrapProgram "$out/bin/linkctl" \
-                --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : "$pluginPath"
+                --set GST_PLUGIN_SYSTEM_PATH_1_0 "$pluginPath"
               wrapProgram "$out/bin/linkd" \
-                --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : "$pluginPath"
+                --set GST_PLUGIN_SYSTEM_PATH_1_0 "$pluginPath"
+            '';
+
+            doInstallCheck = true;
+            installCheckPhase = ''
+              runHook preInstallCheck
+              export HOME="$TMPDIR/home"
+              export XDG_CONFIG_HOME="$TMPDIR/config"
+              export XDG_STATE_HOME="$TMPDIR/state"
+              export XDG_RUNTIME_DIR="$TMPDIR/runtime"
+              mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_RUNTIME_DIR"
+              doctorOutput=$(
+                GST_PLUGIN_SYSTEM_PATH_1_0=/incompatible-desktop-gstreamer \
+                  "$out/bin/linkctl" --log-level off doctor || true
+              )
+              if [[ "$doctorOutput" != *$'Pass\tgstreamer\t'* ]]; then
+                echo "$doctorOutput" >&2
+                exit 1
+              fi
+              runHook postInstallCheck
             '';
 
             meta = with pkgs.lib; {

@@ -62,6 +62,10 @@ linkctl device list
 disconnecting and reconnecting the camera has the same effect. `nix build .#linkctl` remains useful for building or
 inspecting the package, but it does not install these system integrations.
 
+Both Nix-wrapped binaries use the complete GStreamer system-plugin path from the pinned package set, even when the
+desktop session exports a different GStreamer version. The `gstreamer` line in `linkctl doctor` verifies the source,
+caps-filter, and sink elements used by temporary camera-native status streams.
+
 Normal commands run as the logged-in user. Do not use `sudo linkctl`; doing so changes XDG paths, daemon ownership,
 and device permissions. If discovery succeeds but a camera node is inaccessible, follow [Device permissions](permissions.md).
 
@@ -258,7 +262,8 @@ required, and use the physical shutter for a physical privacy boundary.
 
 If a command fails:
 
-1. Run `linkctl doctor` and inspect its permission, configuration, profile, daemon, and recovery-journal checks.
+1. Run `linkctl doctor` and inspect its GStreamer, permission, configuration, profile, daemon, and recovery-journal
+   checks.
 2. Use `--daemon never` to distinguish a direct-device issue from daemon ownership, or `--daemon always` to require
    the service path.
 3. Close other camera applications when the device is busy; `linkctl` deliberately avoids opening a second physical
