@@ -6,7 +6,8 @@ below are examples for the release operator; packaging or validation does not ru
 ## Preconditions
 
 - The working revision contains only the intended release change, has no conflicts, and has a signed description.
-- `CHANGELOG.md` has a real release date and no unresolved release blocker.
+- `CHANGELOG.md` has a real release date, Debian changelog timestamps are strictly descending, and no release blocker
+  remains unresolved.
 - Required CI, native package, reproducibility, security, and hardware-validation results are attached to the revision.
 - The version in `Cargo.toml`, package recipes, and the requested tag is identical.
 - No firmware, private trace, camera serial, credential, proprietary model, or captured media is present.
